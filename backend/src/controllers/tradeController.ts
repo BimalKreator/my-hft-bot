@@ -183,8 +183,9 @@ export async function closePosition(
     let exitPrice = 0;
     let fees = 0;
     let grossPnl: number;
+    let exactNetPnl: number | undefined;
     try {
-      const closedList = await getClosedPnl(apiKey, apiSecret, 'linear', symbol, 20);
+      const closedList = await getClosedPnl(apiKey, apiSecret, 'linear', symbol, 50);
       const nowMs = Date.now();
       const recent = closedList.filter((row) => {
         const ut = parseInt(row.updatedTime, 10) || 0;
@@ -193,7 +194,7 @@ export async function closePosition(
       if (recent.length > 0) {
         const sumClosedPnl = recent.reduce((s, r) => s + (parseFloat(r.closedPnl) || 0), 0);
         const exactTotalFee = recent.reduce((s, r) => s + (parseFloat(r.openFee) || 0) + (parseFloat(r.closeFee) || 0), 0);
-        const exactNetPnl = sumClosedPnl + fundingReceived;
+        exactNetPnl = sumClosedPnl + fundingReceived;
         fees = exactTotalFee;
         grossPnl = exactNetPnl + exactTotalFee - fundingReceived;
         const avgExit = recent[0].avgExitPrice;
@@ -248,6 +249,7 @@ export async function closePosition(
       grossPnl,
       funding: fundingReceived,
       fees,
+      ...(exactNetPnl != null && { netPnl: exactNetPnl }),
       source: 'manual',
       exitReason,
     });

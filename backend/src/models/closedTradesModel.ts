@@ -10,6 +10,8 @@ export interface InsertClosedTradeParams {
   grossPnl: number;
   funding?: number;
   fees?: number;
+  /** When provided (e.g. from Bybit getClosedPnl + funding), stored directly in net_pnl with no further calculation. */
+  netPnl?: number;
   source?: 'manual' | 'auto';
   exitReason?: string;
 }
@@ -40,7 +42,9 @@ export function netPnl(grossPnl: number, funding: number, fees: number): number 
 export async function insertClosedTrade(params: InsertClosedTradeParams): Promise<number> {
   const funding = params.funding ?? 0;
   const fees = params.fees ?? 0;
-  const net = netPnl(params.grossPnl, funding, fees);
+  const net = params.netPnl != null && !Number.isNaN(params.netPnl)
+    ? params.netPnl
+    : netPnl(params.grossPnl, funding, fees);
   // Store crypto prices with at least 6 decimal places; never round to 2
   const entryPrice = Number(Number(params.entryPrice).toFixed(6));
   const exitPrice = Number(Number(params.exitPrice).toFixed(6));
