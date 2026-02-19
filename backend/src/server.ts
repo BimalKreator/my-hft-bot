@@ -7,6 +7,7 @@ import { startMonitoring } from './services/autoBotService.js';
 import { startDailySnapshotCron } from './services/cronService.js';
 import authRoutes from './routes/authRoutes.js';
 import banRoutes from './routes/banRoutes.js';
+import dashboardRoutes from './routes/dashboardRoutes.js';
 import exchangeRoutes from './routes/exchangeRoutes.js';
 import scannerRoutes from './routes/scannerRoutes.js';
 import settingsRoutes from './routes/settingsRoutes.js';
@@ -27,6 +28,7 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
 app.use('/auth', authRoutes);
 app.use('/api/ban', banRoutes);
+app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/exchange', exchangeRoutes);
 app.use('/api/scanner', scannerRoutes);
 app.use('/api/settings', settingsRoutes);

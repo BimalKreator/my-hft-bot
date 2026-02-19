@@ -222,7 +222,8 @@ export async function placeMarketOrder(
 }
 
 /**
- * Place a limit order on linear perpetual (GTC). Returns orderId and orderLinkId.
+ * Place a limit order on linear perpetual. Returns orderId and orderLinkId.
+ * @param timeInForce - 'GTC' (Good Till Cancelled), 'IOC' (Immediate Or Cancel; fill up to limit, cancel rest), or 'PostOnly'.
  */
 export async function placeLimitOrder(
   apiKey: string,
@@ -230,23 +231,31 @@ export async function placeLimitOrder(
   symbol: string,
   side: 'Buy' | 'Sell',
   qty: string,
-  price: string
+  price: string,
+  timeInForce: 'GTC' | 'PostOnly' | 'IOC' = 'GTC'
 ): Promise<{ orderId: string; orderLinkId: string }> {
   const client = getClient(apiKey, apiSecret);
-  const res = await client.submitOrder({
-    category: 'linear',
-    symbol,
-    side,
-    orderType: 'Limit',
-    qty,
-    price,
-    timeInForce: 'GTC',
-  });
-  if (res.retCode !== 0) {
-    throw new Error(res.retMsg ?? 'Bybit place limit order failed');
+  try {
+    const res = await client.submitOrder({
+      category: 'linear',
+      symbol,
+      side,
+      orderType: 'Limit',
+      qty,
+      price,
+      timeInForce,
+    });
+    console.log('[DEBUG SUCCESS] Order Placed:', res);
+    if (res.retCode !== 0) {
+      throw new Error(res.retMsg ?? 'Bybit place limit order failed');
+    }
+    const result = res.result as { orderId: string; orderLinkId: string };
+    return { orderId: result.orderId, orderLinkId: result.orderLinkId };
+  } catch (error: unknown) {
+    const err = error as { message?: string; response?: unknown };
+    console.error('[DEBUG ERROR] Order Failed:', err?.message ?? error, err?.response ?? '');
+    throw error;
   }
-  const result = res.result as { orderId: string; orderLinkId: string };
-  return { orderId: result.orderId, orderLinkId: result.orderLinkId };
 }
 
 /**

@@ -64,17 +64,27 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
   const yesterday = yesterdayIST();
   const today = todayIST();
 
-  const snapshotResult = await query<{ closing_balance: string }>(
+  /** Opening Balance: use today's snapshot opening_balance if present, else yesterday's closing_balance (start of today). */
+  const todaySnapshotResult = await query<{ opening_balance: string }>(
+    `SELECT opening_balance FROM daily_snapshots
+     WHERE user_id = $1 AND date = $2`,
+    [userId, today]
+  );
+  const yesterdaySnapshotResult = await query<{ closing_balance: string }>(
     `SELECT closing_balance FROM daily_snapshots
      WHERE user_id = $1 AND date = $2`,
     [userId, yesterday]
   );
-  const openingRow = snapshotResult.rows[0];
-  /** If no snapshot for yesterday, strictly use hardcoded opening balance. */
+
+  const todayRow = todaySnapshotResult.rows[0];
+  const yesterdayRow = yesterdaySnapshotResult.rows[0];
   const OPENING_BALANCE_DEFAULT = 3400;
-  const opening = openingRow
-    ? parseFloat(openingRow.closing_balance) || 0
-    : OPENING_BALANCE_DEFAULT;
+  /** Opening of today: today's snapshot opening, else yesterday's closing, else hardcoded $3400. */
+  const opening = todayRow
+    ? parseFloat(todayRow.opening_balance) || 0
+    : yesterdayRow
+      ? parseFloat(yesterdayRow.closing_balance) || 0
+      : OPENING_BALANCE_DEFAULT;
 
   const txResult = await query<{ type: string; sum: string }>(
     `SELECT type, COALESCE(SUM(amount), 0)::text AS sum
@@ -93,7 +103,23 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
   }
 
   const todayProfit = capital - opening - depositsToday + withdrawalsToday;
-  const todayProfitPct = opening > 0 ? (todayProfit / opening) * 100 : 0;
+  /** Today's ROI % = ((Current Balance - Opening Balance) / Opening Balance) * 100; avoid division by zero. */
+  const todayProfitPct = opening > 0 ? ((capital - opening) / opening) * 100 : 0;
+
+  /** Ensure today's snapshot exists so the next fetch has opening_balance for the current date. */
+  if (!todayRow) {
+    const totalProfitToday = todayProfit;
+    const profitPercentToday = opening > 0 ? (totalProfitToday / opening) * 100 : null;
+    await query(
+      `INSERT INTO daily_snapshots (user_id, date, opening_balance, closing_balance, total_profit, profit_percent)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (user_id, date) DO UPDATE SET
+         closing_balance = EXCLUDED.closing_balance,
+         total_profit = EXCLUDED.total_profit,
+         profit_percent = EXCLUDED.profit_percent`,
+      [userId, today, opening, capital, totalProfitToday, profitPercentToday]
+    );
+  }
 
   const roiResult = await query<{ profit_percent: string | null }>(
     `SELECT profit_percent FROM daily_snapshots WHERE user_id = $1 AND profit_percent IS NOT NULL`,

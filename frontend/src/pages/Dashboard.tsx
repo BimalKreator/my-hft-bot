@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import ActivePositions from '../components/ActivePositions';
 import ClosedTradesTable from '../components/ClosedTradesTable';
+import NextToTrade from '../components/NextToTrade';
 import { TRANSACTIONS_UPDATED_EVENT } from './Settings';
 
 const TOKEN_KEY = 'hft_token';
@@ -150,6 +151,10 @@ export default function Dashboard() {
                   ≈ ₹{(stats.capital * inrRate).toLocaleString('en-IN')}
                 </span>
               </div>
+              <div>
+                <p className="text-xs text-gray-500">Opening Balance (today)</p>
+                <p className="font-medium text-white">{formatUsd(stats.opening)}</p>
+              </div>
               <div className="flex flex-wrap gap-4 text-sm">
                 <div>
                   <p className="text-gray-500">Margin Used</p>
@@ -205,6 +210,8 @@ export default function Dashboard() {
       </div>
 
       <ActivePositions />
+
+      <NextToTrade />
 
       <ClosedTradesTable />
     </div>

@@ -21,7 +21,45 @@ import { FundingScanner } from './scannerService.js';
 import { insertClosedTrade } from '../models/closedTradesModel.js';
 
 const INTERVAL_MS = 5_000;
+const ENTRY_FAST_INTERVAL_MS = 500; // when countdown <= 15s (zero latency in final seconds)
 const EXIT_INTERVAL_MS = 1_000;
+
+/** Prefetch window: fetch wallet when countdown 20–60s; never call getWalletBalance when countdown <= 15. */
+const WALLET_PREFETCH_MIN_SEC = 20;
+const WALLET_PREFETCH_MAX_SEC = 60;
+const CRITICAL_COUNTDOWN_SEC = 15; // below this: use cache only, no DB/heavy API except orderbook + place order
+
+/** Cached wallet when countdown was 20–60s; used in entry window so we never call getWalletBalance when countdown <= 15. */
+const walletCacheByUser = new Map<number, { totalEquity: number; totalAvailableBalance: number }>();
+
+/** Entry prep cache: populated when 20s <= countdown <= 60s; used in critical path (countdown <= 15) so no DB/heavy API. */
+interface EntryPrepCandidate {
+  symbol: string;
+  nextFundingTime: string;
+  fundingRate: number;
+  side: 'Buy' | 'Sell';
+  safeLeverage: number;
+  qtyStep: number;
+  minOrderQty: number;
+  maxOrderQty: number;
+}
+interface EntryPrep {
+  settings: { orderBookDepth?: number; capitalPercent?: number; maxTrades: number; entryTimeSec: number };
+  apiKey: string;
+  apiSecret: string;
+  totalWalletBalance: number;
+  tradeMargin: number;
+  cachedAvailableMargin: number;
+  positionsCount: number;
+  maxTrades: number;
+  candidates: EntryPrepCandidate[];
+}
+const entryPrepCacheByUser = new Map<number, EntryPrep>();
+/** Cached user IDs with auto entry enabled; used when countdown <= 15 to avoid DB. */
+let entryUserIdsCache: number[] = [];
+
+/** When TEST_MODE=true, mock funding time 30s ahead so countdown decrements each tick. */
+let mockFundingTimeMs: number | null = null;
 
 /** Exact funding rate snapshot 1–2s before settlement, keyed by symbol. */
 const lockedFundingRates: Record<string, number> = {};
@@ -124,28 +162,63 @@ async function saveClosedTradeAfterExit(
 }
 
 export function startMonitoring(): void {
-  setInterval(runTick, INTERVAL_MS);
   setInterval(monitorExits, EXIT_INTERVAL_MS);
+  scheduleNextTick();
 }
 
-async function runTick(): Promise<void> {
-  try {
-    const userIds = await getUsersWithAutoEntryEnabled();
-    if (userIds.length === 0) return;
+/** Run entry tick; when countdown <= 15s schedule next in 500ms, else 5s. */
+function scheduleNextTick(): void {
+  runTick()
+    .then((minCountdownSec) => {
+      const delay =
+        minCountdownSec >= 0 && minCountdownSec <= CRITICAL_COUNTDOWN_SEC ? ENTRY_FAST_INTERVAL_MS : INTERVAL_MS;
+      setTimeout(scheduleNextTick, delay);
+    })
+    .catch((err) => {
+      console.error('[autoBot] tick error:', err);
+      setTimeout(scheduleNextTick, INTERVAL_MS);
+    });
+}
 
-    const marketData = await fundingScanner.getFundingData();
-    const now = Date.now();
+/** Returns minimum countdown in seconds across market data, or -1 if none. */
+async function runTick(): Promise<number> {
+  let marketData = await fundingScanner.getFundingData();
+  const now = Date.now();
 
-    for (const userId of userIds) {
-      try {
-        await processUser(userId, marketData, now);
-      } catch (err) {
-        console.error(`[autoBot] User ${userId} error:`, err);
-      }
+  if (process.env.TEST_MODE === 'true') {
+    if (mockFundingTimeMs === null || now >= mockFundingTimeMs) {
+      mockFundingTimeMs = now + 30_000;
+      console.log('[TEST MODE] Mocking funding time to 30s for testing.');
     }
-  } catch (err) {
-    console.error('[autoBot] tick error:', err);
+    const countdownMs = Math.max(0, mockFundingTimeMs - now);
+    const nextFundingTime = String(mockFundingTimeMs);
+    marketData = marketData.map((m) => ({ ...m, nextFundingTime, countdownMs }));
   }
+
+  const minCountdownSec =
+    marketData.length > 0
+      ? Math.min(...marketData.map((m) => Math.floor(m.countdownMs / 1000)))
+      : -1;
+
+  const isCritical = minCountdownSec >= 0 && minCountdownSec <= CRITICAL_COUNTDOWN_SEC;
+  const userIds = isCritical && entryUserIdsCache.length > 0
+    ? entryUserIdsCache
+    : await getUsersWithAutoEntryEnabled();
+  if (!isCritical) entryUserIdsCache = userIds;
+  if (userIds.length === 0) return minCountdownSec;
+
+  for (const userId of userIds) {
+    try {
+      if (isCritical) {
+        await processUserCritical(userId, marketData, now);
+      } else {
+        await processUser(userId, marketData, now);
+      }
+    } catch (err) {
+      console.error(`[autoBot] User ${userId} error:`, err);
+    }
+  }
+  return minCountdownSec;
 }
 
 async function monitorExits(): Promise<void> {
@@ -283,6 +356,70 @@ async function monitorExits(): Promise<void> {
   }
 }
 
+/**
+ * Critical path when countdown <= 15s: no DB, no getWalletBalance, no getInstrumentDetails, no getPositionList.
+ * Only getOrderBookDepth + placeLimitOrder. Uses entryPrepCacheByUser and walletCacheByUser.
+ */
+async function processUserCritical(
+  userId: number,
+  marketData: Array<{ symbol: string; fundingRate: number; nextFundingTime: string; countdownMs: number }>,
+  now: number
+): Promise<void> {
+  const prep = entryPrepCacheByUser.get(userId);
+  if (!prep || prep.candidates.length === 0) return;
+  if (prep.positionsCount >= prep.maxTrades) return;
+
+  const entryTimeSec = prep.settings.entryTimeSec ?? 300;
+  const marketBySymbol = new Map(marketData.map((m) => [m.symbol, m]));
+
+  for (const c of prep.candidates) {
+    const token = marketBySymbol.get(c.symbol);
+    if (!token) continue;
+
+    const countdownSec = Math.floor(token.countdownMs / 1000);
+    const inWindow = countdownSec <= entryTimeSec && countdownSec > entryTimeSec - 10;
+    if (!inWindow) continue;
+
+    const procKey = processedKey(userId, c.symbol, c.nextFundingTime);
+    if (processedTokens.has(procKey)) continue;
+    const cycleKey = entryCycleKey(userId, c.symbol, c.nextFundingTime);
+    if (enteredThisCycle.has(cycleKey)) continue;
+
+    let entryPrice: number;
+    try {
+      const ob = await getOrderBookDepth(prep.apiKey, prep.apiSecret, c.symbol, prep.settings.orderBookDepth ?? 2);
+      entryPrice = c.side === 'Buy' ? ob.askPrice : ob.bidPrice;
+      if (!Number.isFinite(entryPrice) || entryPrice <= 0) continue;
+    } catch {
+      continue;
+    }
+
+    const finalMargin = Math.min(prep.tradeMargin, prep.cachedAvailableMargin);
+    const rawQty = (finalMargin * c.safeLeverage) / entryPrice;
+    if (rawQty <= 0) continue;
+
+    const step = c.qtyStep;
+    const minQty = c.minOrderQty;
+    const maxQty = c.maxOrderQty;
+    const stepStr = step.toString();
+    const stepDecimals = stepStr.includes('.') ? stepStr.split('.')[1]!.length : 0;
+    let finalQty = parseFloat((Math.floor(rawQty / step) * step).toFixed(stepDecimals));
+    if (finalQty > maxQty) finalQty = parseFloat((Math.floor(maxQty / step) * step).toFixed(stepDecimals));
+    if (finalQty < minQty) continue;
+
+    processedTokens.add(procKey);
+    enteredThisCycle.add(cycleKey);
+
+    try {
+      await placeLimitOrder(prep.apiKey, prep.apiSecret, c.symbol, c.side, String(finalQty), String(entryPrice), 'IOC');
+      const nextFundingMs = parseInt(c.nextFundingTime, 10) || 0;
+      positionFundingTime.set(positionKey(userId, c.symbol, c.side), nextFundingMs);
+    } catch {
+      /* ignore; IOC fills what it can and cancels rest */
+    }
+  }
+}
+
 async function processUser(
   userId: number,
   marketData: Array<{
@@ -296,33 +433,34 @@ async function processUser(
   }>,
   now: number
 ): Promise<void> {
+  const globalMinCountdownSec =
+    marketData.length > 0 ? Math.min(...marketData.map((m) => Math.floor(m.countdownMs / 1000))) : 9999;
+  const debugSkip = globalMinCountdownSec <= 15;
+
   const settings = await getSettings(userId);
-  if (!settings.autoEntryEnabled) return;
+  if (!settings.autoEntryEnabled) {
+    if (debugSkip) console.log('[DEBUG] Trade Skipped Reason: autoEntryEnabled is false');
+    return;
+  }
 
   const keys = await getExchangeKeys(userId, 'Bybit');
-  if (!keys) return;
+  if (!keys) {
+    if (debugSkip) console.log('[DEBUG] Trade Skipped Reason: No Bybit exchange keys');
+    return;
+  }
   const apiKey = decrypt(keys.api_key);
   const apiSecret = decrypt(keys.api_secret);
 
   const positions = await getPositionList(apiKey, apiSecret, { category: 'linear', settleCoin: 'USDT' });
   const maxTrades = settings.maxTrades ?? 1;
-  if (positions.length >= maxTrades) return;
-
-  // Total equity (UNIFIED) for fixed capital sizing and logging
-  let totalWalletBalance = 0;
-  let tradeMargin = 0;
-  try {
-    const wallet = await getWalletBalance(apiKey, apiSecret);
-    totalWalletBalance = parseFloat(wallet.totalEquity) || 0;
-    tradeMargin = totalWalletBalance * ((settings.capitalPercent ?? 0) / 100);
-  } catch (e) {
-    console.error('[autoBot] getWalletBalance failed:', e);
+  if (positions.length >= maxTrades) {
+    if (debugSkip) console.log('[DEBUG] Trade Skipped Reason: Max concurrent positions reached', 'positions:', positions.length, 'maxTrades:', maxTrades);
     return;
   }
 
   // Auto Exit is handled by monitorExits (1s loop) with reduce-only orders and unified logging.
 
-  // Auto Entry: filter by min funding rate, exclude banned tokens, Smart Sort, then top N by max_concurrent_trades
+  // Auto Entry: filter by min funding rate, exclude banned tokens, Smart Sort, then top N
   const minFundingRate = settings.minFundingRate ?? 0;
   let meetsMinFunding = marketData.filter(
     (token) => Math.abs(token.fundingRate) >= minFundingRate
@@ -331,6 +469,7 @@ async function processUser(
   meetsMinFunding = meetsMinFunding.filter((token) => !bannedSet.has(token.symbol));
   if (meetsMinFunding.length === 0) {
     const pct = (minFundingRate * 100).toFixed(4);
+    if (debugSkip) console.log('[DEBUG] Trade Skipped Reason: No tokens meet Min Funding or all banned', 'minFundingRate%:', pct);
     console.log(`[autoBot] No tokens meet Min Funding criteria (>= ${pct}%) or all are banned`);
     return;
   }
@@ -342,25 +481,129 @@ async function processUser(
     return Math.abs(b.fundingRate) - Math.abs(a.fundingRate);
   });
   const candidates = sorted.slice(0, maxTrades);
-  if (candidates.length === 0) return;
+  if (candidates.length === 0) {
+    if (debugSkip) console.log('[DEBUG] Trade Skipped Reason: No candidates after sort/slice');
+    return;
+  }
 
+  const entryTimeSec = settings.entryTimeSec ?? 300;
+  const minCountdownSec =
+    Math.min(...candidates.map((c) => Math.floor(c.countdownMs / 1000))) ?? 9999;
+  const inEntryWindow = minCountdownSec <= entryTimeSec && minCountdownSec > entryTimeSec - 10;
+  const inPrefetchWindow = minCountdownSec >= WALLET_PREFETCH_MIN_SEC && minCountdownSec <= WALLET_PREFETCH_MAX_SEC;
+
+  // Pre-fetch wallet when countdown 20–60s; never call getWalletBalance when countdown <= 15 (critical path uses cache only)
+  if (inPrefetchWindow) {
+    try {
+      const wallet = await getWalletBalance(apiKey, apiSecret);
+      walletCacheByUser.set(userId, {
+        totalEquity: parseFloat(wallet.totalEquity) || 0,
+        totalAvailableBalance: parseFloat(wallet.totalAvailableBalance) || 0,
+      });
+    } catch (e) {
+      console.error('[autoBot] getWalletBalance (prefetch) failed:', e);
+    }
+  }
+
+  let totalWalletBalance = 0;
+  let tradeMargin = 0;
+  let cachedAvailableMargin = 0;
+  if (inEntryWindow) {
+    const cache = walletCacheByUser.get(userId);
+    if (cache) {
+      totalWalletBalance = cache.totalEquity;
+      cachedAvailableMargin = cache.totalAvailableBalance;
+      tradeMargin = totalWalletBalance * ((settings.capitalPercent ?? 0) / 100);
+    } else {
+      if (debugSkip) console.log('[DEBUG] Trade Skipped Reason: Entry window but no wallet cache (critical path)');
+      console.warn('[autoBot] Entry window but no wallet cache; skip to avoid getWalletBalance in critical path');
+      return;
+    }
+  } else {
+    try {
+      const wallet = await getWalletBalance(apiKey, apiSecret);
+      totalWalletBalance = parseFloat(wallet.totalEquity) || 0;
+      cachedAvailableMargin = parseFloat(wallet.totalAvailableBalance) || 0;
+      tradeMargin = totalWalletBalance * ((settings.capitalPercent ?? 0) / 100);
+      walletCacheByUser.set(userId, { totalEquity: totalWalletBalance, totalAvailableBalance: cachedAvailableMargin });
+    } catch (e) {
+      if (debugSkip) console.log('[DEBUG] Trade Skipped Reason: getWalletBalance failed');
+      console.error('[autoBot] getWalletBalance failed:', e);
+      return;
+    }
+  }
+
+  const prepCandidates: EntryPrepCandidate[] = [];
   await Promise.all(
     candidates.map(async (topToken) => {
-      const activePositions = await getPositionList(apiKey, apiSecret, { category: 'linear', settleCoin: 'USDT' });
-      if (activePositions.length >= maxTrades) return;
-
-      const procKey = processedKey(userId, topToken.symbol, topToken.nextFundingTime);
-      if (processedTokens.has(procKey)) return;
+      if (inPrefetchWindow) {
+        const userLeverage = settings.leverage ?? 5;
+        let maxLeverageStr = '';
+        try {
+          const details = await getInstrumentDetails(topToken.symbol);
+          maxLeverageStr = details.maxLeverage || String(userLeverage);
+        } catch {
+          maxLeverageStr = String(userLeverage);
+        }
+        const safeLeverage = Math.min(userLeverage, parseFloat(maxLeverageStr) || userLeverage);
+        try {
+          await setLeverage(apiKey, apiSecret, topToken.symbol, safeLeverage);
+        } catch {
+          /* ignore */
+        }
+        const side: 'Buy' | 'Sell' = topToken.fundingRate < 0 ? 'Buy' : 'Sell';
+        let qtyStep = 0.1;
+        let minOrderQty = 0;
+        let maxOrderQty = 999999;
+        try {
+          const ls = await getInstrumentLotSize(apiKey, apiSecret, topToken.symbol);
+          qtyStep = parseFloat(ls.qtyStep) || 0.1;
+          minOrderQty = parseFloat(ls.minOrderQty) || 0;
+          maxOrderQty = parseFloat(ls.maxMktOrderQty || ls.maxOrderQty) || 999999;
+        } catch {
+          /* ignore */
+        }
+        prepCandidates.push({
+          symbol: topToken.symbol,
+          nextFundingTime: topToken.nextFundingTime,
+          fundingRate: topToken.fundingRate,
+          side,
+          safeLeverage,
+          qtyStep,
+          minOrderQty,
+          maxOrderQty,
+        });
+        return;
+      }
 
       const countdownSec = Math.floor(topToken.countdownMs / 1000);
+      const debugSkipToken = countdownSec <= 15;
+
+      const activePositions = await getPositionList(apiKey, apiSecret, { category: 'linear', settleCoin: 'USDT' });
+      if (activePositions.length >= maxTrades) {
+        if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: Active positions at max', 'symbol:', topToken.symbol, 'positions:', activePositions.length, 'maxTrades:', maxTrades);
+        return;
+      }
+
+      const procKey = processedKey(userId, topToken.symbol, topToken.nextFundingTime);
+      if (processedTokens.has(procKey)) {
+        if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: Already processed this cycle', 'symbol:', topToken.symbol);
+        return;
+      }
+
       console.log(`[autoBot] ${topToken.symbol} - Countdown: ${countdownSec}s | Base Capital: $${totalWalletBalance.toFixed(2)} | Target Margin: $${tradeMargin.toFixed(2)}`);
 
       const cycleKey = entryCycleKey(userId, topToken.symbol, topToken.nextFundingTime);
-      if (enteredThisCycle.has(cycleKey)) return;
+      if (enteredThisCycle.has(cycleKey)) {
+        if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: Already entered this cycle', 'symbol:', topToken.symbol);
+        return;
+      }
 
-      const entryTimeSec = settings.entryTimeSec ?? 300;
       const inWindow = countdownSec <= entryTimeSec && countdownSec > entryTimeSec - 10;
-      if (!inWindow) return;
+      if (!inWindow) {
+        if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: Countdown not in entry window', 'symbol:', topToken.symbol, 'countdown:', countdownSec, 'window:', entryTimeSec - 10, '-', entryTimeSec);
+        return;
+      }
 
       console.log(`[autoBot] ${topToken.symbol} - Entry Attempt (countdown ${countdownSec}s in window)`);
 
@@ -390,25 +633,29 @@ async function processUser(
         const ob = await getOrderBookDepth(apiKey, apiSecret, topToken.symbol, settings.orderBookDepth ?? 2);
         entryPrice = side === 'Buy' ? ob.askPrice : ob.bidPrice;
         if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+          if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: Order book price invalid', 'symbol:', topToken.symbol, 'entryPrice:', entryPrice);
           console.warn(`[autoBot] ${topToken.symbol} - Order book price invalid, skipping entry`);
           return;
         }
       } catch (e) {
+        if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: getOrderBookDepth failed', 'symbol:', topToken.symbol);
         console.error(`[autoBot] ${topToken.symbol} - getOrderBookDepth failed:`, e);
         return;
       }
 
-      // Fixed capital: tradeMargin = totalWalletBalance * (capital_percent/100); safety: min(tradeMargin, availableMargin)
-      let availableMargin = 0;
-      try {
-        const wallet = await getWalletBalance(apiKey, apiSecret);
-        availableMargin = parseFloat(wallet.totalAvailableBalance) || 0;
-      } catch {
-        availableMargin = 0;
-      }
-      const finalMargin = Math.min(tradeMargin, availableMargin);
+      // Use cached available margin in entry window to avoid API latency; otherwise already set at processUser start
+      const finalMargin = Math.min(tradeMargin, cachedAvailableMargin);
       const rawQty = (finalMargin * safeLeverage) / entryPrice;
-      if (rawQty <= 0) return;
+      if (rawQty <= 0) {
+        if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: rawQty <= 0 (insufficient margin or invalid price)', 'symbol:', topToken.symbol, 'rawQty:', rawQty);
+        return;
+      }
+
+      const positionsBeforeOrder = await getPositionList(apiKey, apiSecret, { category: 'linear', settleCoin: 'USDT' });
+      if (positionsBeforeOrder.length >= maxTrades) {
+        if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: Positions at max before order', 'symbol:', topToken.symbol, 'positions:', positionsBeforeOrder.length, 'maxTrades:', maxTrades);
+        return;
+      }
 
       let finalQty: number;
       try {
@@ -424,26 +671,33 @@ async function processUser(
           console.log(`[autoBot] ${topToken.symbol} - Quantity capped to Bybit max limit: ${finalQty}`);
         }
         if (finalQty < minQty) {
+          if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: finalQty below minOrderQty', 'symbol:', topToken.symbol, 'finalQty:', finalQty, 'minOrderQty:', minQty);
           console.warn(`[autoBot] ${topToken.symbol} - finalQty ${finalQty} < minOrderQty ${minQty}, skipping`);
           return;
         }
         console.log(`[autoBot] ${topToken.symbol} - Precision: Raw=${rawQty} Final=${finalQty}`);
       } catch (e) {
+        if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: Instrument lot size failed', 'symbol:', topToken.symbol);
         console.error(`[autoBot] ${topToken.symbol} - Instrument info failed:`, e);
         return;
       }
 
-      const positionsBeforeOrder = await getPositionList(apiKey, apiSecret, { category: 'linear', settleCoin: 'USDT' });
-      if (positionsBeforeOrder.length >= maxTrades) return;
+      const qtyStr = String(finalQty);
+      const priceStr = String(entryPrice);
+      const timeInForce = 'IOC' as const;
+      console.log('[DEBUG PAYLOAD]', { symbol: topToken.symbol, side, orderType: 'Limit', qty: qtyStr, price: priceStr, timeInForce });
 
       processedTokens.add(procKey);
       enteredThisCycle.add(cycleKey);
+
       try {
-        await placeLimitOrder(apiKey, apiSecret, topToken.symbol, side, String(finalQty), String(entryPrice));
+        const response = await placeLimitOrder(apiKey, apiSecret, topToken.symbol, side, qtyStr, priceStr, timeInForce);
+        console.log('[DEBUG SUCCESS] Order Placed:', response);
         const nextFundingMs = parseInt(topToken.nextFundingTime, 10) || 0;
         positionFundingTime.set(positionKey(userId, topToken.symbol, side), nextFundingMs);
       } catch (e: unknown) {
         const err = e as { response?: { data?: unknown }; message?: string };
+        console.error('[DEBUG ERROR] Order Failed:', err?.message ?? e, err?.response ?? '');
         console.error(`[autoBot] ${topToken.symbol} - EXACT BYBIT ERROR:`, err?.response?.data ?? err?.message ?? e);
         try {
           await addBannedToken(userId, topToken.symbol, 'Auto-banned: API Execution Error');
@@ -453,6 +707,20 @@ async function processUser(
         }
       }
     }));
+
+  if (inPrefetchWindow && prepCandidates.length > 0) {
+    entryPrepCacheByUser.set(userId, {
+      settings: { orderBookDepth: settings.orderBookDepth, capitalPercent: settings.capitalPercent, maxTrades, entryTimeSec },
+      apiKey,
+      apiSecret,
+      totalWalletBalance,
+      tradeMargin,
+      cachedAvailableMargin,
+      positionsCount: positions.length,
+      maxTrades,
+      candidates: prepCandidates,
+    });
+  }
 
   // Prune old cycle keys (nextFundingTime in the past so we can enter next cycle)
   for (const key of enteredThisCycle) {

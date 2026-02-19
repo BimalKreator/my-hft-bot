@@ -6,6 +6,8 @@ import { getWalletBalance } from './bybitService.js';
 
 /** Same as statsService: used for Closing Balance = BASE_CAPITAL + wallet equity. */
 const BASE_CAPITAL = 3000;
+/** When no previous day snapshot exists, use this as opening balance (e.g. 2026-02-19). */
+const OPENING_BALANCE_DEFAULT = 3400;
 const IST = 'Asia/Kolkata';
 
 /** Today's date in IST (YYYY-MM-DD). */
@@ -62,7 +64,7 @@ async function runDailySnapshot(): Promise<void> {
       );
       const opening = openingRow.rows[0]
         ? parseFloat(openingRow.rows[0].closing_balance) || 0
-        : closingBalance;
+        : OPENING_BALANCE_DEFAULT;
 
       const txResult = await query<{ type: string; sum: string }>(
         `SELECT type, COALESCE(SUM(amount), 0)::text AS sum
