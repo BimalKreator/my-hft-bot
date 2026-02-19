@@ -4,6 +4,7 @@ import { getBannedTokens, addBannedToken } from '../models/bannedTokensModel.js'
 import { decrypt } from '../utils/encryption.js';
 import {
   getWalletBalance,
+  getUsdtWalletDetails,
   getPositionList,
   getInstrumentLotSize,
   getInstrumentDetails,
@@ -307,9 +308,6 @@ async function processUser(
   const positions = await getPositionList(apiKey, apiSecret, { category: 'linear', settleCoin: 'USDT' });
   if (positions.length >= settings.maxTrades) return;
 
-  const balanceRes = await getWalletBalance(apiKey, apiSecret);
-  const availableBalance = parseFloat(balanceRes.totalAvailableBalance) || 0;
-
   // Auto Exit is handled by monitorExits (1s loop) with reduce-only orders and unified logging.
 
   // Auto Entry: filter by min funding rate, exclude banned tokens, then Smart Sort, then ONLY top token
@@ -373,8 +371,29 @@ async function processUser(
     }
   }
 
-  // Margin Used = Balance * Capital%; Position Size = Margin Used * Leverage; Qty = Position Size / Price
-  const rawQty = (availableBalance * (settings.capitalPercent / 100) * safeLeverage) / price;
+  const side = topToken.fundingRate < 0 ? 'Buy' : 'Sell';
+
+  // Depth chase: limit entry at user-defined order book depth (Long = askPrice, Short = bidPrice)
+  let entryPrice: number;
+  try {
+    const ob = await getOrderBookDepth(apiKey, apiSecret, topToken.symbol, settings.orderBookDepth ?? 2);
+    entryPrice = side === 'Buy' ? ob.askPrice : ob.bidPrice;
+    if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+      console.warn(`[autoBot] Order book price invalid for ${topToken.symbol}, skipping entry`);
+      return;
+    }
+  } catch (e) {
+    console.error(`[autoBot] getOrderBookDepth failed ${topToken.symbol}:`, e);
+    return;
+  }
+
+  // Position sizing: allocate from total capital (walletBalance), capped by free margin (availableToWithdraw)
+  const wallet = await getUsdtWalletDetails(apiKey, apiSecret);
+  const totalCapital = parseFloat(wallet.walletBalance) || 0;
+  const freeMargin = parseFloat(wallet.availableToWithdraw) || 0;
+  const allocatedMargin = totalCapital * ((settings.capitalPercent ?? 0) / 100);
+  const finalMargin = Math.min(allocatedMargin, freeMargin);
+  const rawQty = (finalMargin * safeLeverage) / entryPrice;
   if (rawQty <= 0) return;
 
   let finalQty: number;
@@ -403,21 +422,6 @@ async function processUser(
   }
 
   const qtyStr = String(finalQty);
-  const side = topToken.fundingRate < 0 ? 'Buy' : 'Sell';
-
-  // Depth chase: limit entry at user-defined order book depth (Long = askPrice, Short = bidPrice)
-  let entryPrice: number;
-  try {
-    const ob = await getOrderBookDepth(apiKey, apiSecret, topToken.symbol, settings.orderBookDepth ?? 2);
-    entryPrice = side === 'Buy' ? ob.askPrice : ob.bidPrice;
-    if (!Number.isFinite(entryPrice)) {
-      console.warn(`[autoBot] Order book price invalid for ${topToken.symbol}, skipping entry`);
-      return;
-    }
-  } catch (e) {
-    console.error(`[autoBot] getOrderBookDepth failed ${topToken.symbol}:`, e);
-    return;
-  }
 
   processedTokens.add(procKey);
   enteredThisCycle.add(cycleKey);

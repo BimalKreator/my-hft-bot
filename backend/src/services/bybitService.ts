@@ -125,6 +125,58 @@ export async function getWalletBalance(
   return { totalEquity, totalAvailableBalance, totalPerpUPL, coins };
 }
 
+export interface UsdtWalletDetails {
+  walletBalance: string;
+  availableToWithdraw: string;
+  accountType: 'UNIFIED' | 'CONTRACT';
+}
+
+/**
+ * Fetch USDT wallet details for sizing:
+ * - walletBalance: total capital (USDT wallet balance)
+ * - availableToWithdraw: free margin
+ *
+ * Tries UNIFIED first, then falls back to CONTRACT.
+ */
+export async function getUsdtWalletDetails(
+  apiKey: string,
+  apiSecret: string
+): Promise<UsdtWalletDetails> {
+  const call = async (accountType: 'UNIFIED' | 'CONTRACT'): Promise<UsdtWalletDetails> => {
+    const timestamp = Date.now().toString();
+    const queryString = `accountType=${accountType}&coin=USDT`;
+    const paramStr = timestamp + apiKey + RECV_WINDOW + queryString;
+    const signature = sign(apiSecret, paramStr);
+
+    const { data } = await axios.get(`${BASE_URL}/v5/account/wallet-balance?${queryString}`, {
+      headers: {
+        'X-BAPI-API-KEY': apiKey,
+        'X-BAPI-TIMESTAMP': timestamp,
+        'X-BAPI-SIGN': signature,
+        'X-BAPI-RECV-WINDOW': RECV_WINDOW,
+      },
+    });
+
+    if (data.retCode !== 0) {
+      throw new Error(data.retMsg ?? 'Bybit API error');
+    }
+
+    const list = data?.result?.list?.[0];
+    const accounts = list?.coin ?? [];
+    const usdt = accounts.find((c: { coin?: string }) => c.coin === 'USDT') ?? accounts[0];
+    const walletBalance = usdt?.walletBalance ?? list?.totalEquity ?? '0';
+    const availableToWithdraw = usdt?.availableToWithdraw ?? list?.totalAvailableBalance ?? '0';
+
+    return { walletBalance, availableToWithdraw, accountType };
+  };
+
+  try {
+    return await call('UNIFIED');
+  } catch {
+    return await call('CONTRACT');
+  }
+}
+
 /**
  * Set leverage for a linear perpetual symbol. Ignores errors (e.g. leverage already set).
  */
