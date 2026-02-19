@@ -1,5 +1,6 @@
 import { getUsersWithAutoEntryEnabled, getSettings } from '../models/settingsModel.js';
 import { getExchangeKeys } from '../models/exchangeModel.js';
+import { getBannedTokens, addBannedToken } from '../models/bannedTokensModel.js';
 import { decrypt } from '../utils/encryption.js';
 import {
   getWalletBalance,
@@ -19,8 +20,14 @@ const EXIT_INTERVAL_MS = 1_000;
 
 /** Track which (userId, symbol, nextFundingTime) we already entered this cycle to avoid double entry. */
 const enteredThisCycle = new Set<string>();
+/** Retry prevention: once we attempt order for this key, do not retry even if order fails. */
+const processedTokens = new Set<string>();
 /** Track funding time per (userId, symbol, side) for auto exit: close at fundingTime + exitTimeSec. */
 const positionFundingTime = new Map<string, number>();
+
+function processedKey(userId: number, symbol: string, fundingTimestamp: string): string {
+  return `${userId}_${symbol}_${fundingTimestamp}`;
+}
 
 const fundingScanner = new FundingScanner();
 
@@ -222,14 +229,16 @@ async function processUser(
 
   // Auto Exit is handled by monitorExits (1s loop) with reduce-only orders and unified logging.
 
-  // Auto Entry: filter by min funding rate, then Smart Sort, then ONLY top token
+  // Auto Entry: filter by min funding rate, exclude banned tokens, then Smart Sort, then ONLY top token
   const minFundingRate = settings.minFundingRate ?? 0;
-  const meetsMinFunding = marketData.filter(
+  let meetsMinFunding = marketData.filter(
     (token) => Math.abs(token.fundingRate) >= minFundingRate
   );
+  const bannedSet = new Set(await getBannedTokens(userId));
+  meetsMinFunding = meetsMinFunding.filter((token) => !bannedSet.has(token.symbol));
   if (meetsMinFunding.length === 0) {
     const pct = (minFundingRate * 100).toFixed(4);
-    console.log(`[autoBot] No tokens meet Min Funding criteria (>= ${pct}%)`);
+    console.log(`[autoBot] No tokens meet Min Funding criteria (>= ${pct}%) or all are banned`);
     return;
   }
 
@@ -241,6 +250,9 @@ async function processUser(
   });
   const topToken = sorted[0];
   if (!topToken) return;
+
+  const procKey = processedKey(userId, topToken.symbol, topToken.nextFundingTime);
+  if (processedTokens.has(procKey)) return;
 
   const countdownSec = Math.floor(topToken.countdownMs / 1000);
   const price = parseFloat(topToken.markPrice || topToken.lastPrice || '0') || 0;
@@ -269,10 +281,12 @@ async function processUser(
 
   let finalQty: number;
   try {
-    const { qtyStep, minOrderQty } = await getInstrumentLotSize(apiKey, apiSecret, topToken.symbol);
+    const { qtyStep, minOrderQty, maxOrderQty } = await getInstrumentLotSize(apiKey, apiSecret, topToken.symbol);
     const step = parseFloat(qtyStep) || 0.1;
     const minQty = parseFloat(minOrderQty) || 0;
+    const maxQty = parseFloat(maxOrderQty) || 999999;
     finalQty = Math.floor(rawQty / step) * step;
+    if (finalQty > maxQty) finalQty = maxQty;
     if (finalQty < minQty) {
       console.warn(`[autoBot] ${topToken.symbol}: finalQty ${finalQty} < minOrderQty ${minQty}, skipping`);
       return;
@@ -286,15 +300,21 @@ async function processUser(
   const qtyStr = String(finalQty);
   const side = topToken.fundingRate < 0 ? 'Buy' : 'Sell';
 
+  processedTokens.add(procKey);
+  enteredThisCycle.add(cycleKey);
   try {
-    enteredThisCycle.add(cycleKey);
     await placeMarketOrder(apiKey, apiSecret, topToken.symbol, side, qtyStr);
     const nextFundingMs = parseInt(topToken.nextFundingTime, 10) || 0;
     const key = positionKey(userId, topToken.symbol, side);
     positionFundingTime.set(key, nextFundingMs);
   } catch (e) {
     console.error(`[autoBot] Entry failed ${topToken.symbol}:`, e);
-    enteredThisCycle.delete(cycleKey);
+    try {
+      await addBannedToken(userId, topToken.symbol, 'Auto-banned: API Execution Error');
+      console.log(`[autoBot] Auto-banned ${topToken.symbol} (API Execution Error)`);
+    } catch (banErr) {
+      console.error(`[autoBot] Failed to add banned token ${topToken.symbol}:`, banErr);
+    }
   }
 
   // Prune old cycle keys (nextFundingTime in the past so we can enter next cycle)
@@ -304,6 +324,14 @@ async function processUser(
     const nextMs = parseInt(nextFundingTimeStr, 10) || 0;
     if (nextMs > 0 && now > nextMs + 60_000) {
       enteredThisCycle.delete(key);
+    }
+  }
+  for (const key of processedTokens) {
+    const parts = key.split('_');
+    const nextFundingTimeStr = parts.length >= 3 ? parts[parts.length - 1]! : '';
+    const nextMs = parseInt(nextFundingTimeStr, 10) || 0;
+    if (nextMs > 0 && now > nextMs + 60_000) {
+      processedTokens.delete(key);
     }
   }
 }

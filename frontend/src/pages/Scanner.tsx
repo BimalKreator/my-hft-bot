@@ -95,7 +95,31 @@ export default function Scanner() {
   const [isAutoRefresh, setIsAutoRefresh] = useState<boolean>(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [selectedToken, setSelectedToken] = useState<TokenData | null>(null);
+  const [bannedTokens, setBannedTokens] = useState<string[]>([]);
+  const [banActionLoading, setBanActionLoading] = useState<string | null>(null);
   const saveMinFundingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const fetchBanned = useCallback(async () => {
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (!token) return;
+    try {
+      const res = await fetch('/api/ban', { headers: { Authorization: `Bearer ${token}` } });
+      const json = await res.json().catch(() => []);
+      if (res.ok && Array.isArray(json)) setBannedTokens(json);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchBanned();
+  }, [fetchBanned]);
+
+  useEffect(() => {
+    if (!isAutoRefresh) return;
+    const id = setInterval(fetchBanned, 10000);
+    return () => clearInterval(id);
+  }, [isAutoRefresh, fetchBanned]);
 
   const fetchSettings = useCallback(async () => {
     const token = localStorage.getItem(TOKEN_KEY);
@@ -187,8 +211,10 @@ export default function Scanner() {
     return () => clearInterval(id);
   }, [isAutoRefresh, fetchData]);
 
+  const bannedSet = useMemo(() => new Set(bannedTokens), [bannedTokens]);
+
   const filteredData = useMemo(() => {
-    let result = data;
+    let result = data.filter((item) => !bannedSet.has(item.symbol));
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
       result = result.filter((item) => tokenName(item.symbol).toLowerCase().includes(q));
@@ -203,7 +229,12 @@ export default function Scanner() {
     if (filterType === 'positive') result = result.filter((item) => item.fundingRate > 0);
     if (filterType === 'negative') result = result.filter((item) => item.fundingRate < 0);
     return result;
-  }, [data, searchQuery, minFundingPct, filterType]);
+  }, [data, searchQuery, minFundingPct, filterType, bannedSet]);
+
+  const bannedDisplayTokens = useMemo(
+    () => data.filter((item) => bannedSet.has(item.symbol)),
+    [data, bannedSet]
+  );
 
   const sortedData = useMemo(() => {
     const arr = [...filteredData];
@@ -471,7 +502,7 @@ export default function Scanner() {
                           {row.maxLeverage ? `${row.maxLeverage}x` : '—'}
                         </span>
                       </td>
-                      <td className="px-4 py-3">
+                      <td className="px-4 py-3 flex items-center gap-2">
                         <button
                           type="button"
                           onClick={() => {
@@ -492,6 +523,32 @@ export default function Scanner() {
                         >
                           Trade Now
                         </button>
+                        <button
+                          type="button"
+                          disabled={banActionLoading === row.symbol}
+                          onClick={async () => {
+                            const auth = localStorage.getItem(TOKEN_KEY);
+                            if (!auth) return;
+                            setBanActionLoading(row.symbol);
+                            try {
+                              const res = await fetch('/api/ban/add', {
+                                method: 'POST',
+                                headers: {
+                                  'Content-Type': 'application/json',
+                                  Authorization: `Bearer ${auth}`,
+                                },
+                                body: JSON.stringify({ token: row.symbol }),
+                              });
+                              if (res.ok) setBannedTokens((prev) => (prev.includes(row.symbol) ? prev : [...prev, row.symbol]));
+                            } finally {
+                              setBanActionLoading(null);
+                            }
+                          }}
+                          className="rounded-lg border px-3 py-1.5 text-sm font-medium text-red-400 transition hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50"
+                          style={{ borderColor: 'rgba(239, 68, 68, 0.5)' }}
+                        >
+                          {banActionLoading === row.symbol ? '…' : 'Ban 🚫'}
+                        </button>
                       </td>
                     </tr>
                   ))
@@ -500,6 +557,138 @@ export default function Scanner() {
             </table>
           </div>
         )}
+      </div>
+
+      {/* Banned Tokens */}
+      <div
+        className="rounded-xl border overflow-hidden backdrop-blur-sm"
+        style={{
+          backgroundColor: 'rgba(255, 255, 255, 0.04)',
+          borderColor: 'rgba(239, 68, 68, 0.3)',
+          boxShadow: '0 0 24px rgba(239, 68, 68, 0.08)',
+        }}
+      >
+        <div className="px-4 py-3 border-b flex items-center gap-2" style={{ borderColor: 'rgba(239, 68, 68, 0.2)' }}>
+          <span aria-hidden>🚫</span>
+          <h2 className="text-lg font-semibold text-white">Banned Tokens</h2>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[900px]">
+            <thead>
+              <tr
+                className="border-b text-left text-sm font-medium text-gray-400"
+                style={{ borderColor: 'rgba(255, 255, 255, 0.08)' }}
+              >
+                <th className="px-4 py-3">Token</th>
+                <th className="px-4 py-3">Price</th>
+                <th className="px-4 py-3">Funding Rate</th>
+                <th className="px-4 py-3">Direction</th>
+                <th className="px-4 py-3">Countdown</th>
+                <th className="px-4 py-3">Interval</th>
+                <th className="px-4 py-3">Max Lev</th>
+                <th className="px-4 py-3">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {bannedDisplayTokens.length === 0 ? (
+                <tr>
+                  <td colSpan={8} className="px-4 py-6 text-center text-gray-500">
+                    No banned tokens in current scan.
+                  </td>
+                </tr>
+              ) : (
+                bannedDisplayTokens.map((row) => (
+                  <tr
+                    key={row.symbol}
+                    className="border-b text-white transition hover:bg-white/5"
+                    style={{ borderColor: 'rgba(255, 255, 255, 0.06)' }}
+                  >
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className="flex h-8 w-8 items-center justify-center rounded-full text-xs font-medium"
+                          style={{ backgroundColor: 'rgba(239, 68, 68, 0.2)', color: '#ef4444' }}
+                        >
+                          {tokenName(row.symbol).slice(0, 2)}
+                        </span>
+                        <span className="font-medium">{tokenName(row.symbol)}</span>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-gray-300 font-mono text-sm">
+                      {parseFloat(row.markPrice || row.lastPrice || '0').toLocaleString(undefined, {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 6,
+                      })}
+                    </td>
+                    <td className="px-4 py-3">
+                      <span
+                        className={
+                          row.fundingRate > 0
+                            ? 'text-green-500 font-medium'
+                            : row.fundingRate < 0
+                              ? 'text-red-500 font-medium'
+                              : 'text-gray-400'
+                        }
+                      >
+                        {formatPct(row.fundingRate)}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <DirectionBadge fundingRate={row.fundingRate} />
+                    </td>
+                    <td className="px-4 py-3">
+                      <CountdownCell nextFundingTime={row.nextFundingTime} />
+                    </td>
+                    <td className="px-4 py-3 text-gray-300">
+                      {row.fundingIntervalHours % 1 === 0
+                        ? `${row.fundingIntervalHours}h`
+                        : `${row.fundingIntervalHours.toFixed(1)}h`}
+                    </td>
+                    <td className="px-4 py-3">
+                      <span
+                        className="inline-flex rounded px-2 py-0.5 text-xs font-medium"
+                        style={{
+                          backgroundColor: 'rgba(239, 68, 68, 0.2)',
+                          color: '#ef4444',
+                        }}
+                      >
+                        {row.maxLeverage ? `${row.maxLeverage}x` : '—'}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <button
+                        type="button"
+                        disabled={banActionLoading === row.symbol}
+                        onClick={async () => {
+                          const auth = localStorage.getItem(TOKEN_KEY);
+                          if (!auth) return;
+                          setBanActionLoading(row.symbol);
+                          try {
+                            const res = await fetch('/api/ban/remove', {
+                              method: 'POST',
+                              headers: {
+                                'Content-Type': 'application/json',
+                                Authorization: `Bearer ${auth}`,
+                              },
+                              body: JSON.stringify({ token: row.symbol }),
+                            });
+                            if (res.ok) setBannedTokens((prev) => prev.filter((t) => t !== row.symbol));
+                          } finally {
+                            setBanActionLoading(null);
+                          }
+                        }}
+                        className="rounded-lg border px-3 py-1.5 text-sm font-medium text-green-400 transition hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-green-500 disabled:opacity-50"
+                        style={{ borderColor: 'rgba(34, 197, 94, 0.5)' }}
+                      >
+                        {banActionLoading === row.symbol ? '…' : 'Unban ✅'}
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <TradeModal

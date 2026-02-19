@@ -226,10 +226,11 @@ export async function getOrderbook(symbol: string, limit = 50): Promise<Orderboo
 export interface InstrumentLotSize {
   qtyStep: string;
   minOrderQty: string;
+  maxOrderQty: string;
 }
 
 /**
- * Fetch lot size filter for a linear symbol (qtyStep, minOrderQty) for quantity precision.
+ * Fetch lot size filter for a linear symbol (qtyStep, minOrderQty, maxOrderQty).
  */
 export async function getInstrumentLotSize(
   apiKey: string,
@@ -241,10 +242,13 @@ export async function getInstrumentLotSize(
   if (res.retCode !== 0) {
     throw new Error(res.retMsg ?? 'Bybit get instruments info failed');
   }
-  const list = (res.result as { list?: Array<{ lotSizeFilter?: { qtyStep?: string; minOrderQty?: string } }> })?.list ?? [];
+  const list = (res.result as {
+    list?: Array<{ lotSizeFilter?: { qtyStep?: string; minOrderQty?: string; maxOrderQty?: string } }>;
+  })?.list ?? [];
   const inst = list[0];
   const filter = inst?.lotSizeFilter;
   const qtyStep = filter?.qtyStep ?? '0.1';
   const minOrderQty = filter?.minOrderQty ?? '0';
-  return { qtyStep, minOrderQty };
+  const maxOrderQty = filter?.maxOrderQty ?? '999999';
+  return { qtyStep, minOrderQty, maxOrderQty };
 }

@@ -107,6 +107,17 @@ async function initDb() {
     ALTER TABLE closed_trades ADD COLUMN IF NOT EXISTS exit_reason TEXT;
   `).catch(() => {});
 
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS banned_tokens (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token TEXT NOT NULL,
+      reason TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (user_id, token)
+    );
+  `);
+
   console.log('Tables created successfully.');
 }
 
