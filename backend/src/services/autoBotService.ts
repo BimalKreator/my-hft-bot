@@ -7,10 +7,13 @@ import {
   getInstrumentLotSize,
   setLeverage,
   placeMarketOrder,
+  placeMarketOrderReduceOnly,
 } from './bybitService.js';
 import { FundingScanner } from './scannerService.js';
+import { calculateVWAP } from './vwapService.js';
 
 const INTERVAL_MS = 5_000;
+const EXIT_INTERVAL_MS = 1_000;
 
 /** Track which (userId, symbol, nextFundingTime) we already entered this cycle to avoid double entry. */
 const enteredThisCycle = new Set<string>();
@@ -29,6 +32,7 @@ function entryCycleKey(userId: number, symbol: string, nextFundingTime: string):
 
 export function startMonitoring(): void {
   setInterval(runTick, INTERVAL_MS);
+  setInterval(monitorExits, EXIT_INTERVAL_MS);
 }
 
 async function runTick(): Promise<void> {
@@ -48,6 +52,76 @@ async function runTick(): Promise<void> {
     }
   } catch (err) {
     console.error('[autoBot] tick error:', err);
+  }
+}
+
+async function monitorExits(): Promise<void> {
+  try {
+    const userIds = await getUsersWithAutoEntryEnabled();
+    if (userIds.length === 0) return;
+
+    const marketData = await fundingScanner.getFundingData();
+    const fundingBySymbol = new Map(marketData.map((m) => [m.symbol, m.fundingRate]));
+    const now = Date.now();
+
+    for (const userId of userIds) {
+      try {
+        const settings = await getSettings(userId);
+        const keys = await getExchangeKeys(userId, 'Bybit');
+        if (!keys) continue;
+
+        const apiKey = decrypt(keys.api_key);
+        const apiSecret = decrypt(keys.api_secret);
+        const positions = await getPositionList(apiKey, apiSecret, { category: 'linear', settleCoin: 'USDT' });
+        if (positions.length === 0) continue;
+
+        const exitThresholdMs = (settings.exitTimeSec ?? 0) * 1000;
+
+        for (const pos of positions) {
+          const key = positionKey(userId, pos.symbol, pos.side);
+          const entry = parseFloat(pos.avgPrice) || 0;
+          const qty = parseFloat(pos.size) || 0;
+
+          // Auto Exit (Time Based): funding just happened + exit_time_sec passed
+          if (settings.autoExitEnabled && exitThresholdMs > 0) {
+            const fundingTimeMs = positionFundingTime.get(key);
+            if (fundingTimeMs != null && now >= fundingTimeMs + exitThresholdMs) {
+              try {
+                const vwapPrice = await calculateVWAP(pos.symbol, pos.side, qty);
+                const pnl = pos.side === 'Buy' ? (vwapPrice - entry) * qty : (entry - vwapPrice) * qty;
+                await placeMarketOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, pos.size);
+                positionFundingTime.delete(key);
+                console.log(`[autoBot] Exit Triggered: Time (funding+exit) | PnL: ${pnl.toFixed(4)}`);
+              } catch (e) {
+                console.error(`[autoBot] Auto exit failed ${pos.symbol}:`, e);
+              }
+              continue;
+            }
+          }
+
+          // Stoploss (VWAP Based): close if PnL % <= -(Funding Rate %)
+          const fundingRate = fundingBySymbol.get(pos.symbol) ?? 0;
+          const fundingRatePct = fundingRate * 100;
+          const vwapPrice = await calculateVWAP(pos.symbol, pos.side, qty);
+          const pnlPct = entry <= 0 ? 0 : (pos.side === 'Buy' ? (vwapPrice - entry) / entry : (entry - vwapPrice) / entry) * 100;
+          const pnl = pos.side === 'Buy' ? (vwapPrice - entry) * qty : (entry - vwapPrice) * qty;
+
+          if (pnlPct <= -Math.abs(fundingRatePct)) {
+            try {
+              await placeMarketOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, pos.size);
+              positionFundingTime.delete(key);
+              console.log(`[autoBot] Exit Triggered: VWAP Stoploss | PnL: ${pnl.toFixed(4)}`);
+            } catch (e) {
+              console.error(`[autoBot] VWAP stoploss exit failed ${pos.symbol}:`, e);
+            }
+          }
+        }
+      } catch (err) {
+        console.error(`[autoBot] Exit monitor user ${userId} error:`, err);
+      }
+    }
+  } catch (err) {
+    console.error('[autoBot] Exit monitor tick error:', err);
   }
 }
 
@@ -78,23 +152,7 @@ async function processUser(
   const balanceRes = await getWalletBalance(apiKey, apiSecret);
   const availableBalance = parseFloat(balanceRes.totalAvailableBalance) || 0;
 
-  // Auto Exit: close positions when now >= fundingTime + exitTimeSec
-  if (settings.autoExitEnabled && settings.exitTimeSec > 0) {
-    const exitThresholdMs = settings.exitTimeSec * 1000;
-    for (const pos of positions) {
-      const key = positionKey(userId, pos.symbol, pos.side);
-      const fundingTimeMs = positionFundingTime.get(key);
-      if (fundingTimeMs != null && now >= fundingTimeMs + exitThresholdMs) {
-        try {
-          const closeSide = pos.side === 'Buy' ? 'Sell' : 'Buy';
-          await placeMarketOrder(apiKey, apiSecret, pos.symbol, closeSide, pos.size);
-          positionFundingTime.delete(key);
-        } catch (e) {
-          console.error(`[autoBot] Auto exit failed ${pos.symbol}:`, e);
-        }
-      }
-    }
-  }
+  // Auto Exit is handled by monitorExits (1s loop) with reduce-only orders and unified logging.
 
   // Auto Entry: filter by min funding rate, then Smart Sort, then ONLY top token
   const minFundingRate = settings.minFundingRate ?? 0;

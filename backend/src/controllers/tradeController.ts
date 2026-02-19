@@ -4,8 +4,10 @@ import { decrypt } from '../utils/encryption.js';
 import {
   setLeverage,
   placeMarketOrder,
+  placeMarketOrderReduceOnly,
   getExecutionList,
 } from '../services/bybitService.js';
+import { getEnrichedPositions } from '../services/vwapService.js';
 import { AuthRequest } from '../middleware/authMiddleware.js';
 
 const TRADE_TYPE = ['Manual', 'Auto'] as const;
@@ -102,6 +104,85 @@ export async function executeTrade(
     res.status(200).json({ orderId, executedPrice });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Trade execution failed';
+    res.status(500).json({ error: msg });
+  }
+}
+
+/**
+ * Close a position with a market reduce-only order. Body: symbol, side (Buy|Sell), qty (or size).
+ */
+export async function closePosition(
+  req: AuthRequest,
+  res: Response
+): Promise<void> {
+  try {
+    const userId = req.user?.userId;
+    if (!userId) {
+      res.status(401).json({ error: 'Authentication required' });
+      return;
+    }
+
+    const { symbol, side, qty, size } = req.body;
+    const qtyVal = qty ?? size;
+    if (
+      !symbol ||
+      typeof symbol !== 'string' ||
+      !side ||
+      (side !== 'Buy' && side !== 'Sell') ||
+      qtyVal == null ||
+      (typeof qtyVal !== 'number' && typeof qtyVal !== 'string')
+    ) {
+      res.status(400).json({
+        error: 'Missing or invalid body: symbol (string), side (Buy|Sell), qty or size required',
+      });
+      return;
+    }
+
+    const keys = await getExchangeKeys(userId, 'Bybit');
+    if (!keys) {
+      res.status(404).json({
+        error: 'No Bybit keys found. Add keys in Exchange Setup.',
+      });
+      return;
+    }
+
+    const apiKey = decrypt(keys.api_key);
+    const apiSecret = decrypt(keys.api_secret);
+    const qtyStr = typeof qtyVal === 'number' ? String(qtyVal) : String(qtyVal);
+
+    const { orderId } = await placeMarketOrderReduceOnly(
+      apiKey,
+      apiSecret,
+      symbol,
+      side,
+      qtyStr
+    );
+
+    res.status(200).json({ orderId });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Close position failed';
+    res.status(500).json({ error: msg });
+  }
+}
+
+/**
+ * Get dashboard positions (enriched with VWAP, PnL, SL/target). Uses vwapService.getEnrichedPositions.
+ */
+export async function getDashboardPositions(
+  req: AuthRequest,
+  res: Response
+): Promise<void> {
+  try {
+    const userId = req.user?.userId;
+    if (!userId) {
+      res.status(401).json({ error: 'Authentication required' });
+      return;
+    }
+
+    const positions = await getEnrichedPositions(userId);
+    res.status(200).json(positions);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to load dashboard positions';
     res.status(500).json({ error: msg });
   }
 }

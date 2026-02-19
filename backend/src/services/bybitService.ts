@@ -12,6 +12,11 @@ function getClient(apiKey: string, apiSecret: string): RestClientV5 {
   return new RestClientV5({ key: apiKey, secret: apiSecret, testnet });
 }
 
+/** Public REST client for market data (no auth). */
+function getPublicClient(): RestClientV5 {
+  return new RestClientV5({ testnet });
+}
+
 function sign(apiSecret: string, paramStr: string): string {
   const hash = CryptoJS.HmacSHA256(paramStr, apiSecret);
   return hash.toString(CryptoJS.enc.Hex);
@@ -115,6 +120,33 @@ export async function placeMarketOrder(
 }
 
 /**
+ * Place a market reduce-only order to close a position. Opposite side of position.
+ */
+export async function placeMarketOrderReduceOnly(
+  apiKey: string,
+  apiSecret: string,
+  symbol: string,
+  positionSide: 'Buy' | 'Sell',
+  qty: string
+): Promise<{ orderId: string; orderLinkId: string }> {
+  const client = getClient(apiKey, apiSecret);
+  const closeSide = positionSide === 'Buy' ? 'Sell' : 'Buy';
+  const res = await client.submitOrder({
+    category: 'linear',
+    symbol,
+    side: closeSide,
+    orderType: 'Market',
+    qty,
+    reduceOnly: true,
+  });
+  if (res.retCode !== 0) {
+    throw new Error(res.retMsg ?? 'Bybit place reduce-only order failed');
+  }
+  const result = res.result as { orderId: string; orderLinkId: string };
+  return { orderId: result.orderId, orderLinkId: result.orderLinkId };
+}
+
+/**
  * Get execution list for an order (e.g. to get exec price after market order).
  */
 export async function getExecutionList(
@@ -136,6 +168,7 @@ export interface LinearPosition {
   symbol: string;
   side: 'Buy' | 'Sell';
   size: string;
+  avgPrice: string;
 }
 
 /**
@@ -153,8 +186,35 @@ export async function getPositionList(
   if (res.retCode !== 0) {
     throw new Error(res.retMsg ?? 'Bybit get position list failed');
   }
-  const list = (res.result as { list?: Array<{ symbol: string; side: 'Buy' | 'Sell'; size: string }> })?.list ?? [];
-  return list.filter((p) => parseFloat(p.size) > 0).map((p) => ({ symbol: p.symbol, side: p.side, size: p.size }));
+  const list = (res.result as { list?: Array<{ symbol: string; side: 'Buy' | 'Sell'; size: string; avgPrice?: string }> })?.list ?? [];
+  return list
+    .filter((p) => parseFloat(p.size) > 0)
+    .map((p) => ({ symbol: p.symbol, side: p.side, size: p.size, avgPrice: p.avgPrice ?? '0' }));
+}
+
+export interface OrderbookLevel {
+  price: string;
+  size: string;
+}
+
+export interface OrderbookResult {
+  bids: OrderbookLevel[];
+  asks: OrderbookLevel[];
+}
+
+/**
+ * Get order book for a linear perpetual (public endpoint). limit 1–500, default 50.
+ */
+export async function getOrderbook(symbol: string, limit = 50): Promise<OrderbookResult> {
+  const client = getPublicClient();
+  const res = await client.getOrderbook({ category: 'linear', symbol, limit });
+  if (res.retCode !== 0) {
+    throw new Error(res.retMsg ?? 'Bybit get orderbook failed');
+  }
+  const result = res.result as { b?: [string, string][]; a?: [string, string][] };
+  const bids = (result.b ?? []).map(([price, size]) => ({ price, size }));
+  const asks = (result.a ?? []).map(([price, size]) => ({ price, size }));
+  return { bids, asks };
 }
 
 export interface InstrumentLotSize {

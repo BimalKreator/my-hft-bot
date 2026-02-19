@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import ActivePositions from '../components/ActivePositions';
 
 const TOKEN_KEY = 'hft_token';
 
@@ -136,6 +137,8 @@ export default function Dashboard() {
           <p className="text-gray-400 py-4">No balance data. Add API keys in Exchange Setup.</p>
         ) : null}
       </div>
+
+      <ActivePositions />
     </div>
   );
 }

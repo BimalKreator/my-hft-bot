@@ -1,9 +1,12 @@
 import { Router } from 'express';
-import { executeTrade } from '../controllers/tradeController.js';
+import { executeTrade, closePosition, getDashboardPositions } from '../controllers/tradeController.js';
 import { authenticateToken } from '../middleware/authMiddleware.js';
 
 const router = Router();
 
 router.post('/execute', authenticateToken, executeTrade);
+router.post('/close', authenticateToken, closePosition);
+router.get('/dashboard/positions', authenticateToken, getDashboardPositions);
+router.get('/positions', authenticateToken, getDashboardPositions);
 
 export default router;
