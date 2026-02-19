@@ -109,7 +109,14 @@ export default function DashboardLayout() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
             </svg>
           </button>
-          <div className="flex-1" />
+          <div className="flex flex-1 items-center gap-3">
+            <img
+              src="/logo.png"
+              alt="Tradeict HFT"
+              className="mr-2 h-8 max-h-8 w-auto object-contain md:h-[40px] md:max-h-[40px]"
+            />
+            <span className="text-base font-semibold text-white">Tradeict HFT</span>
+          </div>
           <div className="flex items-center gap-4">
             <BotStatusIndicator active={botActive} />
             <span className="hidden text-sm text-gray-400 sm:block">{email}</span>
