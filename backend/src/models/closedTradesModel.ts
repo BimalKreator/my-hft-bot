@@ -1,0 +1,111 @@
+import { query } from '../config/db.js';
+
+export interface InsertClosedTradeParams {
+  userId: number;
+  symbol: string;
+  side: 'Buy' | 'Sell';
+  entryPrice: number;
+  exitPrice: number;
+  qty: number;
+  grossPnl: number;
+  funding?: number;
+  fees?: number;
+  source?: 'manual' | 'auto';
+  exitReason?: string;
+}
+
+/** Row shape from DB: closed_trades uses token, direction, quantity, entry_time, exit_time, funding_received, status, exit_reason. */
+export interface ClosedTradeRow {
+  id: number;
+  user_id: number;
+  token: string;
+  direction: string;
+  quantity: string;
+  entry_price: string;
+  exit_price: string;
+  entry_time: string | null;
+  exit_time: string;
+  fees: string;
+  funding_received: string;
+  gross_pnl: string;
+  net_pnl: string;
+  status: string | null;
+  exit_reason: string | null;
+}
+
+export function netPnl(grossPnl: number, funding: number, fees: number): number {
+  return grossPnl + funding - fees;
+}
+
+export async function insertClosedTrade(params: InsertClosedTradeParams): Promise<number> {
+  const funding = params.funding ?? 0;
+  const fees = params.fees ?? 0;
+  const net = netPnl(params.grossPnl, funding, fees);
+  const result = await query<{ id: number }>(
+    `INSERT INTO closed_trades (user_id, token, direction, quantity, entry_price, exit_price, entry_time, exit_time, fees, funding_received, gross_pnl, net_pnl, status, exit_reason)
+     VALUES ($1, $2, $3, $4, $5, $6, NULL, NOW(), $7, $8, $9, $10, $11, $12)
+     RETURNING id`,
+    [
+      params.userId,
+      params.symbol,
+      params.side,
+      params.qty,
+      params.entryPrice,
+      params.exitPrice,
+      fees,
+      funding,
+      params.grossPnl,
+      net,
+      params.source ?? null,
+      params.exitReason ?? null,
+    ]
+  );
+  const row = result.rows[0];
+  return row?.id ?? 0;
+}
+
+export interface GetClosedTradesFilters {
+  from?: string; // YYYY-MM-DD
+  to?: string;   // YYYY-MM-DD
+  token?: string;
+  profit?: boolean; // net_pnl > 0
+  loss?: boolean;   // net_pnl < 0
+}
+
+export async function getClosedTrades(
+  userId: number,
+  filters: GetClosedTradesFilters = {}
+): Promise<ClosedTradeRow[]> {
+  const conditions: string[] = ['user_id = $1'];
+  const params: unknown[] = [userId];
+  let idx = 2;
+
+  if (filters.from) {
+    conditions.push(`exit_time >= $${idx}::date`);
+    params.push(filters.from);
+    idx++;
+  }
+  if (filters.to) {
+    conditions.push(`exit_time <= $${idx}::date + INTERVAL '1 day'`);
+    params.push(filters.to);
+    idx++;
+  }
+  if (filters.token) {
+    conditions.push(`token = $${idx}`);
+    params.push(filters.token);
+    idx++;
+  }
+  if (filters.profit === true) {
+    conditions.push('net_pnl > 0');
+  }
+  if (filters.loss === true) {
+    conditions.push('net_pnl < 0');
+  }
+
+  const sql = `SELECT id, user_id, token, direction, quantity, entry_price, exit_price, entry_time, exit_time, fees, funding_received, gross_pnl, net_pnl, status, exit_reason
+               FROM closed_trades
+               WHERE ${conditions.join(' AND ')}
+               ORDER BY exit_time DESC`;
+  const result = await query<ClosedTradeRow>(sql, params);
+  return result.rows;
+}

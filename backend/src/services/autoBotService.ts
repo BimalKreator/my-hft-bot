@@ -8,9 +8,11 @@ import {
   setLeverage,
   placeMarketOrder,
   placeMarketOrderReduceOnly,
+  getExecutionList,
 } from './bybitService.js';
 import { FundingScanner } from './scannerService.js';
 import { calculateVWAP } from './vwapService.js';
+import { insertClosedTrade } from '../models/closedTradesModel.js';
 
 const INTERVAL_MS = 5_000;
 const EXIT_INTERVAL_MS = 1_000;
@@ -28,6 +30,54 @@ function positionKey(userId: number, symbol: string, side: string): string {
 
 function entryCycleKey(userId: number, symbol: string, nextFundingTime: string): string {
   return `${userId}_${symbol}_${nextFundingTime}`;
+}
+
+/** After a reduce-only close, fetch execution list and persist closed trade to DB with exit reason. */
+async function saveClosedTradeAfterExit(
+  userId: number,
+  apiKey: string,
+  apiSecret: string,
+  symbol: string,
+  side: 'Buy' | 'Sell',
+  entryPrice: number,
+  qty: number,
+  orderId: string,
+  exitReason: 'Time Exit' | 'Stoploss Hit'
+): Promise<void> {
+  try {
+    await new Promise((r) => setTimeout(r, 400));
+    const executions = await getExecutionList(apiKey, apiSecret, 'linear', orderId);
+    let exitPrice = 0;
+    let fees = 0;
+    if (executions.length > 0) {
+      let totalQty = 0;
+      let sumPxQty = 0;
+      for (const e of executions) {
+        const eq = parseFloat(e.execQty) || 0;
+        const ep = parseFloat(e.execPrice) || 0;
+        totalQty += eq;
+        sumPxQty += ep * eq;
+        fees += parseFloat(e.execFee ?? '0') || 0;
+      }
+      exitPrice = totalQty > 0 ? sumPxQty / totalQty : parseFloat(executions[0]!.execPrice) || 0;
+    }
+    const grossPnl = side === 'Buy' ? (exitPrice - entryPrice) * qty : (entryPrice - exitPrice) * qty;
+    await insertClosedTrade({
+      userId,
+      symbol,
+      side,
+      entryPrice,
+      exitPrice,
+      qty,
+      grossPnl,
+      funding: 0,
+      fees,
+      source: 'auto',
+      exitReason,
+    });
+  } catch (e) {
+    console.error(`[autoBot] saveClosedTradeAfterExit failed ${symbol}:`, e);
+  }
 }
 
 export function startMonitoring(): void {
@@ -89,8 +139,9 @@ async function monitorExits(): Promise<void> {
               try {
                 const vwapPrice = await calculateVWAP(pos.symbol, pos.side, qty);
                 const pnl = pos.side === 'Buy' ? (vwapPrice - entry) * qty : (entry - vwapPrice) * qty;
-                await placeMarketOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, pos.size);
+                const { orderId } = await placeMarketOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, pos.size);
                 positionFundingTime.delete(key);
+                await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderId, 'Time Exit');
                 console.log(`[autoBot] Exit Triggered: Time (funding+exit) | PnL: ${pnl.toFixed(4)}`);
               } catch (e) {
                 console.error(`[autoBot] Auto exit failed ${pos.symbol}:`, e);
@@ -108,8 +159,9 @@ async function monitorExits(): Promise<void> {
 
           if (pnlPct <= -Math.abs(fundingRatePct)) {
             try {
-              await placeMarketOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, pos.size);
+              const { orderId } = await placeMarketOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, pos.size);
               positionFundingTime.delete(key);
+              await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderId, 'Stoploss Hit');
               console.log(`[autoBot] Exit Triggered: VWAP Stoploss | PnL: ${pnl.toFixed(4)}`);
             } catch (e) {
               console.error(`[autoBot] VWAP stoploss exit failed ${pos.symbol}:`, e);

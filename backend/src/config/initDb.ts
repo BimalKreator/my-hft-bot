@@ -51,6 +51,53 @@ async function initDb() {
     ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS leverage NUMERIC NOT NULL DEFAULT 5;
   `).catch(() => {});
 
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS daily_snapshots (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      date DATE NOT NULL,
+      opening_balance NUMERIC NOT NULL DEFAULT 0,
+      closing_balance NUMERIC NOT NULL DEFAULT 0,
+      total_profit NUMERIC,
+      profit_percent NUMERIC,
+      UNIQUE (user_id, date)
+    );
+  `);
+
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS deposits_withdrawals (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      date DATE NOT NULL,
+      type TEXT NOT NULL CHECK (type IN ('DEPOSIT', 'WITHDRAWAL')),
+      amount NUMERIC NOT NULL DEFAULT 0,
+      note TEXT
+    );
+  `);
+
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS closed_trades (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token TEXT NOT NULL,
+      direction TEXT NOT NULL CHECK (direction IN ('Buy', 'Sell')),
+      quantity NUMERIC NOT NULL,
+      entry_price NUMERIC NOT NULL,
+      exit_price NUMERIC NOT NULL,
+      entry_time TIMESTAMPTZ,
+      exit_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      fees NUMERIC NOT NULL DEFAULT 0,
+      funding_received NUMERIC NOT NULL DEFAULT 0,
+      gross_pnl NUMERIC NOT NULL,
+      net_pnl NUMERIC NOT NULL,
+      status TEXT CHECK (status IN ('manual', 'auto')),
+      exit_reason TEXT
+    );
+  `);
+  await client.query(`
+    ALTER TABLE closed_trades ADD COLUMN IF NOT EXISTS exit_reason TEXT;
+  `).catch(() => {});
+
   console.log('Tables created successfully.');
 }
 

@@ -1,32 +1,42 @@
 import { useState, useEffect, useCallback } from 'react';
 import ActivePositions from '../components/ActivePositions';
+import ClosedTradesTable from '../components/ClosedTradesTable';
+import { TRANSACTIONS_UPDATED_EVENT } from './Settings';
 
 const TOKEN_KEY = 'hft_token';
 
-interface BalanceData {
-  totalEquity: string;
-  totalAvailableBalance: string;
-  totalPerpUPL: string;
-  coins: Array<{
-    coin: string;
-    equity: string;
-    usdValue: string;
-    walletBalance: string;
-  }>;
+interface DashboardStats {
+  capital: number;
+  opening: number;
+  marginUsed: number;
+  available: number;
+  todayProfit: number;
+  todayProfitPct: number;
+  dailyRoi: number;
 }
 
-function formatUsd(value: string): string {
-  const n = parseFloat(value);
-  if (Number.isNaN(n)) return '0.00';
-  return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+function formatUsd(value: number): string {
+  if (Number.isNaN(value)) return '0.00';
+  return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
+
+function formatPct(value: number): string {
+  if (Number.isNaN(value)) return '0.00';
+  const sign = value >= 0 ? '+' : '';
+  return `${sign}${value.toFixed(2)}%`;
+}
+
+const cardStyle = {
+  backgroundColor: 'rgba(255, 255, 255, 0.04)',
+  borderColor: 'rgba(0, 123, 255, 0.3)',
+};
 
 export default function Dashboard() {
-  const [balance, setBalance] = useState<BalanceData | null>(null);
+  const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchBalance = useCallback(async () => {
+  const fetchStats = useCallback(async () => {
     setError(null);
     const token = localStorage.getItem(TOKEN_KEY);
     if (!token) {
@@ -36,46 +46,58 @@ export default function Dashboard() {
     }
     setLoading(true);
     try {
-      const res = await fetch('/api/exchange/balance', {
+      const res = await fetch('/api/stats', {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setError(data.error ?? 'Failed to load balance');
-        setBalance(null);
+        setError(data.error ?? 'Failed to load stats');
+        setStats(null);
         return;
       }
-      setBalance({
-        totalEquity: data.totalEquity ?? '0',
-        totalAvailableBalance: data.totalAvailableBalance ?? '0',
-        totalPerpUPL: data.totalPerpUPL ?? '0',
-        coins: data.coins ?? [],
+      setStats({
+        capital: Number(data.capital) ?? 0,
+        opening: Number(data.opening) ?? 0,
+        marginUsed: Number(data.marginUsed) ?? 0,
+        available: Number(data.available) ?? 0,
+        todayProfit: Number(data.todayProfit) ?? 0,
+        todayProfitPct: Number(data.todayProfitPct) ?? 0,
+        dailyRoi: Number(data.dailyRoi) ?? 0,
       });
     } catch {
       setError('Network error');
-      setBalance(null);
+      setStats(null);
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    fetchBalance();
-  }, [fetchBalance]);
+    fetchStats();
+  }, [fetchStats]);
 
-  const upl = balance ? parseFloat(balance.totalPerpUPL) : 0;
-  const uplIsProfit = upl >= 0;
+  useEffect(() => {
+    const handler = () => fetchStats();
+    window.addEventListener(TRANSACTIONS_UPDATED_EVENT, handler);
+    return () => window.removeEventListener(TRANSACTIONS_UPDATED_EVENT, handler);
+  }, [fetchStats]);
+
+  const todayProfitStyle = stats
+    ? stats.todayProfit >= 0
+      ? { color: '#22c55e' }
+      : { color: '#ef4444' }
+    : undefined;
 
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold text-white">Dashboard</h1>
-          <p className="text-gray-400 text-sm mt-1">Live balance from Bybit</p>
+          <p className="text-gray-400 text-sm mt-1">Capital, performance & closed trades</p>
         </div>
         <button
           type="button"
-          onClick={() => fetchBalance()}
+          onClick={() => fetchStats()}
           disabled={loading}
           className="rounded-lg px-4 py-2 font-medium text-white border border-[#007BFF] transition hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-[#007BFF] disabled:opacity-50"
           style={{ backgroundColor: '#007BFF' }}
@@ -96,49 +118,79 @@ export default function Dashboard() {
         </div>
       )}
 
-      <div
-        className="rounded-xl border p-6 backdrop-blur-sm"
-        style={{
-          backgroundColor: 'rgba(255, 255, 255, 0.04)',
-          borderColor: 'rgba(0, 123, 255, 0.3)',
-        }}
-      >
-        {loading && !balance ? (
-          <div className="flex items-center justify-center py-12">
-            <div
-              className="h-10 w-10 animate-spin rounded-full border-2 border-t-transparent"
-              style={{ borderColor: '#007BFF', borderTopColor: 'transparent' }}
-            />
-          </div>
-        ) : balance ? (
-          <div className="grid gap-6 sm:grid-cols-1 md:grid-cols-3">
-            <div className="md:col-span-2">
-              <p className="text-sm font-medium text-gray-400 mb-1">Total Equity (USDT)</p>
-              <p className="text-4xl font-bold tracking-tight" style={{ color: '#007BFF' }}>
-                {formatUsd(balance.totalEquity)}
-              </p>
+      {/* Top section: two cards */}
+      <div className="grid gap-4 sm:grid-cols-1 md:grid-cols-2">
+        {/* Card 1: Capital */}
+        <div className="rounded-xl border p-6 backdrop-blur-sm" style={cardStyle}>
+          <h2 className="text-sm font-medium text-gray-400 mb-3">Capital</h2>
+          {loading && !stats ? (
+            <div className="flex items-center justify-center py-8">
+              <div
+                className="h-8 w-8 animate-spin rounded-full border-2 border-t-transparent"
+                style={{ borderColor: '#007BFF', borderTopColor: 'transparent' }}
+              />
             </div>
-            <div>
-              <p className="text-sm font-medium text-gray-400 mb-1">Available Balance</p>
-              <p className="text-xl font-semibold text-white">
-                {formatUsd(balance.totalAvailableBalance)}
-              </p>
+          ) : stats ? (
+            <div className="space-y-3">
+              <div>
+                <p className="text-2xl font-bold tracking-tight" style={{ color: '#007BFF' }}>
+                  {formatUsd(stats.capital)}
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-4 text-sm">
+                <div>
+                  <p className="text-gray-500">Margin Used</p>
+                  <p className="font-medium text-white">{formatUsd(stats.marginUsed)}</p>
+                </div>
+                <div>
+                  <p className="text-gray-500">Available</p>
+                  <p className="font-medium text-white">{formatUsd(stats.available)}</p>
+                </div>
+              </div>
             </div>
-            <div>
-              <p className="text-sm font-medium text-gray-400 mb-1">Unrealized P&L</p>
-              <p
-                className={`text-xl font-semibold ${uplIsProfit ? 'text-green-500' : 'text-red-500'}`}
-              >
-                {uplIsProfit ? '+' : ''}{formatUsd(balance.totalPerpUPL)}
-              </p>
+          ) : (
+            <p className="text-gray-400 py-2">Add API keys in Exchange Setup.</p>
+          )}
+        </div>
+
+        {/* Card 2: Performance */}
+        <div className="rounded-xl border p-6 backdrop-blur-sm" style={cardStyle}>
+          <h2 className="text-sm font-medium text-gray-400 mb-3">Performance</h2>
+          {loading && !stats ? (
+            <div className="flex items-center justify-center py-8">
+              <div
+                className="h-8 w-8 animate-spin rounded-full border-2 border-t-transparent"
+                style={{ borderColor: '#007BFF', borderTopColor: 'transparent' }}
+              />
             </div>
-          </div>
-        ) : !error ? (
-          <p className="text-gray-400 py-4">No balance data. Add API keys in Exchange Setup.</p>
-        ) : null}
+          ) : stats ? (
+            <div className="space-y-3">
+              <div>
+                <p className="text-xs text-gray-500">Today&apos;s Profit</p>
+                <p className="text-2xl font-bold" style={todayProfitStyle}>
+                  {stats.todayProfit >= 0 ? '+' : ''}{formatUsd(stats.todayProfit)}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500">Profit %</p>
+                <p className="text-lg font-semibold" style={todayProfitStyle}>
+                  {formatPct(stats.todayProfitPct)}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500">Daily ROI %</p>
+                <p className="text-lg font-semibold text-white">{formatPct(stats.dailyRoi)}</p>
+              </div>
+            </div>
+          ) : (
+            <p className="text-gray-400 py-2">Add API keys to see performance.</p>
+          )}
+        </div>
       </div>
 
       <ActivePositions />
+
+      <ClosedTradesTable />
     </div>
   );
 }

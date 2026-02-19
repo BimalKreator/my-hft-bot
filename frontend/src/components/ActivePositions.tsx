@@ -148,6 +148,7 @@ export default function ActivePositions() {
                 <th className="px-4 py-2.5 font-medium">Token</th>
                 <th className="px-4 py-2.5 font-medium">Direction</th>
                 <th className="px-4 py-2.5 font-medium">Entry</th>
+                <th className="px-4 py-2.5 font-medium">Trade Amount</th>
                 <th className="px-4 py-2.5 font-medium">Mark</th>
                 <th className="px-4 py-2.5 font-medium">VWAP Exit</th>
                 <th className="px-4 py-2.5 font-medium">Liq</th>
@@ -188,6 +189,9 @@ export default function ActivePositions() {
                     </td>
                     <td className="px-4 py-2.5 text-gray-300">
                       {formatNum(parseFloat(pos.avgPrice) || 0)}
+                    </td>
+                    <td className="px-4 py-2.5 text-gray-300">
+                      {(parseFloat(pos.size) * parseFloat(pos.avgPrice) || 0).toFixed(2)}
                     </td>
                     <td className="px-4 py-2.5 text-gray-500 text-xs">—</td>
                     <td className="px-4 py-2.5 font-bold" style={{ color: '#007BFF' }}>
