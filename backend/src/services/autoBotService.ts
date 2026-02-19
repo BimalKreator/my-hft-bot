@@ -297,7 +297,10 @@ async function processUser(
     const minQty = parseFloat(minOrderQty) || 0;
     const maxQty = parseFloat(maxOrderQty) || 999999;
     finalQty = Math.floor(rawQty / step) * step;
-    if (finalQty > maxQty) finalQty = maxQty;
+    if (finalQty > maxQty) {
+      finalQty = Math.floor(maxQty / step) * step;
+      console.log(`[autoBot] Quantity capped to Bybit max limit: ${finalQty}`);
+    }
     if (finalQty < minQty) {
       console.warn(`[autoBot] ${topToken.symbol}: finalQty ${finalQty} < minOrderQty ${minQty}, skipping`);
       return;
