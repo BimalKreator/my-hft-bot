@@ -308,9 +308,11 @@ async function processUser(
   const positions = await getPositionList(apiKey, apiSecret, { category: 'linear', settleCoin: 'USDT' });
   if (positions.length >= settings.maxTrades) return;
 
+  const maxTrades = settings.maxTrades ?? 1;
+
   // Auto Exit is handled by monitorExits (1s loop) with reduce-only orders and unified logging.
 
-  // Auto Entry: filter by min funding rate, exclude banned tokens, then Smart Sort, then ONLY top token
+  // Auto Entry: filter by min funding rate, exclude banned tokens, Smart Sort, then top N by max_concurrent_trades
   const minFundingRate = settings.minFundingRate ?? 0;
   let meetsMinFunding = marketData.filter(
     (token) => Math.abs(token.fundingRate) >= minFundingRate
@@ -329,115 +331,122 @@ async function processUser(
     if (intervalA !== intervalB) return intervalA - intervalB;
     return Math.abs(b.fundingRate) - Math.abs(a.fundingRate);
   });
-  const topToken = sorted[0];
-  if (!topToken) return;
+  const tokensToProcess = sorted.slice(0, maxTrades);
+  if (tokensToProcess.length === 0) return;
 
-  const procKey = processedKey(userId, topToken.symbol, topToken.nextFundingTime);
-  if (processedTokens.has(procKey)) return;
+  for (const topToken of tokensToProcess) {
+    const positionsNow = await getPositionList(apiKey, apiSecret, { category: 'linear', settleCoin: 'USDT' });
+    if (positionsNow.length >= maxTrades) break;
 
-  const countdownSec = Math.floor(topToken.countdownMs / 1000);
-  const price = parseFloat(topToken.markPrice || topToken.lastPrice || '0') || 0;
-  console.log(`[autoBot] Checking Top Token: ${topToken.symbol} | Countdown: ${countdownSec}s`);
+    const procKey = processedKey(userId, topToken.symbol, topToken.nextFundingTime);
+    if (processedTokens.has(procKey)) continue;
 
-  const cycleKey = entryCycleKey(userId, topToken.symbol, topToken.nextFundingTime);
-  if (enteredThisCycle.has(cycleKey)) return;
+    const countdownSec = Math.floor(topToken.countdownMs / 1000);
+    const price = parseFloat(topToken.markPrice || topToken.lastPrice || '0') || 0;
+    console.log(`[autoBot] Checking Token: ${topToken.symbol} | Countdown: ${countdownSec}s`);
 
-  const entryTimeSec = settings.entryTimeSec ?? 300;
-  const inWindow = countdownSec <= entryTimeSec && countdownSec > entryTimeSec - 10;
-  if (!inWindow) return;
+    const cycleKey = entryCycleKey(userId, topToken.symbol, topToken.nextFundingTime);
+    if (enteredThisCycle.has(cycleKey)) continue;
 
-  console.log(`[autoBot] Entry Attempt: ${topToken.symbol} (countdown ${countdownSec}s in window)`);
+    const entryTimeSec = settings.entryTimeSec ?? 300;
+    const inWindow = countdownSec <= entryTimeSec && countdownSec > entryTimeSec - 10;
+    if (!inWindow) continue;
 
-  const userLeverage = settings.leverage ?? 5;
-  let maxLeverageStr = '';
-  try {
-    const details = await getInstrumentDetails(topToken.symbol);
-    maxLeverageStr = details.maxLeverage || String(userLeverage);
-  } catch {
-    maxLeverageStr = String(userLeverage);
-  }
-  const maxLeverageNum = parseFloat(maxLeverageStr) || userLeverage;
-  const safeLeverage = Math.min(userLeverage, maxLeverageNum);
-  console.log(`[autoBot] Leverage adjusted to ${safeLeverage} (User: ${userLeverage}, Max: ${maxLeverageStr})`);
+    console.log(`[autoBot] Entry Attempt: ${topToken.symbol} (countdown ${countdownSec}s in window)`);
 
-  try {
-    await setLeverage(apiKey, apiSecret, topToken.symbol, safeLeverage);
-  } catch (levErr: unknown) {
-    const msg = (levErr as { message?: string })?.message ?? String(levErr);
-    if (/leverage\s*not\s*modified/i.test(msg)) {
-      // Bybit often returns this when leverage is already set; do not abort the trade.
-    } else {
-      throw levErr;
-    }
-  }
-
-  const side = topToken.fundingRate < 0 ? 'Buy' : 'Sell';
-
-  // Depth chase: limit entry at user-defined order book depth (Long = askPrice, Short = bidPrice)
-  let entryPrice: number;
-  try {
-    const ob = await getOrderBookDepth(apiKey, apiSecret, topToken.symbol, settings.orderBookDepth ?? 2);
-    entryPrice = side === 'Buy' ? ob.askPrice : ob.bidPrice;
-    if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
-      console.warn(`[autoBot] Order book price invalid for ${topToken.symbol}, skipping entry`);
-      return;
-    }
-  } catch (e) {
-    console.error(`[autoBot] getOrderBookDepth failed ${topToken.symbol}:`, e);
-    return;
-  }
-
-  // Position sizing: allocate from total capital (walletBalance), capped by free margin (availableToWithdraw)
-  const wallet = await getUsdtWalletDetails(apiKey, apiSecret);
-  const totalCapital = parseFloat(wallet.walletBalance) || 0;
-  const freeMargin = parseFloat(wallet.availableToWithdraw) || 0;
-  const allocatedMargin = totalCapital * ((settings.capitalPercent ?? 0) / 100);
-  const finalMargin = Math.min(allocatedMargin, freeMargin);
-  const rawQty = (finalMargin * safeLeverage) / entryPrice;
-  if (rawQty <= 0) return;
-
-  let finalQty: number;
-  try {
-    const { qtyStep, minOrderQty, maxOrderQty, maxMktOrderQty } = await getInstrumentLotSize(apiKey, apiSecret, topToken.symbol);
-    const step = parseFloat(qtyStep) || 0.1;
-    const minQty = parseFloat(minOrderQty) || 0;
-    const maxQty = parseFloat(maxMktOrderQty || maxOrderQty) || 999999;
-    // Determine number of decimal places in the step size
-    const stepStr = step.toString();
-    const stepDecimals = stepStr.includes('.') ? stepStr.split('.')[1].length : 0;
-    // Calculate and fix floating point precision issues
-    finalQty = parseFloat((Math.floor(rawQty / step) * step).toFixed(stepDecimals));
-    if (finalQty > maxQty) {
-      finalQty = parseFloat((Math.floor(maxQty / step) * step).toFixed(stepDecimals));
-      console.log(`[autoBot] Quantity capped to Bybit max limit: ${finalQty}`);
-    }
-    if (finalQty < minQty) {
-      console.warn(`[autoBot] ${topToken.symbol}: finalQty ${finalQty} < minOrderQty ${minQty}, skipping`);
-      return;
-    }
-    console.log('Precision applied for ' + topToken.symbol + ': Raw=' + rawQty + ' Final=' + finalQty);
-  } catch (e) {
-    console.error(`[autoBot] Instrument info failed for ${topToken.symbol}:`, e);
-    return;
-  }
-
-  const qtyStr = String(finalQty);
-
-  processedTokens.add(procKey);
-  enteredThisCycle.add(cycleKey);
-  try {
-    await placeLimitOrder(apiKey, apiSecret, topToken.symbol, side, qtyStr, String(entryPrice));
-    const nextFundingMs = parseInt(topToken.nextFundingTime, 10) || 0;
-    const key = positionKey(userId, topToken.symbol, side);
-    positionFundingTime.set(key, nextFundingMs);
-  } catch (e: unknown) {
-    const err = e as { response?: { data?: unknown }; message?: string };
-    console.error('[autoBot] EXACT BYBIT ERROR for ' + topToken.symbol + ':', err?.response?.data ?? err?.message ?? e);
+    const userLeverage = settings.leverage ?? 5;
+    let maxLeverageStr = '';
     try {
-      await addBannedToken(userId, topToken.symbol, 'Auto-banned: API Execution Error');
-      console.log(`[autoBot] Auto-banned ${topToken.symbol} (API Execution Error)`);
-    } catch (banErr) {
-      console.error(`[autoBot] Failed to add banned token ${topToken.symbol}:`, banErr);
+      const details = await getInstrumentDetails(topToken.symbol);
+      maxLeverageStr = details.maxLeverage || String(userLeverage);
+    } catch {
+      maxLeverageStr = String(userLeverage);
+    }
+    const maxLeverageNum = parseFloat(maxLeverageStr) || userLeverage;
+    const safeLeverage = Math.min(userLeverage, maxLeverageNum);
+    console.log(`[autoBot] Leverage adjusted to ${safeLeverage} (User: ${userLeverage}, Max: ${maxLeverageStr})`);
+
+    try {
+      await setLeverage(apiKey, apiSecret, topToken.symbol, safeLeverage);
+    } catch (levErr: unknown) {
+      const msg = (levErr as { message?: string })?.message ?? String(levErr);
+      if (/leverage\s*not\s*modified/i.test(msg)) {
+        // Bybit often returns this when leverage is already set; do not abort the trade.
+      } else {
+        throw levErr;
+      }
+    }
+
+    const side = topToken.fundingRate < 0 ? 'Buy' : 'Sell';
+
+    // Depth chase: limit entry at user-defined order book depth (Long = askPrice, Short = bidPrice)
+    let entryPrice: number;
+    try {
+      const ob = await getOrderBookDepth(apiKey, apiSecret, topToken.symbol, settings.orderBookDepth ?? 2);
+      entryPrice = side === 'Buy' ? ob.askPrice : ob.bidPrice;
+      if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+        console.warn(`[autoBot] Order book price invalid for ${topToken.symbol}, skipping entry`);
+        continue;
+      }
+    } catch (e) {
+      console.error(`[autoBot] getOrderBookDepth failed ${topToken.symbol}:`, e);
+      continue;
+    }
+
+    // Position sizing: allocate from total capital (walletBalance), capped by free margin (availableToWithdraw)
+    const wallet = await getUsdtWalletDetails(apiKey, apiSecret);
+    const totalCapital = parseFloat(wallet.walletBalance) || 0;
+    const freeMargin = parseFloat(wallet.availableToWithdraw) || 0;
+    const allocatedMargin = totalCapital * ((settings.capitalPercent ?? 0) / 100);
+    const finalMargin = Math.min(allocatedMargin, freeMargin);
+    const rawQty = (finalMargin * safeLeverage) / entryPrice;
+    if (rawQty <= 0) continue;
+
+    let finalQty: number;
+    try {
+      const { qtyStep, minOrderQty, maxOrderQty, maxMktOrderQty } = await getInstrumentLotSize(apiKey, apiSecret, topToken.symbol);
+      const step = parseFloat(qtyStep) || 0.1;
+      const minQty = parseFloat(minOrderQty) || 0;
+      const maxQty = parseFloat(maxMktOrderQty || maxOrderQty) || 999999;
+      // Determine number of decimal places in the step size
+      const stepStr = step.toString();
+      const stepDecimals = stepStr.includes('.') ? stepStr.split('.')[1].length : 0;
+      // Calculate and fix floating point precision issues
+      finalQty = parseFloat((Math.floor(rawQty / step) * step).toFixed(stepDecimals));
+      if (finalQty > maxQty) {
+        finalQty = parseFloat((Math.floor(maxQty / step) * step).toFixed(stepDecimals));
+        console.log(`[autoBot] Quantity capped to Bybit max limit: ${finalQty}`);
+      }
+      if (finalQty < minQty) {
+        console.warn(`[autoBot] ${topToken.symbol}: finalQty ${finalQty} < minOrderQty ${minQty}, skipping`);
+        continue;
+      }
+      console.log('Precision applied for ' + topToken.symbol + ': Raw=' + rawQty + ' Final=' + finalQty);
+    } catch (e) {
+      console.error(`[autoBot] Instrument info failed for ${topToken.symbol}:`, e);
+      continue;
+    }
+
+    const positionsBeforeOrder = await getPositionList(apiKey, apiSecret, { category: 'linear', settleCoin: 'USDT' });
+    if (positionsBeforeOrder.length >= maxTrades) continue;
+
+    const qtyStr = String(finalQty);
+    processedTokens.add(procKey);
+    enteredThisCycle.add(cycleKey);
+    try {
+      await placeLimitOrder(apiKey, apiSecret, topToken.symbol, side, qtyStr, String(entryPrice));
+      const nextFundingMs = parseInt(topToken.nextFundingTime, 10) || 0;
+      const key = positionKey(userId, topToken.symbol, side);
+      positionFundingTime.set(key, nextFundingMs);
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: unknown }; message?: string };
+      console.error('[autoBot] EXACT BYBIT ERROR for ' + topToken.symbol + ':', err?.response?.data ?? err?.message ?? e);
+      try {
+        await addBannedToken(userId, topToken.symbol, 'Auto-banned: API Execution Error');
+        console.log(`[autoBot] Auto-banned ${topToken.symbol} (API Execution Error)`);
+      } catch (banErr) {
+        console.error(`[autoBot] Failed to add banned token ${topToken.symbol}:`, banErr);
+      }
     }
   }
 
