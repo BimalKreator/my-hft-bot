@@ -39,9 +39,17 @@ async function initDb() {
       capital_percent NUMERIC NOT NULL DEFAULT 10,
       max_trades NUMERIC NOT NULL DEFAULT 5,
       entry_time_sec NUMERIC NOT NULL DEFAULT 300,
-      exit_time_sec NUMERIC NOT NULL DEFAULT 3600
+      exit_time_sec NUMERIC NOT NULL DEFAULT 3600,
+      min_funding_rate NUMERIC NOT NULL DEFAULT 0,
+      leverage NUMERIC NOT NULL DEFAULT 5
     );
   `);
+  await client.query(`
+    ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS min_funding_rate NUMERIC NOT NULL DEFAULT 0;
+  `).catch(() => {});
+  await client.query(`
+    ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS leverage NUMERIC NOT NULL DEFAULT 5;
+  `).catch(() => {});
 
   console.log('Tables created successfully.');
 }

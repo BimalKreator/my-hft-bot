@@ -156,3 +156,29 @@ export async function getPositionList(
   const list = (res.result as { list?: Array<{ symbol: string; side: 'Buy' | 'Sell'; size: string }> })?.list ?? [];
   return list.filter((p) => parseFloat(p.size) > 0).map((p) => ({ symbol: p.symbol, side: p.side, size: p.size }));
 }
+
+export interface InstrumentLotSize {
+  qtyStep: string;
+  minOrderQty: string;
+}
+
+/**
+ * Fetch lot size filter for a linear symbol (qtyStep, minOrderQty) for quantity precision.
+ */
+export async function getInstrumentLotSize(
+  apiKey: string,
+  apiSecret: string,
+  symbol: string
+): Promise<InstrumentLotSize> {
+  const client = getClient(apiKey, apiSecret);
+  const res = await client.getInstrumentsInfo({ category: 'linear', symbol });
+  if (res.retCode !== 0) {
+    throw new Error(res.retMsg ?? 'Bybit get instruments info failed');
+  }
+  const list = (res.result as { list?: Array<{ lotSizeFilter?: { qtyStep?: string; minOrderQty?: string } }> })?.list ?? [];
+  const inst = list[0];
+  const filter = inst?.lotSizeFilter;
+  const qtyStep = filter?.qtyStep ?? '0.1';
+  const minOrderQty = filter?.minOrderQty ?? '0';
+  return { qtyStep, minOrderQty };
+}

@@ -47,6 +47,17 @@ export async function updateSettingsHandler(
     if (typeof body.exitTimeSec === 'number' && !Number.isNaN(body.exitTimeSec)) {
       input.exitTimeSec = body.exitTimeSec;
     }
+    const minFundingRateRaw = body.minFundingRate ?? body.min_funding_rate;
+    if (typeof minFundingRateRaw === 'number' && !Number.isNaN(minFundingRateRaw)) {
+      input.minFundingRate = minFundingRateRaw;
+    }
+    const leverageRaw = body.leverage;
+    if (typeof leverageRaw === 'number' && !Number.isNaN(leverageRaw)) {
+      input.leverage = leverageRaw;
+    } else if (typeof leverageRaw === 'string') {
+      const parsed = parseInt(leverageRaw, 10);
+      if (!Number.isNaN(parsed) && parsed >= 1) input.leverage = parsed;
+    }
     const settings = await updateSettings(userId, input);
     res.json(settings);
   } catch (err) {

@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import TradeModal, { type TokenData } from '../components/TradeModal';
 
 const TOKEN_KEY = 'hft_token';
+const SAVE_DEBOUNCE_MS = 500;
 
 interface FundingItem {
   symbol: string;
@@ -94,6 +95,51 @@ export default function Scanner() {
   const [isAutoRefresh, setIsAutoRefresh] = useState<boolean>(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [selectedToken, setSelectedToken] = useState<TokenData | null>(null);
+  const saveMinFundingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const fetchSettings = useCallback(async () => {
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (!token) return;
+    try {
+      const res = await fetch('/api/settings', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const json = await res.json().catch(() => ({}));
+      if (res.ok && json != null && typeof json.minFundingRate === 'number') {
+        const pct = json.minFundingRate * 100;
+        setMinFundingPct(pct > 0 ? String(pct) : '');
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchSettings();
+  }, [fetchSettings]);
+
+  const saveMinFundingDebounced = useCallback((percentageStr: string) => {
+    if (saveMinFundingTimeoutRef.current) clearTimeout(saveMinFundingTimeoutRef.current);
+    saveMinFundingTimeoutRef.current = setTimeout(async () => {
+      saveMinFundingTimeoutRef.current = null;
+      const token = localStorage.getItem(TOKEN_KEY);
+      if (!token) return;
+      const pct = parseFloat(percentageStr);
+      const minFundingRate = Number.isNaN(pct) ? 0 : pct / 100;
+      try {
+        await fetch('/api/settings', {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ minFundingRate }),
+        });
+      } catch {
+        // ignore
+      }
+    }, SAVE_DEBOUNCE_MS);
+  }, []);
 
   const fetchData = useCallback(async (silent = false) => {
     const token = localStorage.getItem(TOKEN_KEY);
@@ -246,7 +292,11 @@ export default function Scanner() {
             step="0.001"
             placeholder="0"
             value={minFundingPct}
-            onChange={(e) => setMinFundingPct(e.target.value)}
+            onChange={(e) => {
+              const v = e.target.value;
+              setMinFundingPct(v);
+              saveMinFundingDebounced(v);
+            }}
             className="w-full min-w-[100px] rounded-lg border bg-black/40 px-3 py-2 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-[#007BFF] text-sm"
             style={{ borderColor: 'rgba(255, 255, 255, 0.12)' }}
           />

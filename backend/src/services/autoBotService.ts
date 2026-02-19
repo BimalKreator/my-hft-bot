@@ -4,13 +4,13 @@ import { decrypt } from '../utils/encryption.js';
 import {
   getWalletBalance,
   getPositionList,
+  getInstrumentLotSize,
   setLeverage,
   placeMarketOrder,
 } from './bybitService.js';
 import { FundingScanner } from './scannerService.js';
 
 const INTERVAL_MS = 5_000;
-const DEFAULT_LEVERAGE = 5;
 
 /** Track which (userId, symbol, nextFundingTime) we already entered this cycle to avoid double entry. */
 const enteredThisCycle = new Set<string>();
@@ -60,6 +60,7 @@ async function processUser(
     countdownMs: number;
     markPrice: string;
     lastPrice: string;
+    fundingIntervalHours?: number;
   }>,
   now: number
 ): Promise<void> {
@@ -95,44 +96,79 @@ async function processUser(
     }
   }
 
-  // Auto Entry: when countdown (seconds) is in [entry_time_sec - 10, entry_time_sec], place order
-  const entryTimeSec = settings.entryTimeSec;
-  const capitalPct = settings.capitalPercent / 100;
-  const capitalUsdt = availableBalance * capitalPct;
+  // Auto Entry: filter by min funding rate, then Smart Sort, then ONLY top token
+  const minFundingRate = settings.minFundingRate ?? 0;
+  const meetsMinFunding = marketData.filter(
+    (token) => Math.abs(token.fundingRate) >= minFundingRate
+  );
+  if (meetsMinFunding.length === 0) {
+    const pct = (minFundingRate * 100).toFixed(4);
+    console.log(`[autoBot] No tokens meet Min Funding criteria (>= ${pct}%)`);
+    return;
+  }
 
-  for (const token of marketData) {
-    const countdownSec = Math.floor(token.countdownMs / 1000);
-    const price = parseFloat(token.markPrice || token.lastPrice || '0') || 0;
-    if (price <= 0) continue;
+  const sorted = [...meetsMinFunding].sort((a, b) => {
+    const intervalA = a.fundingIntervalHours ?? 0;
+    const intervalB = b.fundingIntervalHours ?? 0;
+    if (intervalA !== intervalB) return intervalA - intervalB;
+    return Math.abs(b.fundingRate) - Math.abs(a.fundingRate);
+  });
+  const topToken = sorted[0];
+  if (!topToken) return;
 
-    const cycleKey = entryCycleKey(userId, token.symbol, token.nextFundingTime);
-    if (enteredThisCycle.has(cycleKey)) continue;
+  const countdownSec = Math.floor(topToken.countdownMs / 1000);
+  const price = parseFloat(topToken.markPrice || topToken.lastPrice || '0') || 0;
+  console.log(`[autoBot] Checking Top Token: ${topToken.symbol} | Countdown: ${countdownSec}s`);
 
-    // Fire when countdown is in (entry_time_sec - 10, entry_time_sec]
-    if (countdownSec > entryTimeSec || countdownSec <= entryTimeSec - 10) continue;
+  const cycleKey = entryCycleKey(userId, topToken.symbol, topToken.nextFundingTime);
+  if (enteredThisCycle.has(cycleKey)) return;
 
-    const qty = capitalUsdt / price;
-    if (qty <= 0) continue;
+  const entryTimeSec = settings.entryTimeSec ?? 300;
+  const inWindow = countdownSec <= entryTimeSec && countdownSec > entryTimeSec - 10;
+  if (!inWindow) return;
 
-    const side = token.fundingRate < 0 ? 'Buy' : 'Sell';
-    const qtyStr = String(qty);
+  console.log(`[autoBot] Entry Attempt: ${topToken.symbol} (countdown ${countdownSec}s in window)`);
 
-    try {
-      await setLeverage(apiKey, apiSecret, token.symbol, DEFAULT_LEVERAGE);
-    } catch {
-      // Leverage may already be set
+  const leverage = settings.leverage ?? 5;
+  try {
+    await setLeverage(apiKey, apiSecret, topToken.symbol, leverage);
+    console.log(`[autoBot] Leverage set to ${leverage}`);
+  } catch {
+    // Ignore e.g. "Leverage not modified"
+  }
+
+  // Margin Used = Balance * Capital%; Position Size = Margin Used * Leverage; Qty = Position Size / Price
+  const rawQty = (availableBalance * (settings.capitalPercent / 100) * leverage) / price;
+  if (rawQty <= 0) return;
+
+  let finalQty: number;
+  try {
+    const { qtyStep, minOrderQty } = await getInstrumentLotSize(apiKey, apiSecret, topToken.symbol);
+    const step = parseFloat(qtyStep) || 0.1;
+    const minQty = parseFloat(minOrderQty) || 0;
+    finalQty = Math.floor(rawQty / step) * step;
+    if (finalQty < minQty) {
+      console.warn(`[autoBot] ${topToken.symbol}: finalQty ${finalQty} < minOrderQty ${minQty}, skipping`);
+      return;
     }
+    console.log(`[autoBot] Precision applied for ${topToken.symbol}: Raw=${rawQty} Final=${finalQty}`);
+  } catch (e) {
+    console.error(`[autoBot] Instrument info failed for ${topToken.symbol}:`, e);
+    return;
+  }
 
-    try {
-      enteredThisCycle.add(cycleKey);
-      await placeMarketOrder(apiKey, apiSecret, token.symbol, side, qtyStr);
-      const nextFundingMs = parseInt(token.nextFundingTime, 10) || 0;
-      const key = positionKey(userId, token.symbol, side);
-      positionFundingTime.set(key, nextFundingMs);
-    } catch (e) {
-      console.error(`[autoBot] Entry failed ${token.symbol}:`, e);
-      enteredThisCycle.delete(cycleKey);
-    }
+  const qtyStr = String(finalQty);
+  const side = topToken.fundingRate < 0 ? 'Buy' : 'Sell';
+
+  try {
+    enteredThisCycle.add(cycleKey);
+    await placeMarketOrder(apiKey, apiSecret, topToken.symbol, side, qtyStr);
+    const nextFundingMs = parseInt(topToken.nextFundingTime, 10) || 0;
+    const key = positionKey(userId, topToken.symbol, side);
+    positionFundingTime.set(key, nextFundingMs);
+  } catch (e) {
+    console.error(`[autoBot] Entry failed ${topToken.symbol}:`, e);
+    enteredThisCycle.delete(cycleKey);
   }
 
   // Prune old cycle keys (nextFundingTime in the past so we can enter next cycle)

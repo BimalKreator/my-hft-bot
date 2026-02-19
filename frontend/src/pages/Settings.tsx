@@ -10,6 +10,7 @@ interface BotSettings {
   maxTrades: number;
   entryTimeSec: number;
   exitTimeSec: number;
+  leverage: number;
 }
 
 const defaultSettings: Omit<BotSettings, 'userId'> = {
@@ -19,6 +20,7 @@ const defaultSettings: Omit<BotSettings, 'userId'> = {
   maxTrades: 5,
   entryTimeSec: 300,
   exitTimeSec: 3600,
+  leverage: 5,
 };
 
 export default function Settings() {
@@ -55,6 +57,7 @@ export default function Settings() {
         maxTrades: Number(data.maxTrades) ?? 5,
         entryTimeSec: Number(data.entryTimeSec) ?? 300,
         exitTimeSec: Number(data.exitTimeSec) ?? 3600,
+        leverage: Number(data.leverage) ?? 5,
       });
     } catch {
       setError('Network error. Edit below and click Save to retry.');
@@ -97,6 +100,7 @@ export default function Settings() {
           maxTrades: Number(data.maxTrades) ?? settings.maxTrades,
           entryTimeSec: Number(data.entryTimeSec) ?? settings.entryTimeSec,
           exitTimeSec: Number(data.exitTimeSec) ?? settings.exitTimeSec,
+          leverage: Number(data.leverage) ?? settings.leverage,
         });
         setSuccessMessage('Success — bot updated.');
         setTimeout(() => setSuccessMessage(null), 3000);
@@ -118,6 +122,7 @@ export default function Settings() {
       maxTrades: Number(settings.maxTrades),
       entryTimeSec: Number(settings.entryTimeSec),
       exitTimeSec: Number(settings.exitTimeSec),
+      leverage: Number(settings.leverage),
     });
   }, [settings, saveSettings]);
 
@@ -249,6 +254,30 @@ export default function Settings() {
               />
               <span className="text-gray-400 font-medium">%</span>
             </div>
+          </div>
+
+          {/* Leverage (x) */}
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-2">
+              Leverage (x)
+            </label>
+            <input
+              type="number"
+              min={1}
+              max={50}
+              step={1}
+              value={settings.leverage}
+              onChange={(e) => {
+                const v = parseInt(e.target.value, 10);
+                if (!Number.isNaN(v)) {
+                  setSettings((s) => s ? { ...s, leverage: v } : s);
+                  debouncedSave({ leverage: Number(v) });
+                }
+              }}
+              className="w-full rounded-lg border bg-black/50 px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-[#007BFF]"
+              style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
+              placeholder="e.g. 5"
+            />
           </div>
 
           {/* Max Concurrent Trades */}
