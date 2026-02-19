@@ -205,13 +205,16 @@ export async function closePosition(
       ? (exitPrice - entryPrice) * qtyNum
       : (entryPrice - exitPrice) * qtyNum;
     // Net PnL = Gross PnL - Fees + fundingReceived (persisted via insertClosedTrade)
+    // Store crypto prices with high precision (at least 6 decimals); never use .toFixed(2)
+    const entryPriceStored = Number(entryPrice.toFixed(6));
+    const exitPriceStored = Number(exitPrice.toFixed(6));
 
     await insertClosedTrade({
       userId,
       symbol,
       side,
-      entryPrice,
-      exitPrice,
+      entryPrice: entryPriceStored,
+      exitPrice: exitPriceStored,
       qty: qtyNum,
       grossPnl,
       funding: fundingReceived,

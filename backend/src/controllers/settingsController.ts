@@ -64,6 +64,13 @@ export async function updateSettingsHandler(
       input.slPreMultiplier = slPreMultiplierRaw;
     }
     if (typeof body.slPostFundingEnabled === 'boolean') input.slPostFundingEnabled = body.slPostFundingEnabled;
+    const orderBookDepthRaw = body.orderBookDepth ?? body.order_book_depth;
+    if (typeof orderBookDepthRaw === 'number' && !Number.isNaN(orderBookDepthRaw) && orderBookDepthRaw >= 1 && orderBookDepthRaw <= 50) {
+      input.orderBookDepth = Math.round(orderBookDepthRaw);
+    } else if (typeof orderBookDepthRaw === 'string') {
+      const parsed = parseInt(orderBookDepthRaw, 10);
+      if (!Number.isNaN(parsed) && parsed >= 1 && parsed <= 50) input.orderBookDepth = parsed;
+    }
     const settings = await updateSettings(userId, input);
     res.json(settings);
   } catch (err) {

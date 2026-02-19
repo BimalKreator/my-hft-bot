@@ -59,6 +59,9 @@ async function initDb() {
   await client.query(`
     ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS sl_post_funding_enabled BOOLEAN NOT NULL DEFAULT false;
   `).catch(() => {});
+  await client.query(`
+    ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS order_book_depth INTEGER NOT NULL DEFAULT 2;
+  `).catch(() => {});
 
   await client.query(`
     CREATE TABLE IF NOT EXISTS daily_snapshots (

@@ -31,6 +31,23 @@ function formatUsd(value: number): string {
   return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+/** Prices: 4–6 decimal places with $ prefix. */
+function formatPrice(value: number): string {
+  if (Number.isNaN(value)) return '—';
+  return '$' + value.toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 6 });
+}
+
+/** USD amount with $ prefix (2 decimals). */
+function formatUsdWithSign(value: number): string {
+  if (Number.isNaN(value)) return '—';
+  return '$' + value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function formatQty(value: number): string {
+  if (Number.isNaN(value)) return '—';
+  return value.toLocaleString('en-US', { maximumFractionDigits: 6, minimumFractionDigits: 0 });
+}
+
 function formatTime(iso: string): string {
   try {
     const d = new Date(iso);
@@ -235,6 +252,7 @@ export default function ClosedTradesTable() {
               <tr className="text-left text-gray-400" style={{ backgroundColor: 'rgba(0, 0, 0, 0.2)' }}>
                 <th className="px-4 py-2.5 font-medium">Token</th>
                 <th className="px-4 py-2.5 font-medium">Direction</th>
+                <th className="px-4 py-2.5 font-medium">Quantity</th>
                 <th className="px-4 py-2.5 font-medium">Trade Amount</th>
                 <th className="px-4 py-2.5 font-medium">Entry / Exit Price</th>
                 <th className="px-4 py-2.5 font-medium">Time</th>
@@ -247,7 +265,7 @@ export default function ClosedTradesTable() {
             <tbody>
               {rows.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-4 py-8 text-center text-gray-400">
+                  <td colSpan={10} className="px-4 py-8 text-center text-gray-400">
                     No closed trades match the filters.
                   </td>
                 </tr>
@@ -275,14 +293,15 @@ export default function ClosedTradesTable() {
                           {direction}
                         </span>
                       </td>
+                      <td className="px-4 py-2.5 text-gray-300">{formatQty(parseFloat(r.qty) || 0)}</td>
                       <td className="px-4 py-2.5 text-gray-300">
-                        {((parseFloat(r.qty) || 0) * (parseFloat(r.entry_price) || 0)).toFixed(2)}
+                        {formatUsdWithSign((parseFloat(r.qty) || 0) * (parseFloat(r.entry_price) || 0))}
                       </td>
                       <td className="px-4 py-2.5 text-gray-400">
-                        {formatUsd(parseFloat(r.entry_price) || 0)} / {formatUsd(parseFloat(r.exit_price) || 0)}
+                        {formatPrice(parseFloat(r.entry_price) || 0)} / {formatPrice(parseFloat(r.exit_price) || 0)}
                       </td>
                       <td className="px-4 py-2.5 text-gray-400">{formatTime(r.closed_at)}</td>
-                      <td className="px-4 py-2.5 text-gray-400">{formatUsd(parseFloat(r.fees) || 0)}</td>
+                      <td className="px-4 py-2.5 text-gray-400">{formatUsdWithSign(parseFloat(r.fees) || 0)}</td>
                       <td className="px-4 py-2.5">
                         <span
                           className="inline-block rounded px-2 py-0.5 text-xs font-medium"
@@ -298,7 +317,7 @@ export default function ClosedTradesTable() {
                       <td className="px-4 py-2.5">
                         <span className="text-green-500 text-xs font-medium">
                           {(parseFloat(r.funding_received ?? r.funding ?? '0') >= 0 ? '+' : '')}
-                          {(parseFloat(r.funding_received ?? r.funding ?? '0')).toFixed(4)}
+                          ${(parseFloat(r.funding_received ?? r.funding ?? '0') || 0).toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 4 })}
                         </span>
                       </td>
                       <td className="px-4 py-2.5">
@@ -310,7 +329,7 @@ export default function ClosedTradesTable() {
                               : { backgroundColor: 'rgba(239, 68, 68, 0.2)', color: '#ef4444' }
                           }
                         >
-                          {isProfit ? '+' : ''}{formatUsd(netPnl)}
+                          {isProfit ? '+' : ''}{formatUsdWithSign(netPnl)}
                         </span>
                       </td>
                     </tr>

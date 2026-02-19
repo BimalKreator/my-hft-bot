@@ -13,6 +13,7 @@ export interface BotSettings {
   slPreFundingEnabled: boolean;
   slPreMultiplier: number;
   slPostFundingEnabled: boolean;
+  orderBookDepth: number;
 }
 
 interface SettingsRow {
@@ -28,6 +29,7 @@ interface SettingsRow {
   sl_pre_funding_enabled?: boolean;
   sl_pre_multiplier?: string;
   sl_post_funding_enabled?: boolean;
+  order_book_depth?: string;
 }
 
 function rowToSettings(row: SettingsRow): BotSettings {
@@ -44,6 +46,7 @@ function rowToSettings(row: SettingsRow): BotSettings {
     slPreFundingEnabled: row.sl_pre_funding_enabled ?? false,
     slPreMultiplier: row.sl_pre_multiplier != null ? parseFloat(row.sl_pre_multiplier) : 1,
     slPostFundingEnabled: row.sl_post_funding_enabled ?? false,
+    orderBookDepth: row.order_book_depth != null ? parseInt(row.order_book_depth, 10) : 2,
   };
 }
 
@@ -59,6 +62,7 @@ const DEFAULTS: Omit<BotSettings, 'userId'> = {
   slPreFundingEnabled: false,
   slPreMultiplier: 1,
   slPostFundingEnabled: false,
+  orderBookDepth: 2,
 };
 
 export async function getUsersWithAutoEntryEnabled(): Promise<number[]> {
@@ -71,7 +75,7 @@ export async function getUsersWithAutoEntryEnabled(): Promise<number[]> {
 export async function getSettings(userId: number): Promise<BotSettings> {
   const result = await query<SettingsRow>(
     `SELECT user_id, auto_entry_enabled, auto_exit_enabled, capital_percent, max_trades, entry_time_sec, exit_time_sec, min_funding_rate, leverage,
-            sl_pre_funding_enabled, sl_pre_multiplier, sl_post_funding_enabled
+            sl_pre_funding_enabled, sl_pre_multiplier, sl_post_funding_enabled, order_book_depth
      FROM bot_settings WHERE user_id = $1`,
     [userId]
   );
@@ -94,6 +98,7 @@ export interface UpdateSettingsInput {
   slPreFundingEnabled?: boolean;
   slPreMultiplier?: number;
   slPostFundingEnabled?: boolean;
+  orderBookDepth?: number;
 }
 
 export async function updateSettings(
@@ -114,10 +119,12 @@ export async function updateSettings(
     slPreFundingEnabled: input.slPreFundingEnabled ?? current.slPreFundingEnabled,
     slPreMultiplier: input.slPreMultiplier ?? current.slPreMultiplier,
     slPostFundingEnabled: input.slPostFundingEnabled ?? current.slPostFundingEnabled,
+    orderBookDepth: input.orderBookDepth ?? current.orderBookDepth,
   };
+  const depthInt = Math.max(1, Math.min(50, Math.round(merged.orderBookDepth) || 2));
   await query(
-    `INSERT INTO bot_settings (user_id, auto_entry_enabled, auto_exit_enabled, capital_percent, max_trades, entry_time_sec, exit_time_sec, min_funding_rate, leverage, sl_pre_funding_enabled, sl_pre_multiplier, sl_post_funding_enabled)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    `INSERT INTO bot_settings (user_id, auto_entry_enabled, auto_exit_enabled, capital_percent, max_trades, entry_time_sec, exit_time_sec, min_funding_rate, leverage, sl_pre_funding_enabled, sl_pre_multiplier, sl_post_funding_enabled, order_book_depth)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
      ON CONFLICT (user_id) DO UPDATE SET
        auto_entry_enabled = EXCLUDED.auto_entry_enabled,
        auto_exit_enabled = EXCLUDED.auto_exit_enabled,
@@ -129,7 +136,8 @@ export async function updateSettings(
        leverage = EXCLUDED.leverage,
        sl_pre_funding_enabled = EXCLUDED.sl_pre_funding_enabled,
        sl_pre_multiplier = EXCLUDED.sl_pre_multiplier,
-       sl_post_funding_enabled = EXCLUDED.sl_post_funding_enabled`,
+       sl_post_funding_enabled = EXCLUDED.sl_post_funding_enabled,
+       order_book_depth = EXCLUDED.order_book_depth`,
     [
       userId,
       merged.autoEntryEnabled,
@@ -143,6 +151,7 @@ export async function updateSettings(
       merged.slPreFundingEnabled,
       merged.slPreMultiplier,
       merged.slPostFundingEnabled,
+      depthInt,
     ]
   );
   return getSettings(userId);

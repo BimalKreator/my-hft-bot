@@ -17,7 +17,7 @@ interface DashboardStats {
 
 function formatUsd(value: number): string {
   if (Number.isNaN(value)) return '0.00';
-  return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return '$' + value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function formatPct(value: number): string {
@@ -35,6 +35,14 @@ export default function Dashboard() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [inrRate, setInrRate] = useState(86.5);
+
+  useEffect(() => {
+    fetch('https://api.exchangerate-api.com/v4/latest/USD')
+      .then((res) => res.json())
+      .then((data) => setInrRate(data.rates?.INR ?? 86.5))
+      .catch(() => {});
+  }, []);
 
   const fetchDashboardData = useCallback(async (silent = false) => {
     setError(null);
@@ -138,6 +146,9 @@ export default function Dashboard() {
                 <p className="text-2xl font-bold tracking-tight" style={{ color: '#007BFF' }}>
                   {formatUsd(stats.capital)}
                 </p>
+                <span className="text-sm text-gray-400">
+                  ≈ ₹{(stats.capital * inrRate).toLocaleString('en-IN')}
+                </span>
               </div>
               <div className="flex flex-wrap gap-4 text-sm">
                 <div>
@@ -172,6 +183,9 @@ export default function Dashboard() {
                 <p className="text-2xl font-bold" style={todayProfitStyle}>
                   {stats.todayProfit >= 0 ? '+' : ''}{formatUsd(stats.todayProfit)}
                 </p>
+                <span className="text-sm text-gray-400">
+                  ≈ ₹{(stats.todayProfit * inrRate).toLocaleString('en-IN')}
+                </span>
               </div>
               <div>
                 <p className="text-xs text-gray-500">Profit %</p>

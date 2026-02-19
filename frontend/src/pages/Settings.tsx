@@ -22,6 +22,7 @@ interface BotSettings {
   entryTimeSec: number;
   exitTimeSec: number;
   leverage: number;
+  orderBookDepth: number;
   slPreFundingEnabled: boolean;
   slPreMultiplier: number;
   slPostFundingEnabled: boolean;
@@ -35,6 +36,7 @@ const defaultSettings: Omit<BotSettings, 'userId'> = {
   entryTimeSec: 300,
   exitTimeSec: 3600,
   leverage: 5,
+  orderBookDepth: 2,
   slPreFundingEnabled: false,
   slPreMultiplier: 2,
   slPostFundingEnabled: false,
@@ -85,6 +87,7 @@ export default function Settings() {
         entryTimeSec: Number(data.entryTimeSec) ?? 300,
         exitTimeSec: Number(data.exitTimeSec) ?? 3600,
         leverage: Number(data.leverage) ?? 5,
+        orderBookDepth: Math.max(1, Math.min(50, Number(data.orderBookDepth) || 2)),
         slPreFundingEnabled: data.slPreFundingEnabled ?? false,
         slPreMultiplier: Number(data.slPreMultiplier) ?? 2,
         slPostFundingEnabled: data.slPostFundingEnabled ?? false,
@@ -131,6 +134,7 @@ export default function Settings() {
           entryTimeSec: Number(data.entryTimeSec) ?? settings.entryTimeSec,
           exitTimeSec: Number(data.exitTimeSec) ?? settings.exitTimeSec,
           leverage: Number(data.leverage) ?? settings.leverage,
+          orderBookDepth: Number(data.orderBookDepth) ?? settings.orderBookDepth,
           slPreFundingEnabled: data.slPreFundingEnabled ?? settings.slPreFundingEnabled,
           slPreMultiplier: Number(data.slPreMultiplier) ?? settings.slPreMultiplier,
           slPostFundingEnabled: data.slPostFundingEnabled ?? settings.slPostFundingEnabled,
@@ -156,6 +160,7 @@ export default function Settings() {
       entryTimeSec: Number(settings.entryTimeSec),
       exitTimeSec: Number(settings.exitTimeSec),
       leverage: Number(settings.leverage),
+      orderBookDepth: Math.max(1, Math.min(50, Number(settings.orderBookDepth) || 2)),
       slPreFundingEnabled: Boolean(settings.slPreFundingEnabled),
       slPreMultiplier: Number(settings.slPreMultiplier) ?? 2,
       slPostFundingEnabled: Boolean(settings.slPostFundingEnabled),
@@ -431,6 +436,31 @@ export default function Settings() {
               }}
               className="w-full rounded-lg border bg-black/50 px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-[#007BFF]"
               style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
+            />
+          </div>
+
+          {/* Order Book Depth Level */}
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-2">
+              Order Book Depth Level
+            </label>
+            <input
+              type="number"
+              min={1}
+              max={50}
+              step={1}
+              value={settings.orderBookDepth}
+              onChange={(e) => {
+                const v = parseInt(e.target.value, 10);
+                if (!Number.isNaN(v)) {
+                  const clamped = Math.max(1, Math.min(50, v));
+                  setSettings((s) => s ? { ...s, orderBookDepth: clamped } : s);
+                  debouncedSave({ orderBookDepth: clamped });
+                }
+              }}
+              className="w-full rounded-lg border bg-black/50 px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-[#007BFF]"
+              style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
+              placeholder="e.g. 2"
             />
           </div>
 

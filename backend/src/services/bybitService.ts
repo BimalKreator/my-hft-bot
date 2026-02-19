@@ -317,6 +317,7 @@ export interface LinearPosition {
   side: 'Buy' | 'Sell';
   size: string;
   avgPrice: string;
+  markPrice?: string;
 }
 
 /**
@@ -334,10 +335,10 @@ export async function getPositionList(
   if (res.retCode !== 0) {
     throw new Error(res.retMsg ?? 'Bybit get position list failed');
   }
-  const list = (res.result as { list?: Array<{ symbol: string; side: 'Buy' | 'Sell'; size: string; avgPrice?: string }> })?.list ?? [];
+  const list = (res.result as { list?: Array<{ symbol: string; side: 'Buy' | 'Sell'; size: string; avgPrice?: string; markPrice?: string }> })?.list ?? [];
   return list
     .filter((p) => parseFloat(p.size) > 0)
-    .map((p) => ({ symbol: p.symbol, side: p.side, size: p.size, avgPrice: p.avgPrice ?? '0' }));
+    .map((p) => ({ symbol: p.symbol, side: p.side, size: p.size, avgPrice: p.avgPrice ?? '0', markPrice: p.markPrice }));
 }
 
 export interface OrderbookLevel {
@@ -365,35 +366,36 @@ export async function getOrderbook(symbol: string, limit = 50): Promise<Orderboo
   return { bids, asks };
 }
 
-export interface OrderBookL2Result {
-  bidL2: number;
-  askL2: number;
+export interface OrderBookDepthResult {
+  bidPrice: number;
+  askPrice: number;
 }
 
 /**
- * Get Level 2 orderbook prices (second bid and second ask) for a linear perpetual.
- * Uses limit 5 to ensure at least 2 levels exist. Handles missing levels and parse errors.
+ * Get orderbook price at a specific depth (1 = best bid/ask). Fetches 50 rows, then indexes by depth (0-indexed: rowIndex = depth - 1).
  */
-export async function getOrderBookL2(
+export async function getOrderBookDepth(
   apiKey: string,
   apiSecret: string,
-  symbol: string
-): Promise<OrderBookL2Result> {
+  symbol: string,
+  depth: number = 2
+): Promise<OrderBookDepthResult> {
   try {
     const client = getClient(apiKey, apiSecret);
-    const res = await client.getOrderbook({ category: 'linear', symbol, limit: 5 });
+    const res = await client.getOrderbook({ category: 'linear', symbol, limit: 50 });
     if (res.retCode !== 0) {
       throw new Error(res.retMsg ?? 'Bybit get orderbook failed');
     }
     const result = res.result as { b?: [string, string][]; a?: [string, string][] };
     const bids = result.b ?? [];
     const asks = result.a ?? [];
-    const bidL2 = bids.length > 1 ? parseFloat(bids[1][0]) : NaN;
-    const askL2 = asks.length > 1 ? parseFloat(asks[1][0]) : NaN;
-    return { bidL2, askL2 };
+    const rowIndex = Math.max(0, depth - 1);
+    const bidPrice = bids.length > rowIndex ? parseFloat(bids[rowIndex][0]) : NaN;
+    const askPrice = asks.length > rowIndex ? parseFloat(asks[rowIndex][0]) : NaN;
+    return { bidPrice, askPrice };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`getOrderBookL2 ${symbol}: ${msg}`);
+    throw new Error(`getOrderBookDepth ${symbol}: ${msg}`);
   }
 }
 

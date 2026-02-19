@@ -11,7 +11,7 @@ import {
   placeLimitOrder,
   placeLimitOrderReduceOnly,
   placeMarketOrderReduceOnly,
-  getOrderBookL2,
+  getOrderBookDepth,
   getActiveOrders,
   cancelAllOrders,
   getExecutionList,
@@ -58,7 +58,8 @@ async function saveClosedTradeAfterExit(
   orderId: string,
   exitReason: 'Time Exit' | 'Stoploss Hit' | 'Pre-Funding Stoploss' | 'Post-Funding Stoploss',
   fundingReceived: number = 0,
-  estimatedExitPrice?: number
+  estimatedExitPrice?: number,
+  estimatedFeesWhenZero?: number
 ): Promise<void> {
   try {
     const waitMs = estimatedExitPrice != null ? 2000 : 400;
@@ -80,6 +81,9 @@ async function saveClosedTradeAfterExit(
     }
     if (exitPrice === 0 && estimatedExitPrice != null && !Number.isNaN(estimatedExitPrice)) {
       exitPrice = estimatedExitPrice;
+    }
+    if (fees === 0 && estimatedFeesWhenZero != null && !Number.isNaN(estimatedFeesWhenZero)) {
+      fees = estimatedFeesWhenZero;
     }
     const grossPnl = side === 'Buy' ? (exitPrice - entryPrice) * qty : (entryPrice - exitPrice) * qty;
     await insertClosedTrade({
@@ -176,32 +180,40 @@ async function monitorExits(): Promise<void> {
             }
           }
 
-          // L2-based PnL: Long = value at bidL2 (sell to close), Short = value at askL2 (buy to close)
-          let bidL2 = 0;
-          let askL2 = 0;
+          // Depth-based PnL: Long = value at bidPrice (sell to close), Short = value at askPrice (buy to close)
+          let bidPrice = 0;
+          let askPrice = 0;
           try {
-            const l2 = await getOrderBookL2(apiKey, apiSecret, pos.symbol);
-            bidL2 = l2.bidL2;
-            askL2 = l2.askL2;
+            const ob = await getOrderBookDepth(apiKey, apiSecret, pos.symbol, settings.orderBookDepth ?? 2);
+            bidPrice = ob.bidPrice;
+            askPrice = ob.askPrice;
           } catch (e) {
-            console.error(`[autoBot] getOrderBookL2 failed ${pos.symbol}:`, e);
+            console.error(`[autoBot] getOrderBookDepth failed ${pos.symbol}:`, e);
             continue;
           }
-          const l2Price = pos.side === 'Buy' ? bidL2 : askL2;
-          const pnlPct = entry <= 0 || !Number.isFinite(l2Price) ? 0 : (pos.side === 'Buy' ? (l2Price - entry) / entry : (entry - l2Price) / entry) * 100;
-          const pnl = !Number.isFinite(l2Price) ? 0 : pos.side === 'Buy' ? (l2Price - entry) * qty : (entry - l2Price) * qty;
+          // Fallback so exit price is never 0: markPrice then avgPrice
+          const fallbackPrice = parseFloat(pos.markPrice ?? '') || entry;
+          const bidPriceSafe = (Number.isFinite(bidPrice) && bidPrice > 0) ? bidPrice : fallbackPrice;
+          const askPriceSafe = (Number.isFinite(askPrice) && askPrice > 0) ? askPrice : fallbackPrice;
+          const currentPrice = pos.side === 'Buy' ? bidPriceSafe : askPriceSafe;
+          const pnlPct = entry <= 0 || !Number.isFinite(currentPrice) ? 0 : (pos.side === 'Buy' ? (currentPrice - entry) / entry : (entry - currentPrice) / entry) * 100;
+          const pnl = !Number.isFinite(currentPrice) ? 0 : pos.side === 'Buy' ? (currentPrice - entry) * qty : (entry - currentPrice) * qty;
+          // Maker fee estimate (0.02%) when Bybit returns 0
+          const estimatedMakerFee = 0.0002 * qty * currentPrice;
+
+          // Exit price never 0: use depth price or fallback (markPrice / avgPrice)
+          const exitPrice = pos.side === 'Buy' ? bidPriceSafe : askPriceSafe;
 
           // Stoploss takes priority over time-based exit. Check pre-funding then post-funding stoploss first.
           if (isPreFunding && settings.slPreFundingEnabled) {
             const slThresholdPct = Math.abs(fundingRate) * 100 * (settings.slPreMultiplier ?? 1);
             if (pnlPct <= -slThresholdPct) {
               try {
-                const exitPriceL2 = pos.side === 'Buy' ? bidL2 : askL2;
-                const { orderId } = await placeLimitOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, pos.size, String(exitPriceL2));
+                const { orderId } = await placeLimitOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, pos.size, String(exitPrice));
                 positionFundingTime.delete(key);
-                await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderId, 'Pre-Funding Stoploss', 0, exitPriceL2);
+                await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderId, 'Pre-Funding Stoploss', 0, exitPrice, estimatedMakerFee);
                 delete lockedFundingRates[pos.symbol];
-                console.log(`[autoBot] Exit Triggered: Pre-Funding Stoploss (L2) | PnL: ${pnl.toFixed(4)}`);
+                console.log(`[autoBot] Exit Triggered: Pre-Funding Stoploss | PnL: ${pnl.toFixed(4)}`);
               } catch (e) {
                 console.error(`[autoBot] Pre-funding stoploss exit failed ${pos.symbol}:`, e);
               }
@@ -213,14 +225,13 @@ async function monitorExits(): Promise<void> {
             const slThresholdPct = Math.abs(fundingRate) * 100;
             if (pnlPct <= -slThresholdPct) {
               try {
-                const exitPriceL2 = pos.side === 'Buy' ? bidL2 : askL2;
                 const finalFundingRate = lockedFundingRates[pos.symbol] ?? Math.abs(fundingRate);
                 const fundingReceived = (qty * entry) * finalFundingRate;
-                const { orderId } = await placeLimitOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, pos.size, String(exitPriceL2));
+                const { orderId } = await placeLimitOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, pos.size, String(exitPrice));
                 positionFundingTime.delete(key);
-                await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderId, 'Post-Funding Stoploss', fundingReceived, exitPriceL2);
+                await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderId, 'Post-Funding Stoploss', fundingReceived, exitPrice, estimatedMakerFee);
                 delete lockedFundingRates[pos.symbol];
-                console.log(`[autoBot] Exit Triggered: Post-Funding Stoploss (L2) | PnL: ${pnl.toFixed(4)}`);
+                console.log(`[autoBot] Exit Triggered: Post-Funding Stoploss | PnL: ${pnl.toFixed(4)}`);
               } catch (e) {
                 console.error(`[autoBot] Post-funding stoploss exit failed ${pos.symbol}:`, e);
               }
@@ -231,14 +242,13 @@ async function monitorExits(): Promise<void> {
           // Time-based Auto Exit (after stoploss checks)
           if (settings.autoExitEnabled && exitThresholdMs > 0 && fundingTimeMs != null && now >= fundingTimeMs + exitThresholdMs) {
             try {
-              const exitPriceL2 = pos.side === 'Buy' ? bidL2 : askL2;
               const finalFundingRate = lockedFundingRates[pos.symbol] ?? Math.abs(fundingRate);
               const fundingReceived = (qty * entry) * finalFundingRate;
-              const { orderId } = await placeLimitOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, pos.size, String(exitPriceL2));
+              const { orderId } = await placeLimitOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, pos.size, String(exitPrice));
               positionFundingTime.delete(key);
-              await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderId, 'Time Exit', fundingReceived, exitPriceL2);
+              await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderId, 'Time Exit', fundingReceived, exitPrice, estimatedMakerFee);
               delete lockedFundingRates[pos.symbol];
-              console.log(`[autoBot] Exit Triggered: Time (funding+exit) (L2) | PnL: ${pnl.toFixed(4)}`);
+              console.log(`[autoBot] Exit Triggered: Time (funding+exit) | PnL: ${pnl.toFixed(4)}`);
             } catch (e) {
               console.error(`[autoBot] Auto exit failed ${pos.symbol}:`, e);
             }
@@ -376,17 +386,17 @@ async function processUser(
   const qtyStr = String(finalQty);
   const side = topToken.fundingRate < 0 ? 'Buy' : 'Sell';
 
-  // Level 2 chase: limit entry at L2 price (Long = askL2, Short = bidL2)
+  // Depth chase: limit entry at user-defined order book depth (Long = askPrice, Short = bidPrice)
   let entryPrice: number;
   try {
-    const l2 = await getOrderBookL2(apiKey, apiSecret, topToken.symbol);
-    entryPrice = side === 'Buy' ? l2.askL2 : l2.bidL2;
+    const ob = await getOrderBookDepth(apiKey, apiSecret, topToken.symbol, settings.orderBookDepth ?? 2);
+    entryPrice = side === 'Buy' ? ob.askPrice : ob.bidPrice;
     if (!Number.isFinite(entryPrice)) {
-      console.warn(`[autoBot] L2 price invalid for ${topToken.symbol}, skipping entry`);
+      console.warn(`[autoBot] Order book price invalid for ${topToken.symbol}, skipping entry`);
       return;
     }
   } catch (e) {
-    console.error(`[autoBot] getOrderBookL2 failed ${topToken.symbol}:`, e);
+    console.error(`[autoBot] getOrderBookDepth failed ${topToken.symbol}:`, e);
     return;
   }
 

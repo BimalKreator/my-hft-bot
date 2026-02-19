@@ -41,6 +41,9 @@ export async function insertClosedTrade(params: InsertClosedTradeParams): Promis
   const funding = params.funding ?? 0;
   const fees = params.fees ?? 0;
   const net = netPnl(params.grossPnl, funding, fees);
+  // Store crypto prices with at least 6 decimal places; never round to 2
+  const entryPrice = Number(Number(params.entryPrice).toFixed(6));
+  const exitPrice = Number(Number(params.exitPrice).toFixed(6));
   const result = await query<{ id: number }>(
     `INSERT INTO closed_trades (user_id, token, direction, quantity, entry_price, exit_price, entry_time, exit_time, fees, funding_received, gross_pnl, net_pnl, status, exit_reason)
      VALUES ($1, $2, $3, $4, $5, $6, NULL, NOW(), $7, $8, $9, $10, $11, $12)
@@ -50,8 +53,8 @@ export async function insertClosedTrade(params: InsertClosedTradeParams): Promis
       params.symbol,
       params.side,
       params.qty,
-      params.entryPrice,
-      params.exitPrice,
+      entryPrice,
+      exitPrice,
       fees,
       funding,
       params.grossPnl,
