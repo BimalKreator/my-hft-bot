@@ -50,6 +50,15 @@ async function initDb() {
   await client.query(`
     ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS leverage NUMERIC NOT NULL DEFAULT 5;
   `).catch(() => {});
+  await client.query(`
+    ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS sl_pre_funding_enabled BOOLEAN NOT NULL DEFAULT false;
+  `).catch(() => {});
+  await client.query(`
+    ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS sl_pre_multiplier NUMERIC NOT NULL DEFAULT 1;
+  `).catch(() => {});
+  await client.query(`
+    ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS sl_post_funding_enabled BOOLEAN NOT NULL DEFAULT false;
+  `).catch(() => {});
 
   await client.query(`
     CREATE TABLE IF NOT EXISTS daily_snapshots (

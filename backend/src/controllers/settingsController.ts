@@ -58,6 +58,12 @@ export async function updateSettingsHandler(
       const parsed = parseInt(leverageRaw, 10);
       if (!Number.isNaN(parsed) && parsed >= 1) input.leverage = parsed;
     }
+    if (typeof body.slPreFundingEnabled === 'boolean') input.slPreFundingEnabled = body.slPreFundingEnabled;
+    const slPreMultiplierRaw = body.slPreMultiplier ?? body.sl_pre_multiplier;
+    if (typeof slPreMultiplierRaw === 'number' && !Number.isNaN(slPreMultiplierRaw)) {
+      input.slPreMultiplier = slPreMultiplierRaw;
+    }
+    if (typeof body.slPostFundingEnabled === 'boolean') input.slPostFundingEnabled = body.slPostFundingEnabled;
     const settings = await updateSettings(userId, input);
     res.json(settings);
   } catch (err) {

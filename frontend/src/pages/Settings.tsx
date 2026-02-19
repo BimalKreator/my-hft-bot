@@ -22,6 +22,9 @@ interface BotSettings {
   entryTimeSec: number;
   exitTimeSec: number;
   leverage: number;
+  slPreFundingEnabled: boolean;
+  slPreMultiplier: number;
+  slPostFundingEnabled: boolean;
 }
 
 const defaultSettings: Omit<BotSettings, 'userId'> = {
@@ -32,6 +35,9 @@ const defaultSettings: Omit<BotSettings, 'userId'> = {
   entryTimeSec: 300,
   exitTimeSec: 3600,
   leverage: 5,
+  slPreFundingEnabled: false,
+  slPreMultiplier: 2,
+  slPostFundingEnabled: false,
 };
 
 export default function Settings() {
@@ -79,6 +85,9 @@ export default function Settings() {
         entryTimeSec: Number(data.entryTimeSec) ?? 300,
         exitTimeSec: Number(data.exitTimeSec) ?? 3600,
         leverage: Number(data.leverage) ?? 5,
+        slPreFundingEnabled: data.slPreFundingEnabled ?? false,
+        slPreMultiplier: Number(data.slPreMultiplier) ?? 2,
+        slPostFundingEnabled: data.slPostFundingEnabled ?? false,
       });
     } catch {
       setError('Network error. Edit below and click Save to retry.');
@@ -122,6 +131,9 @@ export default function Settings() {
           entryTimeSec: Number(data.entryTimeSec) ?? settings.entryTimeSec,
           exitTimeSec: Number(data.exitTimeSec) ?? settings.exitTimeSec,
           leverage: Number(data.leverage) ?? settings.leverage,
+          slPreFundingEnabled: data.slPreFundingEnabled ?? settings.slPreFundingEnabled,
+          slPreMultiplier: Number(data.slPreMultiplier) ?? settings.slPreMultiplier,
+          slPostFundingEnabled: data.slPostFundingEnabled ?? settings.slPostFundingEnabled,
         });
         setSuccessMessage('Success — bot updated.');
         setTimeout(() => setSuccessMessage(null), 3000);
@@ -144,6 +156,9 @@ export default function Settings() {
       entryTimeSec: Number(settings.entryTimeSec),
       exitTimeSec: Number(settings.exitTimeSec),
       leverage: Number(settings.leverage),
+      slPreFundingEnabled: Boolean(settings.slPreFundingEnabled),
+      slPreMultiplier: Number(settings.slPreMultiplier) ?? 2,
+      slPostFundingEnabled: Boolean(settings.slPostFundingEnabled),
     });
   }, [settings, saveSettings]);
 
@@ -167,6 +182,20 @@ export default function Settings() {
     const next = !settings.autoExitEnabled;
     setSettings((s) => (s ? { ...s, autoExitEnabled: next } : s));
     saveSettings({ autoExitEnabled: next });
+  };
+
+  const toggleSlPreFunding = () => {
+    if (!settings) return;
+    const next = !settings.slPreFundingEnabled;
+    setSettings((s) => (s ? { ...s, slPreFundingEnabled: next } : s));
+    saveSettings({ slPreFundingEnabled: next });
+  };
+
+  const toggleSlPostFunding = () => {
+    if (!settings) return;
+    const next = !settings.slPostFundingEnabled;
+    setSettings((s) => (s ? { ...s, slPostFundingEnabled: next } : s));
+    saveSettings({ slPostFundingEnabled: next });
   };
 
   const fetchTransactions = useCallback(async () => {
@@ -474,6 +503,83 @@ export default function Settings() {
                 }`}
               />
             </button>
+          </div>
+
+          {/* Stoploss Settings */}
+          <h3 className="text-base font-semibold text-white mt-8 mb-4 flex items-center gap-2">
+            <span aria-hidden>🛡️</span> Stoploss Settings
+          </h3>
+          <div className="space-y-5">
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium text-gray-300">Pre-Funding Stoploss</label>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={settings.slPreFundingEnabled}
+                onClick={toggleSlPreFunding}
+                className={`relative h-8 w-14 rounded-full transition-colors ${
+                  settings.slPreFundingEnabled ? 'bg-[#007BFF]' : 'bg-gray-600'
+                }`}
+                style={
+                  settings.slPreFundingEnabled
+                    ? { boxShadow: '0 0 16px rgba(0, 123, 255, 0.5)' }
+                    : undefined
+                }
+              >
+                <span
+                  className={`absolute top-1 h-6 w-6 rounded-full bg-white transition-transform ${
+                    settings.slPreFundingEnabled ? 'left-7' : 'left-1'
+                  }`}
+                />
+              </button>
+            </div>
+            {settings.slPreFundingEnabled && (
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">
+                  Pre-Funding SL Multiplier (x)
+                </label>
+                <input
+                  type="number"
+                  min={0.1}
+                  max={20}
+                  step={0.5}
+                  value={settings.slPreMultiplier}
+                  onChange={(e) => {
+                    const v = parseFloat(e.target.value);
+                    if (!Number.isNaN(v)) {
+                      setSettings((s) => s ? { ...s, slPreMultiplier: v } : s);
+                      debouncedSave({ slPreMultiplier: v });
+                    }
+                  }}
+                  className="w-full rounded-lg border bg-black/50 px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-[#007BFF]"
+                  style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
+                  placeholder="2"
+                />
+              </div>
+            )}
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium text-gray-300">Post-Funding Stoploss (1x Funding Rate)</label>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={settings.slPostFundingEnabled}
+                onClick={toggleSlPostFunding}
+                className={`relative h-8 w-14 rounded-full transition-colors ${
+                  settings.slPostFundingEnabled ? 'bg-[#007BFF]' : 'bg-gray-600'
+                }`}
+                style={
+                  settings.slPostFundingEnabled
+                    ? { boxShadow: '0 0 16px rgba(0, 123, 255, 0.5)' }
+                    : undefined
+                }
+              >
+                <span
+                  className={`absolute top-1 h-6 w-6 rounded-full bg-white transition-transform ${
+                    settings.slPostFundingEnabled ? 'left-7' : 'left-1'
+                  }`}
+                />
+              </button>
+            </div>
           </div>
         </div>
 

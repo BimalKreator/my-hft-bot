@@ -42,7 +42,7 @@ async function saveClosedTradeAfterExit(
   entryPrice: number,
   qty: number,
   orderId: string,
-  exitReason: 'Time Exit' | 'Stoploss Hit'
+  exitReason: 'Time Exit' | 'Stoploss Hit' | 'Pre-Funding Stoploss' | 'Post-Funding Stoploss'
 ): Promise<void> {
   try {
     await new Promise((r) => setTimeout(r, 400));
@@ -131,41 +131,57 @@ async function monitorExits(): Promise<void> {
           const key = positionKey(userId, pos.symbol, pos.side);
           const entry = parseFloat(pos.avgPrice) || 0;
           const qty = parseFloat(pos.size) || 0;
+          const fundingTimeMs = positionFundingTime.get(key);
+          const fundingRate = fundingBySymbol.get(pos.symbol) ?? 0;
+          const isPreFunding = fundingTimeMs != null && now < fundingTimeMs;
+          const isPostFunding = fundingTimeMs == null || now >= fundingTimeMs;
 
-          // Auto Exit (Time Based): funding just happened + exit_time_sec passed
-          if (settings.autoExitEnabled && exitThresholdMs > 0) {
-            const fundingTimeMs = positionFundingTime.get(key);
-            if (fundingTimeMs != null && now >= fundingTimeMs + exitThresholdMs) {
+          const vwapPrice = await calculateVWAP(pos.symbol, pos.side, qty);
+          const pnlPct = entry <= 0 ? 0 : (pos.side === 'Buy' ? (vwapPrice - entry) / entry : (entry - vwapPrice) / entry) * 100;
+          const pnl = pos.side === 'Buy' ? (vwapPrice - entry) * qty : (entry - vwapPrice) * qty;
+
+          // Stoploss takes priority over time-based exit. Check pre-funding then post-funding stoploss first.
+          if (isPreFunding && settings.slPreFundingEnabled) {
+            const slThresholdPct = Math.abs(fundingRate) * 100 * (settings.slPreMultiplier ?? 1);
+            if (pnlPct <= -slThresholdPct) {
               try {
-                const vwapPrice = await calculateVWAP(pos.symbol, pos.side, qty);
-                const pnl = pos.side === 'Buy' ? (vwapPrice - entry) * qty : (entry - vwapPrice) * qty;
                 const { orderId } = await placeMarketOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, pos.size);
                 positionFundingTime.delete(key);
-                await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderId, 'Time Exit');
-                console.log(`[autoBot] Exit Triggered: Time (funding+exit) | PnL: ${pnl.toFixed(4)}`);
+                await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderId, 'Pre-Funding Stoploss');
+                console.log(`[autoBot] Exit Triggered: Pre-Funding Stoploss | PnL: ${pnl.toFixed(4)}`);
               } catch (e) {
-                console.error(`[autoBot] Auto exit failed ${pos.symbol}:`, e);
+                console.error(`[autoBot] Pre-funding stoploss exit failed ${pos.symbol}:`, e);
               }
               continue;
             }
           }
 
-          // Stoploss (VWAP Based): close if PnL % <= -(Funding Rate %)
-          const fundingRate = fundingBySymbol.get(pos.symbol) ?? 0;
-          const fundingRatePct = fundingRate * 100;
-          const vwapPrice = await calculateVWAP(pos.symbol, pos.side, qty);
-          const pnlPct = entry <= 0 ? 0 : (pos.side === 'Buy' ? (vwapPrice - entry) / entry : (entry - vwapPrice) / entry) * 100;
-          const pnl = pos.side === 'Buy' ? (vwapPrice - entry) * qty : (entry - vwapPrice) * qty;
+          if (isPostFunding && settings.slPostFundingEnabled) {
+            const slThresholdPct = Math.abs(fundingRate) * 100;
+            if (pnlPct <= -slThresholdPct) {
+              try {
+                const { orderId } = await placeMarketOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, pos.size);
+                positionFundingTime.delete(key);
+                await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderId, 'Post-Funding Stoploss');
+                console.log(`[autoBot] Exit Triggered: Post-Funding Stoploss | PnL: ${pnl.toFixed(4)}`);
+              } catch (e) {
+                console.error(`[autoBot] Post-funding stoploss exit failed ${pos.symbol}:`, e);
+              }
+              continue;
+            }
+          }
 
-          if (pnlPct <= -Math.abs(fundingRatePct)) {
+          // Time-based Auto Exit (after stoploss checks)
+          if (settings.autoExitEnabled && exitThresholdMs > 0 && fundingTimeMs != null && now >= fundingTimeMs + exitThresholdMs) {
             try {
               const { orderId } = await placeMarketOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, pos.size);
               positionFundingTime.delete(key);
-              await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderId, 'Stoploss Hit');
-              console.log(`[autoBot] Exit Triggered: VWAP Stoploss | PnL: ${pnl.toFixed(4)}`);
+              await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderId, 'Time Exit');
+              console.log(`[autoBot] Exit Triggered: Time (funding+exit) | PnL: ${pnl.toFixed(4)}`);
             } catch (e) {
-              console.error(`[autoBot] VWAP stoploss exit failed ${pos.symbol}:`, e);
+              console.error(`[autoBot] Auto exit failed ${pos.symbol}:`, e);
             }
+            continue;
           }
         }
       } catch (err) {
