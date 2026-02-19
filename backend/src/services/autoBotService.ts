@@ -8,7 +8,7 @@ import {
   getInstrumentLotSize,
   getInstrumentDetails,
   setLeverage,
-  placeLimitOrder,
+  placeMarketOrder,
   placeLimitOrderReduceOnly,
   placeMarketOrderReduceOnly,
   getOrderBookDepth,
@@ -358,7 +358,7 @@ async function monitorExits(): Promise<void> {
 
 /**
  * Critical path when countdown <= 15s: no DB, no getWalletBalance, no getInstrumentDetails, no getPositionList.
- * Only getOrderBookDepth + placeLimitOrder. Uses entryPrepCacheByUser and walletCacheByUser.
+ * Only getOrderBookDepth + placeMarketOrder. Uses entryPrepCacheByUser and walletCacheByUser.
  */
 async function processUserCritical(
   userId: number,
@@ -411,11 +411,11 @@ async function processUserCritical(
     enteredThisCycle.add(cycleKey);
 
     try {
-      await placeLimitOrder(prep.apiKey, prep.apiSecret, c.symbol, c.side, String(finalQty), String(entryPrice), 'IOC');
+      await placeMarketOrder(prep.apiKey, prep.apiSecret, c.symbol, c.side, String(finalQty));
       const nextFundingMs = parseInt(c.nextFundingTime, 10) || 0;
       positionFundingTime.set(positionKey(userId, c.symbol, c.side), nextFundingMs);
     } catch {
-      /* ignore; IOC fills what it can and cancels rest */
+      /* ignore */
     }
   }
 }
@@ -683,15 +683,13 @@ async function processUser(
       }
 
       const qtyStr = String(finalQty);
-      const priceStr = String(entryPrice);
-      const timeInForce = 'IOC' as const;
-      console.log('[DEBUG PAYLOAD]', { symbol: topToken.symbol, side, orderType: 'Limit', qty: qtyStr, price: priceStr, timeInForce });
+      console.log('[DEBUG PAYLOAD]', { symbol: topToken.symbol, side, orderType: 'Market', qty: qtyStr });
 
       processedTokens.add(procKey);
       enteredThisCycle.add(cycleKey);
 
       try {
-        const response = await placeLimitOrder(apiKey, apiSecret, topToken.symbol, side, qtyStr, priceStr, timeInForce);
+        const response = await placeMarketOrder(apiKey, apiSecret, topToken.symbol, side, qtyStr);
         console.log('[DEBUG SUCCESS] Order Placed:', response);
         const nextFundingMs = parseInt(topToken.nextFundingTime, 10) || 0;
         positionFundingTime.set(positionKey(userId, topToken.symbol, side), nextFundingMs);
