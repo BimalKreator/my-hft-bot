@@ -74,7 +74,7 @@ export default function ClosedTradesTable() {
   const [profitOnly, setProfitOnly] = useState(false);
   const [lossOnly, setLossOnly] = useState(false);
 
-  const fetchHistory = useCallback(async () => {
+  const fetchHistory = useCallback(async (silent = false) => {
     const auth = localStorage.getItem(TOKEN_KEY);
     if (!auth) {
       setError('Please log in again.');
@@ -82,7 +82,7 @@ export default function ClosedTradesTable() {
       return;
     }
     setError(null);
-    setLoading(true);
+    if (!silent) setLoading(true);
     try {
       const query = buildQuery({
         from: fromDate || undefined,
@@ -105,12 +105,14 @@ export default function ClosedTradesTable() {
       setError('Network error');
       setRows([]);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [fromDate, toDate, tokenFilter, profitOnly, lossOnly]);
 
   useEffect(() => {
     fetchHistory();
+    const interval = setInterval(() => fetchHistory(true), 3000);
+    return () => clearInterval(interval);
   }, [fetchHistory]);
 
   const handleDownloadExcel = () => {

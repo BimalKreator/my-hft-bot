@@ -36,7 +36,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchStats = useCallback(async () => {
+  const fetchDashboardData = useCallback(async (silent = false) => {
     setError(null);
     const token = localStorage.getItem(TOKEN_KEY);
     if (!token) {
@@ -44,7 +44,7 @@ export default function Dashboard() {
       setLoading(false);
       return;
     }
-    setLoading(true);
+    if (!silent) setLoading(true);
     try {
       const res = await fetch('/api/stats', {
         headers: { Authorization: `Bearer ${token}` },
@@ -68,19 +68,21 @@ export default function Dashboard() {
       setError('Network error');
       setStats(null);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    fetchStats();
-  }, [fetchStats]);
+    fetchDashboardData();
+    const interval = setInterval(() => fetchDashboardData(true), 3000);
+    return () => clearInterval(interval);
+  }, [fetchDashboardData]);
 
   useEffect(() => {
-    const handler = () => fetchStats();
+    const handler = () => fetchDashboardData();
     window.addEventListener(TRANSACTIONS_UPDATED_EVENT, handler);
     return () => window.removeEventListener(TRANSACTIONS_UPDATED_EVENT, handler);
-  }, [fetchStats]);
+  }, [fetchDashboardData]);
 
   const todayProfitStyle = stats
     ? stats.todayProfit >= 0
@@ -97,7 +99,7 @@ export default function Dashboard() {
         </div>
         <button
           type="button"
-          onClick={() => fetchStats()}
+          onClick={() => fetchDashboardData()}
           disabled={loading}
           className="rounded-lg px-4 py-2 font-medium text-white border border-[#007BFF] transition hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-[#007BFF] disabled:opacity-50"
           style={{ backgroundColor: '#007BFF' }}
