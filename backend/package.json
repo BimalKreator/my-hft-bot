@@ -1,0 +1,40 @@
+{
+  "name": "my-hft-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "tsx bot.ts",
+    "dev": "tsx watch src/server.ts",
+    "db:init": "tsx src/config/initDb.ts",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@types/node": "^25.2.3",
+    "axios": "^1.13.5",
+    "bcryptjs": "^3.0.3",
+    "bybit-api": "^4.5.3",
+    "ccxt": "^4.5.38",
+    "cors": "^2.8.6",
+    "crypto-js": "^4.2.0",
+    "decimal.js": "^10.6.0",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "pg": "^8.18.0",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cors": "^2.8.19",
+    "@types/crypto-js": "^4.2.2",
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/pg": "^8.16.0"
+  }
+}
