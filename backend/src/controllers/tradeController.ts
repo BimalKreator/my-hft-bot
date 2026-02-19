@@ -7,6 +7,7 @@ import {
   placeMarketOrderReduceOnly,
   getExecutionList,
   getPositionList,
+  getClosedPnl,
 } from '../services/bybitService.js';
 import { getEnrichedPositions } from '../services/vwapService.js';
 import { AuthRequest } from '../middleware/authMiddleware.js';
@@ -178,11 +179,44 @@ export async function closePosition(
       qtyStr
     );
 
-    // After successful close: execution list for exit price and fees, then save closed trade
+    await new Promise((r) => setTimeout(r, 2000));
     let exitPrice = 0;
     let fees = 0;
+    let grossPnl: number;
     try {
-      await new Promise((r) => setTimeout(r, 400));
+      const closedList = await getClosedPnl(apiKey, apiSecret, 'linear', symbol, 20);
+      const nowMs = Date.now();
+      const recent = closedList.filter((row) => {
+        const ut = parseInt(row.updatedTime, 10) || 0;
+        return ut >= nowMs - 15_000 && ut <= nowMs + 1000;
+      });
+      if (recent.length > 0) {
+        const sumClosedPnl = recent.reduce((s, r) => s + (parseFloat(r.closedPnl) || 0), 0);
+        const exactTotalFee = recent.reduce((s, r) => s + (parseFloat(r.openFee) || 0) + (parseFloat(r.closeFee) || 0), 0);
+        const exactNetPnl = sumClosedPnl + fundingReceived;
+        fees = exactTotalFee;
+        grossPnl = exactNetPnl + exactTotalFee - fundingReceived;
+        const avgExit = recent[0].avgExitPrice;
+        if (avgExit) exitPrice = parseFloat(avgExit) || 0;
+      } else {
+        const executions = await getExecutionList(apiKey, apiSecret, 'linear', orderId);
+        if (executions.length > 0) {
+          let totalQty = 0;
+          let sumPxQty = 0;
+          for (const e of executions) {
+            const eq = parseFloat(e.execQty) || 0;
+            const ep = parseFloat(e.execPrice) || 0;
+            totalQty += eq;
+            sumPxQty += ep * eq;
+            fees += parseFloat(e.execFee ?? '0') || 0;
+          }
+          exitPrice = totalQty > 0 ? sumPxQty / totalQty : parseFloat(executions[0]!.execPrice) || 0;
+        }
+        grossPnl = side === 'Buy'
+          ? (exitPrice - entryPrice) * qtyNum
+          : (entryPrice - exitPrice) * qtyNum;
+      }
+    } catch {
       const executions = await getExecutionList(apiKey, apiSecret, 'linear', orderId);
       if (executions.length > 0) {
         let totalQty = 0;
@@ -192,20 +226,15 @@ export async function closePosition(
           const ep = parseFloat(e.execPrice) || 0;
           totalQty += eq;
           sumPxQty += ep * eq;
-          const fee = parseFloat(e.execFee ?? '0') || 0;
-          fees += fee;
+          fees += parseFloat(e.execFee ?? '0') || 0;
         }
         exitPrice = totalQty > 0 ? sumPxQty / totalQty : parseFloat(executions[0]!.execPrice) || 0;
       }
-    } catch {
-      // Best-effort; still save closed trade with exitPrice 0 / fees 0 if needed
+      grossPnl = side === 'Buy'
+        ? (exitPrice - entryPrice) * qtyNum
+        : (entryPrice - exitPrice) * qtyNum;
     }
 
-    const grossPnl = side === 'Buy'
-      ? (exitPrice - entryPrice) * qtyNum
-      : (entryPrice - exitPrice) * qtyNum;
-    // Net PnL = Gross PnL - Fees + fundingReceived (persisted via insertClosedTrade)
-    // Store crypto prices with high precision (at least 6 decimals); never use .toFixed(2)
     const entryPriceStored = Number(entryPrice.toFixed(6));
     const exitPriceStored = Number(exitPrice.toFixed(6));
 

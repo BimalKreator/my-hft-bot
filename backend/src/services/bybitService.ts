@@ -278,6 +278,34 @@ export async function getExecutionList(
   }));
 }
 
+export interface ClosedPnlRow {
+  closedPnl: string;
+  openFee: string;
+  closeFee: string;
+  updatedTime: string;
+  avgEntryPrice?: string;
+  avgExitPrice?: string;
+}
+
+/**
+ * Get closed PnL records for a linear symbol (for exact net PnL and fees after a close).
+ */
+export async function getClosedPnl(
+  apiKey: string,
+  apiSecret: string,
+  category: 'linear',
+  symbol: string,
+  limit: number = 20
+): Promise<ClosedPnlRow[]> {
+  const client = getClient(apiKey, apiSecret);
+  const res = await client.getClosedPnL({ category, symbol, limit });
+  if (res.retCode !== 0) {
+    throw new Error(res.retMsg ?? 'Bybit get closed PnL failed');
+  }
+  const result = res.result as { list?: ClosedPnlRow[] };
+  return result.list ?? [];
+}
+
 /**
  * Get open (active) orders for a linear symbol.
  */

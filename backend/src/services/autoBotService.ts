@@ -15,6 +15,7 @@ import {
   getActiveOrders,
   cancelAllOrders,
   getExecutionList,
+  getClosedPnl,
 } from './bybitService.js';
 import { FundingScanner } from './scannerService.js';
 import { insertClosedTrade } from '../models/closedTradesModel.js';
@@ -46,7 +47,7 @@ function entryCycleKey(userId: number, symbol: string, nextFundingTime: string):
   return `${userId}_${symbol}_${nextFundingTime}`;
 }
 
-/** After a reduce-only close, fetch execution list and persist closed trade to DB with exit reason. */
+/** After a reduce-only close, allow Bybit to settle then fetch exact closed PnL & fees, persist to DB. */
 async function saveClosedTradeAfterExit(
   userId: number,
   apiKey: string,
@@ -62,30 +63,46 @@ async function saveClosedTradeAfterExit(
   estimatedFeesWhenZero?: number
 ): Promise<void> {
   try {
-    const waitMs = estimatedExitPrice != null ? 2000 : 400;
-    await new Promise((r) => setTimeout(r, waitMs));
-    const executions = await getExecutionList(apiKey, apiSecret, 'linear', orderId);
-    let exitPrice = 0;
+    await new Promise((r) => setTimeout(r, 2000));
+    const closedList = await getClosedPnl(apiKey, apiSecret, 'linear', symbol, 20);
+    const nowMs = Date.now();
+    const windowMs = 15_000;
+    const recent = closedList.filter((row) => {
+      const ut = parseInt(row.updatedTime, 10) || 0;
+      return ut >= nowMs - windowMs && ut <= nowMs + 1000;
+    });
+    let exitPrice = estimatedExitPrice ?? 0;
     let fees = 0;
-    if (executions.length > 0) {
-      let totalQty = 0;
-      let sumPxQty = 0;
-      for (const e of executions) {
-        const eq = parseFloat(e.execQty) || 0;
-        const ep = parseFloat(e.execPrice) || 0;
-        totalQty += eq;
-        sumPxQty += ep * eq;
-        fees += parseFloat(e.execFee ?? '0') || 0;
+    let grossPnl: number;
+    if (recent.length > 0) {
+      const sumClosedPnl = recent.reduce((s, r) => s + (parseFloat(r.closedPnl) || 0), 0);
+      const exactTotalFee = recent.reduce((s, r) => s + (parseFloat(r.openFee) || 0) + (parseFloat(r.closeFee) || 0), 0);
+      const exactNetPnl = sumClosedPnl + fundingReceived;
+      fees = exactTotalFee;
+      grossPnl = exactNetPnl + exactTotalFee - fundingReceived;
+      if (!exitPrice && recent[0]) {
+        const avgExit = recent[0].avgExitPrice;
+        if (avgExit) exitPrice = parseFloat(avgExit) || 0;
       }
-      exitPrice = totalQty > 0 ? sumPxQty / totalQty : parseFloat(executions[0]!.execPrice) || 0;
+    } else {
+      const executions = await getExecutionList(apiKey, apiSecret, 'linear', orderId);
+      if (executions.length > 0) {
+        let totalQty = 0;
+        let sumPxQty = 0;
+        for (const e of executions) {
+          const eq = parseFloat(e.execQty) || 0;
+          const ep = parseFloat(e.execPrice) || 0;
+          totalQty += eq;
+          sumPxQty += ep * eq;
+          fees += parseFloat(e.execFee ?? '0') || 0;
+        }
+        exitPrice = totalQty > 0 ? sumPxQty / totalQty : parseFloat(executions[0]!.execPrice) || 0;
+      }
+      if (exitPrice === 0 && estimatedExitPrice != null && !Number.isNaN(estimatedExitPrice)) exitPrice = estimatedExitPrice;
+      if (fees === 0 && estimatedFeesWhenZero != null && !Number.isNaN(estimatedFeesWhenZero)) fees = estimatedFeesWhenZero;
+      grossPnl = side === 'Buy' ? (exitPrice - entryPrice) * qty : (entryPrice - exitPrice) * qty;
     }
-    if (exitPrice === 0 && estimatedExitPrice != null && !Number.isNaN(estimatedExitPrice)) {
-      exitPrice = estimatedExitPrice;
-    }
-    if (fees === 0 && estimatedFeesWhenZero != null && !Number.isNaN(estimatedFeesWhenZero)) {
-      fees = estimatedFeesWhenZero;
-    }
-    const grossPnl = side === 'Buy' ? (exitPrice - entryPrice) * qty : (entryPrice - exitPrice) * qty;
+    if (exitPrice === 0 && estimatedExitPrice != null && !Number.isNaN(estimatedExitPrice)) exitPrice = estimatedExitPrice;
     await insertClosedTrade({
       userId,
       symbol,

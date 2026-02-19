@@ -41,7 +41,8 @@ async function initDb() {
       entry_time_sec NUMERIC NOT NULL DEFAULT 300,
       exit_time_sec NUMERIC NOT NULL DEFAULT 3600,
       min_funding_rate NUMERIC NOT NULL DEFAULT 0,
-      leverage NUMERIC NOT NULL DEFAULT 5
+      leverage NUMERIC NOT NULL DEFAULT 5,
+      order_book_depth INTEGER NOT NULL DEFAULT 2
     );
   `);
   await client.query(`
@@ -59,9 +60,9 @@ async function initDb() {
   await client.query(`
     ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS sl_post_funding_enabled BOOLEAN NOT NULL DEFAULT false;
   `).catch(() => {});
-  await client.query(`
-    ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS order_book_depth INTEGER NOT NULL DEFAULT 2;
-  `).catch(() => {});
+  await client.query(
+    `ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS order_book_depth INTEGER NOT NULL DEFAULT 2;`
+  ).catch(console.error);
 
   await client.query(`
     CREATE TABLE IF NOT EXISTS daily_snapshots (
