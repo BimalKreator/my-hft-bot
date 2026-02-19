@@ -125,10 +125,13 @@ export async function closePosition(
       return;
     }
 
-    const { symbol, side, qty, size, exitReason: bodyExitReason } = req.body;
+    const { symbol, side, qty, size, exitReason: bodyExitReason, fundingReceived: bodyFundingReceived } = req.body;
     const exitReason = typeof bodyExitReason === 'string' && bodyExitReason.trim()
       ? bodyExitReason.trim()
       : 'Manual';
+    const fundingReceived = typeof bodyFundingReceived === 'number' && !Number.isNaN(bodyFundingReceived)
+      ? bodyFundingReceived
+      : 0;
     const qtyVal = qty ?? size;
     if (
       !symbol ||
@@ -201,7 +204,7 @@ export async function closePosition(
     const grossPnl = side === 'Buy'
       ? (exitPrice - entryPrice) * qtyNum
       : (entryPrice - exitPrice) * qtyNum;
-    const funding = 0;
+    // Net PnL = Gross PnL - Fees + fundingReceived (persisted via insertClosedTrade)
 
     await insertClosedTrade({
       userId,
@@ -211,7 +214,7 @@ export async function closePosition(
       exitPrice,
       qty: qtyNum,
       grossPnl,
-      funding,
+      funding: fundingReceived,
       fees,
       source: 'manual',
       exitReason,

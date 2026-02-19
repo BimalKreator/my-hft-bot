@@ -19,6 +19,9 @@ import { insertClosedTrade } from '../models/closedTradesModel.js';
 const INTERVAL_MS = 5_000;
 const EXIT_INTERVAL_MS = 1_000;
 
+/** Exact funding rate snapshot 1–2s before settlement, keyed by symbol. */
+const lockedFundingRates: Record<string, number> = {};
+
 /** Track which (userId, symbol, nextFundingTime) we already entered this cycle to avoid double entry. */
 const enteredThisCycle = new Set<string>();
 /** Retry prevention: once we attempt order for this key, do not retry even if order fails. */
@@ -50,7 +53,8 @@ async function saveClosedTradeAfterExit(
   entryPrice: number,
   qty: number,
   orderId: string,
-  exitReason: 'Time Exit' | 'Stoploss Hit' | 'Pre-Funding Stoploss' | 'Post-Funding Stoploss'
+  exitReason: 'Time Exit' | 'Stoploss Hit' | 'Pre-Funding Stoploss' | 'Post-Funding Stoploss',
+  fundingReceived: number = 0
 ): Promise<void> {
   try {
     await new Promise((r) => setTimeout(r, 400));
@@ -78,7 +82,7 @@ async function saveClosedTradeAfterExit(
       exitPrice,
       qty,
       grossPnl,
-      funding: 0,
+      funding: fundingReceived,
       fees,
       source: 'auto',
       exitReason,
@@ -120,6 +124,7 @@ async function monitorExits(): Promise<void> {
 
     const marketData = await fundingScanner.getFundingData();
     const fundingBySymbol = new Map(marketData.map((m) => [m.symbol, m.fundingRate]));
+    const countdownBySymbol = new Map(marketData.map((m) => [m.symbol, Math.floor(m.countdownMs / 1000)]));
     const now = Date.now();
 
     for (const userId of userIds) {
@@ -141,8 +146,14 @@ async function monitorExits(): Promise<void> {
           const qty = parseFloat(pos.size) || 0;
           const fundingTimeMs = positionFundingTime.get(key);
           const fundingRate = fundingBySymbol.get(pos.symbol) ?? 0;
+          const countdown = countdownBySymbol.get(pos.symbol) ?? 0;
           const isPreFunding = fundingTimeMs != null && now < fundingTimeMs;
           const isPostFunding = fundingTimeMs == null || now >= fundingTimeMs;
+
+          // Snapshot exact funding rate 1–2s before settlement (handles polling delay)
+          if (countdown > 0 && countdown <= 2) {
+            lockedFundingRates[pos.symbol] = Math.abs(fundingRate);
+          }
 
           const vwapPrice = await calculateVWAP(pos.symbol, pos.side, qty);
           const pnlPct = entry <= 0 ? 0 : (pos.side === 'Buy' ? (vwapPrice - entry) / entry : (entry - vwapPrice) / entry) * 100;
@@ -155,7 +166,8 @@ async function monitorExits(): Promise<void> {
               try {
                 const { orderId } = await placeMarketOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, pos.size);
                 positionFundingTime.delete(key);
-                await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderId, 'Pre-Funding Stoploss');
+                await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderId, 'Pre-Funding Stoploss', 0);
+                delete lockedFundingRates[pos.symbol];
                 console.log(`[autoBot] Exit Triggered: Pre-Funding Stoploss | PnL: ${pnl.toFixed(4)}`);
               } catch (e) {
                 console.error(`[autoBot] Pre-funding stoploss exit failed ${pos.symbol}:`, e);
@@ -168,9 +180,12 @@ async function monitorExits(): Promise<void> {
             const slThresholdPct = Math.abs(fundingRate) * 100;
             if (pnlPct <= -slThresholdPct) {
               try {
+                const finalFundingRate = lockedFundingRates[pos.symbol] ?? Math.abs(fundingRate);
+                const fundingReceived = (qty * entry) * finalFundingRate;
                 const { orderId } = await placeMarketOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, pos.size);
                 positionFundingTime.delete(key);
-                await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderId, 'Post-Funding Stoploss');
+                await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderId, 'Post-Funding Stoploss', fundingReceived);
+                delete lockedFundingRates[pos.symbol];
                 console.log(`[autoBot] Exit Triggered: Post-Funding Stoploss | PnL: ${pnl.toFixed(4)}`);
               } catch (e) {
                 console.error(`[autoBot] Post-funding stoploss exit failed ${pos.symbol}:`, e);
@@ -182,9 +197,12 @@ async function monitorExits(): Promise<void> {
           // Time-based Auto Exit (after stoploss checks)
           if (settings.autoExitEnabled && exitThresholdMs > 0 && fundingTimeMs != null && now >= fundingTimeMs + exitThresholdMs) {
             try {
+              const finalFundingRate = lockedFundingRates[pos.symbol] ?? Math.abs(fundingRate);
+              const fundingReceived = (qty * entry) * finalFundingRate;
               const { orderId } = await placeMarketOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, pos.size);
               positionFundingTime.delete(key);
-              await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderId, 'Time Exit');
+              await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderId, 'Time Exit', fundingReceived);
+              delete lockedFundingRates[pos.symbol];
               console.log(`[autoBot] Exit Triggered: Time (funding+exit) | PnL: ${pnl.toFixed(4)}`);
             } catch (e) {
               console.error(`[autoBot] Auto exit failed ${pos.symbol}:`, e);
@@ -282,8 +300,13 @@ async function processUser(
 
   try {
     await setLeverage(apiKey, apiSecret, topToken.symbol, safeLeverage);
-  } catch {
-    // Ignore e.g. "Leverage not modified"
+  } catch (levErr: unknown) {
+    const msg = (levErr as { message?: string })?.message ?? String(levErr);
+    if (/leverage\s*not\s*modified/i.test(msg)) {
+      // Bybit often returns this when leverage is already set; do not abort the trade.
+    } else {
+      throw levErr;
+    }
   }
 
   // Margin Used = Balance * Capital%; Position Size = Margin Used * Leverage; Qty = Position Size / Price
@@ -321,8 +344,9 @@ async function processUser(
     const nextFundingMs = parseInt(topToken.nextFundingTime, 10) || 0;
     const key = positionKey(userId, topToken.symbol, side);
     positionFundingTime.set(key, nextFundingMs);
-  } catch (e) {
-    console.error(`[autoBot] Entry failed ${topToken.symbol}:`, e);
+  } catch (e: unknown) {
+    const err = e as { response?: { data?: unknown }; message?: string };
+    console.error('[autoBot] EXACT BYBIT ERROR for ' + topToken.symbol + ':', err?.response?.data ?? err?.message ?? e);
     try {
       await addBannedToken(userId, topToken.symbol, 'Auto-banned: API Execution Error');
       console.log(`[autoBot] Auto-banned ${topToken.symbol} (API Execution Error)`);

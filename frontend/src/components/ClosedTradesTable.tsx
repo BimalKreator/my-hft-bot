@@ -13,6 +13,7 @@ export interface ClosedTradeRow {
   qty: string;
   gross_pnl: string;
   funding: string;
+  funding_received?: string;
   fees: string;
   net_pnl: string;
   closed_at: string;
@@ -122,6 +123,7 @@ export default function ClosedTradesTable() {
       'Time',
       'Fees',
       'Exit Reason',
+      'Funding Earned',
       'Net PnL',
     ];
     const data = rows.map((r) => [
@@ -133,6 +135,7 @@ export default function ClosedTradesTable() {
       formatTime(r.closed_at),
       parseFloat(r.fees) || 0,
       r.exit_reason ?? '',
+      parseFloat(r.funding_received ?? r.funding ?? '0') || 0,
       parseFloat(r.net_pnl) || 0,
     ]);
     const ws = XLSX.utils.aoa_to_sheet([headers, ...data]);
@@ -235,13 +238,14 @@ export default function ClosedTradesTable() {
                 <th className="px-4 py-2.5 font-medium">Time</th>
                 <th className="px-4 py-2.5 font-medium">Fees</th>
                 <th className="px-4 py-2.5 font-medium">Exit Reason</th>
+                <th className="px-4 py-2.5 font-medium">Funding Earned</th>
                 <th className="px-4 py-2.5 font-medium">Net PnL</th>
               </tr>
             </thead>
             <tbody>
               {rows.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-8 text-center text-gray-400">
+                  <td colSpan={9} className="px-4 py-8 text-center text-gray-400">
                     No closed trades match the filters.
                   </td>
                 </tr>
@@ -287,6 +291,12 @@ export default function ClosedTradesTable() {
                           }}
                         >
                           {r.exit_reason ?? '—'}
+                        </span>
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <span className="text-green-500 text-xs font-medium">
+                          {(parseFloat(r.funding_received ?? r.funding ?? '0') >= 0 ? '+' : '')}
+                          {(parseFloat(r.funding_received ?? r.funding ?? '0')).toFixed(4)}
                         </span>
                       </td>
                       <td className="px-4 py-2.5">
