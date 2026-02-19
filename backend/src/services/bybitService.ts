@@ -170,6 +170,34 @@ export async function placeMarketOrder(
 }
 
 /**
+ * Place a limit order on linear perpetual (GTC). Returns orderId and orderLinkId.
+ */
+export async function placeLimitOrder(
+  apiKey: string,
+  apiSecret: string,
+  symbol: string,
+  side: 'Buy' | 'Sell',
+  qty: string,
+  price: string
+): Promise<{ orderId: string; orderLinkId: string }> {
+  const client = getClient(apiKey, apiSecret);
+  const res = await client.submitOrder({
+    category: 'linear',
+    symbol,
+    side,
+    orderType: 'Limit',
+    qty,
+    price,
+    timeInForce: 'GTC',
+  });
+  if (res.retCode !== 0) {
+    throw new Error(res.retMsg ?? 'Bybit place limit order failed');
+  }
+  const result = res.result as { orderId: string; orderLinkId: string };
+  return { orderId: result.orderId, orderLinkId: result.orderLinkId };
+}
+
+/**
  * Place a market reduce-only order to close a position. Opposite side of position.
  */
 export async function placeMarketOrderReduceOnly(
@@ -197,6 +225,36 @@ export async function placeMarketOrderReduceOnly(
 }
 
 /**
+ * Place a limit reduce-only order to close a position at the given price (GTC).
+ */
+export async function placeLimitOrderReduceOnly(
+  apiKey: string,
+  apiSecret: string,
+  symbol: string,
+  positionSide: 'Buy' | 'Sell',
+  qty: string,
+  price: string
+): Promise<{ orderId: string; orderLinkId: string }> {
+  const client = getClient(apiKey, apiSecret);
+  const closeSide = positionSide === 'Buy' ? 'Sell' : 'Buy';
+  const res = await client.submitOrder({
+    category: 'linear',
+    symbol,
+    side: closeSide,
+    orderType: 'Limit',
+    qty,
+    price,
+    timeInForce: 'GTC',
+    reduceOnly: true,
+  });
+  if (res.retCode !== 0) {
+    throw new Error(res.retMsg ?? 'Bybit place limit reduce-only order failed');
+  }
+  const result = res.result as { orderId: string; orderLinkId: string };
+  return { orderId: result.orderId, orderLinkId: result.orderLinkId };
+}
+
+/**
  * Get execution list for an order (e.g. to get exec price and fee after market order).
  */
 export async function getExecutionList(
@@ -218,6 +276,40 @@ export async function getExecutionList(
     execQty: e.execQty,
     execFee: e.execFee,
   }));
+}
+
+/**
+ * Get open (active) orders for a linear symbol.
+ */
+export async function getActiveOrders(
+  apiKey: string,
+  apiSecret: string,
+  category: 'linear',
+  symbol: string
+): Promise<unknown[]> {
+  const client = getClient(apiKey, apiSecret);
+  const res = await client.getActiveOrders({ category, symbol });
+  if (res.retCode !== 0) {
+    throw new Error(res.retMsg ?? 'Bybit get active orders failed');
+  }
+  const result = res.result as { list?: unknown[] };
+  return result.list ?? [];
+}
+
+/**
+ * Cancel all open orders for a linear symbol.
+ */
+export async function cancelAllOrders(
+  apiKey: string,
+  apiSecret: string,
+  category: 'linear',
+  symbol: string
+): Promise<void> {
+  const client = getClient(apiKey, apiSecret);
+  const res = await client.cancelAllOrders({ category, symbol });
+  if (res.retCode !== 0) {
+    throw new Error(res.retMsg ?? 'Bybit cancel all orders failed');
+  }
 }
 
 export interface LinearPosition {
@@ -271,6 +363,38 @@ export async function getOrderbook(symbol: string, limit = 50): Promise<Orderboo
   const bids = (result.b ?? []).map(([price, size]) => ({ price, size }));
   const asks = (result.a ?? []).map(([price, size]) => ({ price, size }));
   return { bids, asks };
+}
+
+export interface OrderBookL2Result {
+  bidL2: number;
+  askL2: number;
+}
+
+/**
+ * Get Level 2 orderbook prices (second bid and second ask) for a linear perpetual.
+ * Uses limit 5 to ensure at least 2 levels exist. Handles missing levels and parse errors.
+ */
+export async function getOrderBookL2(
+  apiKey: string,
+  apiSecret: string,
+  symbol: string
+): Promise<OrderBookL2Result> {
+  try {
+    const client = getClient(apiKey, apiSecret);
+    const res = await client.getOrderbook({ category: 'linear', symbol, limit: 5 });
+    if (res.retCode !== 0) {
+      throw new Error(res.retMsg ?? 'Bybit get orderbook failed');
+    }
+    const result = res.result as { b?: [string, string][]; a?: [string, string][] };
+    const bids = result.b ?? [];
+    const asks = result.a ?? [];
+    const bidL2 = bids.length > 1 ? parseFloat(bids[1][0]) : NaN;
+    const askL2 = asks.length > 1 ? parseFloat(asks[1][0]) : NaN;
+    return { bidL2, askL2 };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`getOrderBookL2 ${symbol}: ${msg}`);
+  }
 }
 
 export interface InstrumentLotSize {

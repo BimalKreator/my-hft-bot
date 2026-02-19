@@ -1,4 +1,4 @@
-import { getOrderbook } from './bybitService.js';
+import { getOrderbook, getOrderBookL2 } from './bybitService.js';
 import { getPositionList, type LinearPosition } from './bybitService.js';
 import { getExchangeKeys } from '../models/exchangeModel.js';
 import { decrypt } from '../utils/encryption.js';
@@ -80,7 +80,16 @@ export async function getEnrichedPositions(userId: number): Promise<EnrichedPosi
     const qty = parseFloat(pos.size) || 0;
     const fundingRate = fundingBySymbol.get(pos.symbol) ?? 0;
 
-    const vwapPrice = await calculateVWAP(pos.symbol, pos.side, qty);
+    // L2-based price for Active Positions table: Long = bidL2 (sell to close), Short = askL2 (buy to close)
+    let vwapPrice = 0;
+    try {
+      const l2 = await getOrderBookL2(apiKey, apiSecret, pos.symbol);
+      vwapPrice = pos.side === 'Buy' ? l2.bidL2 : l2.askL2;
+      if (!Number.isFinite(vwapPrice)) vwapPrice = 0;
+    } catch {
+      // fallback to VWAP if L2 fails
+      vwapPrice = await calculateVWAP(pos.symbol, pos.side, qty);
+    }
 
     const pnl =
       pos.side === 'Buy'
