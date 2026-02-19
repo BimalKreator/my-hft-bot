@@ -57,7 +57,7 @@ async function saveClosedTradeAfterExit(
   entryPrice: number,
   qty: number,
   orderId: string,
-  exitReason: 'Time Exit' | 'Stoploss Hit' | 'Pre-Funding Stoploss' | 'Post-Funding Stoploss',
+  exitReason: 'Time Exit' | 'Stoploss Hit' | 'Pre-Funding Stoploss' | 'Post-Funding Stoploss' | 'Post-Funding Stoploss (L2 - 50% Funding)',
   fundingReceived: number = 0,
   estimatedExitPrice?: number,
   estimatedFeesWhenZero?: number
@@ -239,16 +239,16 @@ async function monitorExits(): Promise<void> {
           }
 
           if (isPostFunding && settings.slPostFundingEnabled) {
-            const slThresholdPct = Math.abs(fundingRate) * 100;
+            const slThresholdPct = (Math.abs(fundingRate) * 100) / 2;
             if (pnlPct <= -slThresholdPct) {
               try {
                 const finalFundingRate = lockedFundingRates[pos.symbol] ?? Math.abs(fundingRate);
                 const fundingReceived = (qty * entry) * finalFundingRate;
                 const { orderId } = await placeLimitOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, pos.size, String(exitPrice));
                 positionFundingTime.delete(key);
-                await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderId, 'Post-Funding Stoploss', fundingReceived, exitPrice, estimatedMakerFee);
+                await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderId, 'Post-Funding Stoploss (L2 - 50% Funding)', fundingReceived, exitPrice, estimatedMakerFee);
                 delete lockedFundingRates[pos.symbol];
-                console.log(`[autoBot] Exit Triggered: Post-Funding Stoploss | PnL: ${pnl.toFixed(4)}`);
+                console.log(`[autoBot] Exit Triggered: Post-Funding Stoploss (L2 - 50% Funding) | PnL: ${pnl.toFixed(4)}`);
               } catch (e) {
                 console.error(`[autoBot] Post-funding stoploss exit failed ${pos.symbol}:`, e);
               }

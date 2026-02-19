@@ -60,9 +60,13 @@ async function initDb() {
   await client.query(`
     ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS sl_post_funding_enabled BOOLEAN NOT NULL DEFAULT false;
   `).catch(() => {});
-  await client.query(
-    `ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS order_book_depth INTEGER NOT NULL DEFAULT 2;`
-  ).catch(console.error);
+  try {
+    await client.query('ALTER TABLE bot_settings ADD COLUMN order_book_depth INTEGER DEFAULT 2');
+    console.log('Added order_book_depth column to database.');
+  } catch (err: unknown) {
+    const e = err as { code?: string };
+    if (e.code !== '42701') console.error('Error adding column:', err);
+  }
 
   await client.query(`
     CREATE TABLE IF NOT EXISTS daily_snapshots (
