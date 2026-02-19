@@ -315,10 +315,10 @@ async function processUser(
 
   let finalQty: number;
   try {
-    const { qtyStep, minOrderQty, maxOrderQty } = await getInstrumentLotSize(apiKey, apiSecret, topToken.symbol);
+    const { qtyStep, minOrderQty, maxOrderQty, maxMktOrderQty } = await getInstrumentLotSize(apiKey, apiSecret, topToken.symbol);
     const step = parseFloat(qtyStep) || 0.1;
     const minQty = parseFloat(minOrderQty) || 0;
-    const maxQty = parseFloat(maxOrderQty) || 999999;
+    const maxQty = parseFloat(maxMktOrderQty || maxOrderQty) || 999999;
     // Determine number of decimal places in the step size
     const stepStr = step.toString();
     const stepDecimals = stepStr.includes('.') ? stepStr.split('.')[1].length : 0;

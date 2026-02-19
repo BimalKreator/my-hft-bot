@@ -26,7 +26,7 @@ export interface CachedInstrumentRow {
   quoteCoin?: string;
   status?: string;
   fundingInterval?: number;
-  lotSizeFilter?: { maxOrderQty?: string };
+  lotSizeFilter?: { maxOrderQty?: string; maxMktOrderQty?: string };
   leverageFilter?: { maxLeverage?: string };
 }
 
@@ -60,8 +60,9 @@ export async function getInstrumentDetails(
 ): Promise<{ maxOrderQty: string; maxLeverage: string }> {
   const list = await getInstrumentsCache();
   const row = list.find((r) => r.symbol === symbol);
+  const lot = row?.lotSizeFilter;
   return {
-    maxOrderQty: row?.lotSizeFilter?.maxOrderQty ?? '',
+    maxOrderQty: lot?.maxMktOrderQty ?? lot?.maxOrderQty ?? '',
     maxLeverage: row?.leverageFilter?.maxLeverage ?? '',
   };
 }
@@ -276,10 +277,12 @@ export interface InstrumentLotSize {
   qtyStep: string;
   minOrderQty: string;
   maxOrderQty: string;
+  maxMktOrderQty: string;
 }
 
 /**
- * Fetch lot size filter for a linear symbol (qtyStep, minOrderQty, maxOrderQty).
+ * Fetch lot size filter for a linear symbol (qtyStep, minOrderQty, maxOrderQty, maxMktOrderQty).
+ * Use maxMktOrderQty for market orders; fall back to maxOrderQty when absent.
  */
 export async function getInstrumentLotSize(
   apiKey: string,
@@ -292,12 +295,13 @@ export async function getInstrumentLotSize(
     throw new Error(res.retMsg ?? 'Bybit get instruments info failed');
   }
   const list = (res.result as {
-    list?: Array<{ lotSizeFilter?: { qtyStep?: string; minOrderQty?: string; maxOrderQty?: string } }>;
+    list?: Array<{ lotSizeFilter?: { qtyStep?: string; minOrderQty?: string; maxOrderQty?: string; maxMktOrderQty?: string } }>;
   })?.list ?? [];
   const inst = list[0];
   const filter = inst?.lotSizeFilter;
   const qtyStep = filter?.qtyStep ?? '0.1';
   const minOrderQty = filter?.minOrderQty ?? '0';
   const maxOrderQty = filter?.maxOrderQty ?? '999999';
-  return { qtyStep, minOrderQty, maxOrderQty };
+  const maxMktOrderQty = filter?.maxMktOrderQty ?? '';
+  return { qtyStep, minOrderQty, maxOrderQty, maxMktOrderQty };
 }

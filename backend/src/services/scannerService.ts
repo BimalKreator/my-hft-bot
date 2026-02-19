@@ -72,7 +72,7 @@ export class FundingScanner {
       const fundingIntervalMinutes = inst.fundingInterval ?? 480;
       const fundingIntervalHours = fundingIntervalMinutes / 60;
       const maxLeverage = inst.leverageFilter?.maxLeverage ?? '';
-      const maxOrderQty = inst.lotSizeFilter?.maxOrderQty ?? '';
+      const maxOrderQty = inst.lotSizeFilter?.maxMktOrderQty ?? inst.lotSizeFilter?.maxOrderQty ?? '';
 
       if (filters) {
         if (filters.minFundingRate != null && Math.abs(fundingRate) < filters.minFundingRate) continue;
