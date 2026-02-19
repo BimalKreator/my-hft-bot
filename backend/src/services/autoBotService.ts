@@ -319,16 +319,20 @@ async function processUser(
     const step = parseFloat(qtyStep) || 0.1;
     const minQty = parseFloat(minOrderQty) || 0;
     const maxQty = parseFloat(maxOrderQty) || 999999;
-    finalQty = Math.floor(rawQty / step) * step;
+    // Determine number of decimal places in the step size
+    const stepStr = step.toString();
+    const stepDecimals = stepStr.includes('.') ? stepStr.split('.')[1].length : 0;
+    // Calculate and fix floating point precision issues
+    finalQty = parseFloat((Math.floor(rawQty / step) * step).toFixed(stepDecimals));
     if (finalQty > maxQty) {
-      finalQty = Math.floor(maxQty / step) * step;
+      finalQty = parseFloat((Math.floor(maxQty / step) * step).toFixed(stepDecimals));
       console.log(`[autoBot] Quantity capped to Bybit max limit: ${finalQty}`);
     }
     if (finalQty < minQty) {
       console.warn(`[autoBot] ${topToken.symbol}: finalQty ${finalQty} < minOrderQty ${minQty}, skipping`);
       return;
     }
-    console.log(`[autoBot] Precision applied for ${topToken.symbol}: Raw=${rawQty} Final=${finalQty}`);
+    console.log('Precision applied for ' + topToken.symbol + ': Raw=' + rawQty + ' Final=' + finalQty);
   } catch (e) {
     console.error(`[autoBot] Instrument info failed for ${topToken.symbol}:`, e);
     return;
