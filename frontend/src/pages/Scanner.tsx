@@ -14,6 +14,7 @@ interface FundingItem {
   turnover24h: number;
   fundingIntervalHours: number;
   maxLeverage: string;
+  maxOrderQty?: string;
 }
 
 type FilterType = 'all' | 'positive' | 'negative';
@@ -26,6 +27,15 @@ function tokenName(symbol: string): string {
 
 function formatPct(value: number): string {
   return (value * 100).toFixed(4) + '%';
+}
+
+function maxMarginUsdt(row: FundingItem): string {
+  const price = parseFloat(row.markPrice || row.lastPrice || '0') || 0;
+  const maxQty = parseFloat(row.maxOrderQty || '0') || 0;
+  const lev = parseFloat(row.maxLeverage || '1') || 1;
+  if (maxQty <= 0 || price <= 0) return '—';
+  const margin = (maxQty * price) / lev;
+  return '$' + margin.toFixed(2);
 }
 
 function formatCountdown(nextFundingTimeMs: number): string {
@@ -430,13 +440,15 @@ export default function Scanner() {
                     </span>
                   </th>
                   <th className="px-4 py-3">Max Lev</th>
+                  <th className="px-4 py-3">Max Qty Limit</th>
+                  <th className="px-4 py-3">Max Margin (USDT)</th>
                   <th className="px-4 py-3">Action</th>
                 </tr>
               </thead>
               <tbody>
                 {sortedData.length === 0 && !loading ? (
                   <tr>
-                    <td colSpan={8} className="px-4 py-8 text-center text-gray-500">
+                    <td colSpan={10} className="px-4 py-8 text-center text-gray-500">
                       {searchQuery || minFundingPct
                         ? 'No tokens match your filters.'
                         : 'No results yet.'}
@@ -501,6 +513,12 @@ export default function Scanner() {
                         >
                           {row.maxLeverage ? `${row.maxLeverage}x` : '—'}
                         </span>
+                      </td>
+                      <td className="px-4 py-3 text-gray-300 font-mono text-sm">
+                        {row.maxOrderQty ?? '—'}
+                      </td>
+                      <td className="px-4 py-3 text-gray-300 font-mono text-sm">
+                        {maxMarginUsdt(row)}
                       </td>
                       <td className="px-4 py-3 flex items-center gap-2">
                         <button
@@ -586,13 +604,15 @@ export default function Scanner() {
                 <th className="px-4 py-3">Countdown</th>
                 <th className="px-4 py-3">Interval</th>
                 <th className="px-4 py-3">Max Lev</th>
+                <th className="px-4 py-3">Max Qty Limit</th>
+                <th className="px-4 py-3">Max Margin (USDT)</th>
                 <th className="px-4 py-3">Action</th>
               </tr>
             </thead>
             <tbody>
               {bannedDisplayTokens.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-6 text-center text-gray-500">
+                  <td colSpan={10} className="px-4 py-6 text-center text-gray-500">
                     No banned tokens in current scan.
                   </td>
                 </tr>
@@ -654,6 +674,12 @@ export default function Scanner() {
                       >
                         {row.maxLeverage ? `${row.maxLeverage}x` : '—'}
                       </span>
+                    </td>
+                    <td className="px-4 py-3 text-gray-300 font-mono text-sm">
+                      {row.maxOrderQty ?? '—'}
+                    </td>
+                    <td className="px-4 py-3 text-gray-300 font-mono text-sm">
+                      {maxMarginUsdt(row)}
                     </td>
                     <td className="px-4 py-3">
                       <button

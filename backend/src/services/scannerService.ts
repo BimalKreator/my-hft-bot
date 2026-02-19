@@ -1,4 +1,5 @@
 import { RestClientV5 } from 'bybit-api';
+import { getInstrumentsCache, type CachedInstrumentRow } from './bybitService.js';
 
 export interface FundingDataFilters {
   minFundingRate?: number;
@@ -16,6 +17,7 @@ export interface FundingDataItem {
   turnover24h: number;
   fundingIntervalHours: number;
   maxLeverage: string;
+  maxOrderQty: string;
 }
 
 export class FundingScanner {
@@ -27,16 +29,14 @@ export class FundingScanner {
   }
 
   async getFundingData(filters?: FundingDataFilters): Promise<FundingDataItem[]> {
-    const [tickersRes, instrumentsRes] = await Promise.all([
+    const [tickersRes, rawInstruments] = await Promise.all([
       this.bybit.getTickers({ category: 'linear' }),
-      this.bybit.getInstrumentsInfo({ category: 'linear' }),
+      getInstrumentsCache(),
     ]);
 
     if (tickersRes.retCode !== 0) throw new Error(tickersRes.retMsg ?? 'Bybit tickers failed');
-    if (instrumentsRes.retCode !== 0) throw new Error(instrumentsRes.retMsg ?? 'Bybit instruments failed');
 
     const tickerList = (tickersRes.result as { list: TickerRow[] }).list ?? [];
-    const rawInstruments = (instrumentsRes.result as { list: InstrumentRow[] }).list ?? [];
 
     // Strict filter: USDT perpetuals only (no dated/quarterly/options)
     const isCleanPerpetual = (symbol: string): boolean => {
@@ -46,15 +46,15 @@ export class FundingScanner {
     };
 
     const instrumentList = rawInstruments.filter(
-      (i) =>
+      (i: CachedInstrumentRow) =>
         i.contractType === 'LinearPerpetual' &&
         i.quoteCoin === 'USDT' &&
         i.status === 'Trading' &&
         isCleanPerpetual(i.symbol)
     );
 
-    const instrumentBySymbol = new Map(
-      instrumentList.map((i) => [i.symbol, i])
+    const instrumentBySymbol = new Map<string, CachedInstrumentRow>(
+      instrumentList.map((i: CachedInstrumentRow) => [i.symbol, i])
     );
 
     const now = Date.now();
@@ -72,6 +72,7 @@ export class FundingScanner {
       const fundingIntervalMinutes = inst.fundingInterval ?? 480;
       const fundingIntervalHours = fundingIntervalMinutes / 60;
       const maxLeverage = inst.leverageFilter?.maxLeverage ?? '';
+      const maxOrderQty = inst.lotSizeFilter?.maxOrderQty ?? '';
 
       if (filters) {
         if (filters.minFundingRate != null && Math.abs(fundingRate) < filters.minFundingRate) continue;
@@ -90,6 +91,7 @@ export class FundingScanner {
         turnover24h,
         fundingIntervalHours,
         maxLeverage,
+        maxOrderQty,
       });
     }
 
@@ -113,11 +115,3 @@ interface TickerRow {
   turnover24h?: string;
 }
 
-interface InstrumentRow {
-  symbol: string;
-  contractType?: string;
-  quoteCoin?: string;
-  status?: string;
-  fundingInterval?: number;
-  leverageFilter?: { maxLeverage?: string };
-}

@@ -6,6 +6,7 @@ import {
   getWalletBalance,
   getPositionList,
   getInstrumentLotSize,
+  getInstrumentDetails,
   setLeverage,
   placeMarketOrder,
   placeMarketOrderReduceOnly,
@@ -267,16 +268,26 @@ async function processUser(
 
   console.log(`[autoBot] Entry Attempt: ${topToken.symbol} (countdown ${countdownSec}s in window)`);
 
-  const leverage = settings.leverage ?? 5;
+  const userLeverage = settings.leverage ?? 5;
+  let maxLeverageStr = '';
   try {
-    await setLeverage(apiKey, apiSecret, topToken.symbol, leverage);
-    console.log(`[autoBot] Leverage set to ${leverage}`);
+    const details = await getInstrumentDetails(topToken.symbol);
+    maxLeverageStr = details.maxLeverage || String(userLeverage);
+  } catch {
+    maxLeverageStr = String(userLeverage);
+  }
+  const maxLeverageNum = parseFloat(maxLeverageStr) || userLeverage;
+  const safeLeverage = Math.min(userLeverage, maxLeverageNum);
+  console.log(`[autoBot] Leverage adjusted to ${safeLeverage} (User: ${userLeverage}, Max: ${maxLeverageStr})`);
+
+  try {
+    await setLeverage(apiKey, apiSecret, topToken.symbol, safeLeverage);
   } catch {
     // Ignore e.g. "Leverage not modified"
   }
 
   // Margin Used = Balance * Capital%; Position Size = Margin Used * Leverage; Qty = Position Size / Price
-  const rawQty = (availableBalance * (settings.capitalPercent / 100) * leverage) / price;
+  const rawQty = (availableBalance * (settings.capitalPercent / 100) * safeLeverage) / price;
   if (rawQty <= 0) return;
 
   let finalQty: number;

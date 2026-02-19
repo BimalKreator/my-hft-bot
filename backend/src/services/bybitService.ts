@@ -17,6 +17,55 @@ function getPublicClient(): RestClientV5 {
   return new RestClientV5({ testnet });
 }
 
+const INSTRUMENTS_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+/** Full instrument row from Bybit (for scanner filter + lot/leverage). */
+export interface CachedInstrumentRow {
+  symbol: string;
+  contractType?: string;
+  quoteCoin?: string;
+  status?: string;
+  fundingInterval?: number;
+  lotSizeFilter?: { maxOrderQty?: string };
+  leverageFilter?: { maxLeverage?: string };
+}
+
+let instrumentsCache: { list: CachedInstrumentRow[]; fetchedAt: number } | null = null;
+
+async function refreshInstrumentsCache(): Promise<void> {
+  const client = getPublicClient();
+  const res = await client.getInstrumentsInfo({ category: 'linear' });
+  if (res.retCode !== 0) {
+    throw new Error(res.retMsg ?? 'Bybit getInstrumentsInfo failed');
+  }
+  const list = (res.result as { list?: CachedInstrumentRow[] })?.list ?? [];
+  instrumentsCache = { list, fetchedAt: Date.now() };
+}
+
+/**
+ * Get full instruments list; refreshes from Bybit if cache is missing or older than 1 hour.
+ */
+export async function getInstrumentsCache(): Promise<CachedInstrumentRow[]> {
+  if (!instrumentsCache || Date.now() - instrumentsCache.fetchedAt > INSTRUMENTS_CACHE_TTL_MS) {
+    await refreshInstrumentsCache();
+  }
+  return instrumentsCache!.list;
+}
+
+/**
+ * Read from instruments cache (refreshes if stale). Returns maxOrderQty and maxLeverage for the symbol.
+ */
+export async function getInstrumentDetails(
+  symbol: string
+): Promise<{ maxOrderQty: string; maxLeverage: string }> {
+  const list = await getInstrumentsCache();
+  const row = list.find((r) => r.symbol === symbol);
+  return {
+    maxOrderQty: row?.lotSizeFilter?.maxOrderQty ?? '',
+    maxLeverage: row?.leverageFilter?.maxLeverage ?? '',
+  };
+}
+
 function sign(apiSecret: string, paramStr: string): string {
   const hash = CryptoJS.HmacSHA256(paramStr, apiSecret);
   return hash.toString(CryptoJS.enc.Hex);
