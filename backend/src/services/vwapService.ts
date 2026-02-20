@@ -3,6 +3,7 @@ import { getPositionList, type LinearPosition } from './bybitService.js';
 import { getExchangeKeys } from '../models/exchangeModel.js';
 import { decrypt } from '../utils/encryption.js';
 import { FundingScanner } from './scannerService.js';
+import { getHedgeGroupByPosition } from '../models/hedgeGroupModel.js';
 
 const ORDERBOOK_DEPTH = 50;
 const LIQUIDITY_MULTIPLIER = 1.2;
@@ -52,6 +53,12 @@ export interface EnrichedPosition extends LinearPosition {
   slPrice: number;
   targetPrice: number;
   fundingRate: number;
+  /** Set when this position is part of a spot-hedged pair */
+  hedgeGroupId?: string;
+  fundingAmountReceived?: number | null;
+  spotQty?: number;
+  spotEntryPrice?: number;
+  isPaired?: boolean;
 }
 
 /**
@@ -79,6 +86,8 @@ export async function getEnrichedPositions(userId: number): Promise<EnrichedPosi
     const entry = parseFloat(pos.avgPrice) || 0;
     const qty = parseFloat(pos.size) || 0;
     const fundingRate = fundingBySymbol.get(pos.symbol) ?? 0;
+
+    const hedgeGroup = await getHedgeGroupByPosition(userId, pos.symbol, pos.side);
 
     // Depth-based price for Active Positions table: Long = bidPrice (sell to close), Short = askPrice (buy to close). Default depth 2.
     let vwapPrice = 0;
@@ -114,6 +123,13 @@ export async function getEnrichedPositions(userId: number): Promise<EnrichedPosi
       slPrice,
       targetPrice,
       fundingRate,
+      ...(hedgeGroup != null && {
+        hedgeGroupId: hedgeGroup.hedgeGroupId,
+        fundingAmountReceived: hedgeGroup.fundingAmountReceived,
+        spotQty: hedgeGroup.spotQty,
+        spotEntryPrice: hedgeGroup.spotEntryPrice,
+        isPaired: true,
+      }),
     });
   }
 

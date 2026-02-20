@@ -286,6 +286,45 @@ export async function placeMarketOrderReduceOnly(
 }
 
 /**
+ * Place an order in the Spot market with margin enabled (isLeverage: 1).
+ * Allows the bot to borrow and short in the spot market.
+ * Use for 1:1 spot hedging. Pass category: 'spot' and isLeverage: 1.
+ */
+export async function placeSpotMarginOrder(
+  apiKey: string,
+  apiSecret: string,
+  symbol: string,
+  side: 'Buy' | 'Sell',
+  orderType: 'Market' | 'Limit',
+  qty: string,
+  price?: string,
+  timeInForce: 'GTC' | 'IOC' | 'FOK' | 'PostOnly' = 'GTC'
+): Promise<{ orderId: string; orderLinkId: string }> {
+  const client = getClient(apiKey, apiSecret);
+  const params: Record<string, unknown> = {
+    category: 'spot',
+    symbol,
+    side,
+    orderType,
+    qty,
+    isLeverage: 1,
+    orderFilter: 'Order',
+  };
+  if (orderType === 'Limit') {
+    if (price != null) params.price = price;
+    params.timeInForce = timeInForce;
+  } else {
+    params.timeInForce = 'IOC';
+  }
+  const res = await client.submitOrder(params as Parameters<RestClientV5['submitOrder']>[0]);
+  if (res.retCode !== 0) {
+    throw new Error(res.retMsg ?? 'Bybit place spot margin order failed');
+  }
+  const result = res.result as { orderId: string; orderLinkId: string };
+  return { orderId: result.orderId, orderLinkId: result.orderLinkId };
+}
+
+/**
  * Place a limit reduce-only order to close a position at the given price.
  * @param timeInForce - 'GTC' (default) or 'IOC' for orderbook sweep exits.
  */
@@ -323,7 +362,7 @@ export async function placeLimitOrderReduceOnly(
 export async function getExecutionList(
   apiKey: string,
   apiSecret: string,
-  category: 'linear',
+  category: 'linear' | 'spot',
   orderId: string
 ): Promise<Array<{ execPrice: string; execQty: string; execFee?: string }>> {
   const client = getClient(apiKey, apiSecret);
@@ -442,12 +481,69 @@ export interface OrderbookResult {
   asks: OrderbookLevel[];
 }
 
+export type OrderbookCategory = 'linear' | 'spot';
+
 /**
- * Get order book for a linear perpetual (public endpoint). limit 1–500, default 50.
+ * Get the price at a specific orderbook depth row (1-based).
+ * Long (Buy): uses asks[depthRow - 1].price (sell-to-close price).
+ * Short (Sell): uses bids[depthRow - 1].price (buy-to-close price).
+ * If the requested depth doesn't exist, falls back to the deepest available row.
  */
-export async function getOrderbook(symbol: string, limit = 50): Promise<OrderbookResult> {
+export function getDepthPrice(
+  orderbook: OrderbookResult,
+  positionSide: 'Buy' | 'Sell',
+  depthRow: number
+): number {
+  const rowIndex = Math.max(0, Math.floor(depthRow) - 1);
+  if (positionSide === 'Buy') {
+    const asks = orderbook.asks ?? [];
+    const idx = rowIndex < asks.length ? rowIndex : asks.length - 1;
+    const level = asks[idx];
+    return level ? parseFloat(level.price) || 0 : 0;
+  } else {
+    const bids = orderbook.bids ?? [];
+    const idx = rowIndex < bids.length ? rowIndex : bids.length - 1;
+    const level = bids[idx];
+    return level ? parseFloat(level.price) || 0 : 0;
+  }
+}
+
+/** Position-like shape for PnL calculation (side, entry price, size). */
+export interface PositionLike {
+  side: 'Buy' | 'Sell';
+  avgPrice: string;
+  size: string;
+}
+
+/**
+ * Calculate unrealized PnL using a depth-based current price.
+ * Long: (currentDepthPrice - entryPrice) * qty.
+ * Short: (entryPrice - currentDepthPrice) * qty.
+ */
+export function calculateUnrealizedPnLByDepth(
+  position: PositionLike,
+  currentDepthPrice: number
+): number {
+  const entryPrice = parseFloat(position.avgPrice) || 0;
+  const qty = parseFloat(position.size) || 0;
+  if (position.side === 'Buy') {
+    return (currentDepthPrice - entryPrice) * qty;
+  } else {
+    return (entryPrice - currentDepthPrice) * qty;
+  }
+}
+
+/**
+ * Get order book (public endpoint). limit 1–500, default 50.
+ * @param category - 'linear' for perp, 'spot' for spot (sweep logic).
+ */
+export async function getOrderbook(
+  symbol: string,
+  limit = 50,
+  category: OrderbookCategory = 'linear'
+): Promise<OrderbookResult> {
   const client = getPublicClient();
-  const res = await client.getOrderbook({ category: 'linear', symbol, limit });
+  const res = await client.getOrderbook({ category, symbol, limit });
   if (res.retCode !== 0) {
     throw new Error(res.retMsg ?? 'Bybit get orderbook failed');
   }
@@ -455,6 +551,13 @@ export async function getOrderbook(symbol: string, limit = 50): Promise<Orderboo
   const bids = (result.b ?? []).map(([price, size]) => ({ price, size }));
   const asks = (result.a ?? []).map(([price, size]) => ({ price, size }));
   return { bids, asks };
+}
+
+/**
+ * Get Spot orderbook for sweep logic. Same as getOrderbook(symbol, limit, 'spot').
+ */
+export async function getSpotOrderbook(symbol: string, limit = 50): Promise<OrderbookResult> {
+  return getOrderbook(symbol, limit, 'spot');
 }
 
 export interface OrderBookDepthResult {
@@ -498,6 +601,23 @@ export interface InstrumentLotSize {
   tickSize?: string;
 }
 
+type InstrumentListRow = {
+  lotSizeFilter?: { qtyStep?: string; minOrderQty?: string; maxOrderQty?: string; maxMktOrderQty?: string };
+  priceFilter?: { tickSize?: string };
+};
+
+function parseInstrumentLotSize(inst: InstrumentListRow | undefined): InstrumentLotSize {
+  const filter = inst?.lotSizeFilter;
+  const priceFilter = inst?.priceFilter;
+  return {
+    qtyStep: filter?.qtyStep ?? '0.1',
+    minOrderQty: filter?.minOrderQty ?? '0',
+    maxOrderQty: filter?.maxOrderQty ?? '999999',
+    maxMktOrderQty: filter?.maxMktOrderQty ?? '',
+    tickSize: priceFilter?.tickSize ?? '0.01',
+  };
+}
+
 /**
  * Fetch lot size filter for a linear symbol (qtyStep, minOrderQty, maxOrderQty, maxMktOrderQty).
  * Use maxMktOrderQty for market orders; fall back to maxOrderQty when absent.
@@ -512,21 +632,22 @@ export async function getInstrumentLotSize(
   if (res.retCode !== 0) {
     throw new Error(res.retMsg ?? 'Bybit get instruments info failed');
   }
-  const list = (res.result as {
-    list?: Array<{
-      lotSizeFilter?: { qtyStep?: string; minOrderQty?: string; maxOrderQty?: string; maxMktOrderQty?: string };
-      priceFilter?: { tickSize?: string };
-    }>;
-  })?.list ?? [];
-  const inst = list[0];
-  const filter = inst?.lotSizeFilter;
-  const priceFilter = inst?.priceFilter;
-  const qtyStep = filter?.qtyStep ?? '0.1';
-  const minOrderQty = filter?.minOrderQty ?? '0';
-  const maxOrderQty = filter?.maxOrderQty ?? '999999';
-  const maxMktOrderQty = filter?.maxMktOrderQty ?? '';
-  const tickSize = priceFilter?.tickSize ?? '0.01';
-  return { qtyStep, minOrderQty, maxOrderQty, maxMktOrderQty, tickSize };
+  const list = (res.result as { list?: InstrumentListRow[] })?.list ?? [];
+  return parseInstrumentLotSize(list[0]);
+}
+
+/**
+ * Fetch lot size / step size for a spot symbol so quantities can be formatted properly.
+ * Uses public market endpoint (no auth required).
+ */
+export async function getSpotInstrumentLotSize(symbol: string): Promise<InstrumentLotSize> {
+  const client = getPublicClient();
+  const res = await client.getInstrumentsInfo({ category: 'spot', symbol });
+  if (res.retCode !== 0) {
+    throw new Error(res.retMsg ?? 'Bybit get spot instruments info failed');
+  }
+  const list = (res.result as { list?: InstrumentListRow[] })?.list ?? [];
+  return parseInstrumentLotSize(list[0]);
 }
 
 export interface ExecutionSettlementCallback {

@@ -15,6 +15,10 @@ export interface BotSettings {
   slPreMultiplier: number;
   slPostFundingEnabled: boolean;
   orderBookDepth: number;
+  spotHedgingEnabled: boolean;
+  hedgeTargetPct: number;
+  hedgeStoplossPct: number;
+  hedgePnlDepth: number;
 }
 
 interface SettingsRow {
@@ -32,6 +36,10 @@ interface SettingsRow {
   sl_pre_multiplier?: string;
   sl_post_funding_enabled?: boolean;
   order_book_depth?: string;
+  spot_hedging_enabled?: boolean;
+  hedge_target_pct?: string;
+  hedge_stoploss_pct?: string;
+  hedge_pnl_depth?: string;
 }
 
 function rowToSettings(row: SettingsRow): BotSettings {
@@ -53,6 +61,10 @@ function rowToSettings(row: SettingsRow): BotSettings {
     slPreMultiplier: row.sl_pre_multiplier != null ? parseFloat(row.sl_pre_multiplier) : 1,
     slPostFundingEnabled: row.sl_post_funding_enabled ?? false,
     orderBookDepth: row.order_book_depth != null ? parseInt(row.order_book_depth, 10) : 2,
+    spotHedgingEnabled: row.spot_hedging_enabled ?? false,
+    hedgeTargetPct: row.hedge_target_pct != null ? parseFloat(row.hedge_target_pct) : 2,
+    hedgeStoplossPct: row.hedge_stoploss_pct != null ? parseFloat(row.hedge_stoploss_pct) : 5,
+    hedgePnlDepth: row.hedge_pnl_depth != null ? parseInt(row.hedge_pnl_depth, 10) : 1,
   };
 }
 
@@ -69,6 +81,10 @@ const DEFAULTS: Omit<BotSettings, 'userId'> = {
   slPreMultiplier: 1,
   slPostFundingEnabled: false,
   orderBookDepth: 2,
+  spotHedgingEnabled: false,
+  hedgeTargetPct: 2,
+  hedgeStoplossPct: 5,
+  hedgePnlDepth: 1,
 };
 
 export async function getUsersWithAutoEntryEnabled(): Promise<number[]> {
@@ -81,7 +97,8 @@ export async function getUsersWithAutoEntryEnabled(): Promise<number[]> {
 export async function getSettings(userId: number): Promise<BotSettings> {
   const result = await query<SettingsRow>(
     `SELECT user_id, auto_entry_enabled, auto_exit_enabled, capital_percent, max_trades, entry_time_sec, exit_time_sec, exit_time_ms, min_funding_rate, leverage,
-            sl_pre_funding_enabled, sl_pre_multiplier, sl_post_funding_enabled, order_book_depth
+            sl_pre_funding_enabled, sl_pre_multiplier, sl_post_funding_enabled, order_book_depth, spot_hedging_enabled,
+            hedge_target_pct, hedge_stoploss_pct, hedge_pnl_depth
      FROM bot_settings WHERE user_id = $1`,
     [userId]
   );
@@ -105,6 +122,10 @@ export interface UpdateSettingsInput {
   slPreMultiplier?: number;
   slPostFundingEnabled?: boolean;
   orderBookDepth?: number;
+  spotHedgingEnabled?: boolean;
+  hedgeTargetPct?: number;
+  hedgeStoplossPct?: number;
+  hedgePnlDepth?: number;
 }
 
 export async function updateSettings(
@@ -126,12 +147,19 @@ export async function updateSettings(
     slPreMultiplier: input.slPreMultiplier ?? current.slPreMultiplier,
     slPostFundingEnabled: input.slPostFundingEnabled ?? current.slPostFundingEnabled,
     orderBookDepth: input.orderBookDepth ?? current.orderBookDepth,
+    spotHedgingEnabled: input.spotHedgingEnabled ?? current.spotHedgingEnabled,
+    hedgeTargetPct: input.hedgeTargetPct ?? current.hedgeTargetPct,
+    hedgeStoplossPct: input.hedgeStoplossPct ?? current.hedgeStoplossPct,
+    hedgePnlDepth: input.hedgePnlDepth ?? current.hedgePnlDepth,
   };
   const depthInt = Math.max(1, Math.min(50, Math.round(merged.orderBookDepth) || 2));
   const exitTimeMsInt = Math.max(0, Math.round(merged.exitTimeMs));
+  const hedgeTargetNum = Math.max(0, merged.hedgeTargetPct);
+  const hedgeStoplossNum = Math.max(0, merged.hedgeStoplossPct);
+  const hedgePnlDepthInt = Math.max(1, Math.min(50, Math.round(merged.hedgePnlDepth) || 1));
   await query(
-    `INSERT INTO bot_settings (user_id, auto_entry_enabled, auto_exit_enabled, capital_percent, max_trades, entry_time_sec, exit_time_sec, exit_time_ms, min_funding_rate, leverage, sl_pre_funding_enabled, sl_pre_multiplier, sl_post_funding_enabled, order_book_depth)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+    `INSERT INTO bot_settings (user_id, auto_entry_enabled, auto_exit_enabled, capital_percent, max_trades, entry_time_sec, exit_time_sec, exit_time_ms, min_funding_rate, leverage, sl_pre_funding_enabled, sl_pre_multiplier, sl_post_funding_enabled, order_book_depth, spot_hedging_enabled, hedge_target_pct, hedge_stoploss_pct, hedge_pnl_depth)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
      ON CONFLICT (user_id) DO UPDATE SET
        auto_entry_enabled = EXCLUDED.auto_entry_enabled,
        auto_exit_enabled = EXCLUDED.auto_exit_enabled,
@@ -145,7 +173,11 @@ export async function updateSettings(
        sl_pre_funding_enabled = EXCLUDED.sl_pre_funding_enabled,
        sl_pre_multiplier = EXCLUDED.sl_pre_multiplier,
        sl_post_funding_enabled = EXCLUDED.sl_post_funding_enabled,
-       order_book_depth = EXCLUDED.order_book_depth`,
+       order_book_depth = EXCLUDED.order_book_depth,
+       spot_hedging_enabled = EXCLUDED.spot_hedging_enabled,
+       hedge_target_pct = EXCLUDED.hedge_target_pct,
+       hedge_stoploss_pct = EXCLUDED.hedge_stoploss_pct,
+       hedge_pnl_depth = EXCLUDED.hedge_pnl_depth`,
     [
       userId,
       merged.autoEntryEnabled,
@@ -161,6 +193,10 @@ export async function updateSettings(
       merged.slPreMultiplier,
       merged.slPostFundingEnabled,
       depthInt,
+      merged.spotHedgingEnabled,
+      hedgeTargetNum,
+      hedgeStoplossNum,
+      hedgePnlDepthInt,
     ]
   );
   return getSettings(userId);

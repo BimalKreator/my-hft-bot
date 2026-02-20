@@ -26,6 +26,10 @@ interface BotSettings {
   slPreFundingEnabled: boolean;
   slPreMultiplier: number;
   slPostFundingEnabled: boolean;
+  spotHedgingEnabled: boolean;
+  hedgeTargetPct: number;
+  hedgeStoplossPct: number;
+  hedgePnlDepth: number;
 }
 
 const defaultSettings: Omit<BotSettings, 'userId'> = {
@@ -40,6 +44,10 @@ const defaultSettings: Omit<BotSettings, 'userId'> = {
   slPreFundingEnabled: false,
   slPreMultiplier: 2,
   slPostFundingEnabled: false,
+  spotHedgingEnabled: false,
+  hedgeTargetPct: 2,
+  hedgeStoplossPct: 5,
+  hedgePnlDepth: 1,
 };
 
 export default function Settings() {
@@ -92,6 +100,10 @@ export default function Settings() {
         slPreFundingEnabled: data.slPreFundingEnabled ?? false,
         slPreMultiplier: Number(data.slPreMultiplier) ?? 2,
         slPostFundingEnabled: data.slPostFundingEnabled ?? false,
+        spotHedgingEnabled: data.spotHedgingEnabled ?? false,
+        hedgeTargetPct: Number(data.hedgeTargetPct) ?? 2,
+        hedgeStoplossPct: Number(data.hedgeStoplossPct) ?? 5,
+        hedgePnlDepth: Math.max(1, Math.min(50, Number(data.hedgePnlDepth) || 1)),
       });
     } catch {
       setError('Network error. Edit below and click Save to retry.');
@@ -165,6 +177,10 @@ export default function Settings() {
       slPreFundingEnabled: Boolean(settings.slPreFundingEnabled),
       slPreMultiplier: Number(settings.slPreMultiplier) ?? 2,
       slPostFundingEnabled: Boolean(settings.slPostFundingEnabled),
+      spotHedgingEnabled: Boolean(settings.spotHedgingEnabled),
+      hedgeTargetPct: Number(settings.hedgeTargetPct) ?? 2,
+      hedgeStoplossPct: Number(settings.hedgeStoplossPct) ?? 5,
+      hedgePnlDepth: Math.max(1, Math.min(50, Number(settings.hedgePnlDepth) || 1)),
     });
   }, [settings, saveSettings]);
 
@@ -202,6 +218,13 @@ export default function Settings() {
     const next = !settings.slPostFundingEnabled;
     setSettings((s) => (s ? { ...s, slPostFundingEnabled: next } : s));
     saveSettings({ slPostFundingEnabled: next });
+  };
+
+  const toggleSpotHedging = () => {
+    if (!settings) return;
+    const next = !settings.spotHedgingEnabled;
+    setSettings((s) => (s ? { ...s, spotHedgingEnabled: next } : s));
+    saveSettings({ spotHedgingEnabled: next });
   };
 
   const fetchTransactions = useCallback(async () => {
@@ -535,6 +558,98 @@ export default function Settings() {
                 }`}
               />
             </button>
+          </div>
+
+          {/* Spot Hedging Toggle */}
+          <div>
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium text-gray-300">Enable Spot Hedging (1:1)</label>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={settings.spotHedgingEnabled}
+                onClick={toggleSpotHedging}
+                className={`relative h-8 w-14 rounded-full transition-colors ${
+                  settings.spotHedgingEnabled ? 'bg-[#007BFF]' : 'bg-gray-600'
+                }`}
+                style={
+                  settings.spotHedgingEnabled
+                    ? { boxShadow: '0 0 16px rgba(0, 123, 255, 0.5)' }
+                    : undefined
+                }
+              >
+                <span
+                  className={`absolute top-1 h-6 w-6 rounded-full bg-white transition-transform ${
+                    settings.spotHedgingEnabled ? 'left-7' : 'left-1'
+                  }`}
+                />
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 mt-1">
+              Splits capital between Spot and Futures to maintain exactly the same quantity on both sides, making the trade market-neutral.
+            </p>
+            {settings.spotHedgingEnabled && (
+              <div className="mt-4 space-y-4 rounded-lg p-4" style={{ backgroundColor: 'rgba(0, 0, 0, 0.2)' }}>
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-1">Group Target Profit (%)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    step={0.1}
+                    value={settings.hedgeTargetPct}
+                    onChange={(e) => {
+                      const v = parseFloat(e.target.value);
+                      if (!Number.isNaN(v) && v >= 0) {
+                        setSettings((s) => (s ? { ...s, hedgeTargetPct: v } : s));
+                        debouncedSave({ hedgeTargetPct: v });
+                      }
+                    }}
+                    className="w-full rounded-lg border bg-black/50 px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-[#007BFF]"
+                    style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
+                  />
+                  <p className="text-xs text-gray-500 mt-1">If set to 0, fallback to Funding Rate.</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-1">Group Stoploss (%)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    step={0.1}
+                    value={settings.hedgeStoplossPct}
+                    onChange={(e) => {
+                      const v = parseFloat(e.target.value);
+                      if (!Number.isNaN(v) && v >= 0) {
+                        setSettings((s) => (s ? { ...s, hedgeStoplossPct: v } : s));
+                        debouncedSave({ hedgeStoplossPct: v });
+                      }
+                    }}
+                    className="w-full rounded-lg border bg-black/50 px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-[#007BFF]"
+                    style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Max loss limit for the hedged group.</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-1">PnL Orderbook Depth Row</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={50}
+                    step={1}
+                    value={settings.hedgePnlDepth}
+                    onChange={(e) => {
+                      const v = parseInt(e.target.value, 10);
+                      if (!Number.isNaN(v) && v >= 1 && v <= 50) {
+                        setSettings((s) => (s ? { ...s, hedgePnlDepth: v } : s));
+                        debouncedSave({ hedgePnlDepth: v });
+                      }
+                    }}
+                    className="w-full rounded-lg border bg-black/50 px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-[#007BFF]"
+                    style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
+                  />
+                  <p className="text-xs text-gray-500 mt-1">1 = 1st row, 2 = 2nd row, etc.</p>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Stoploss Settings */}

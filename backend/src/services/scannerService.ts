@@ -18,6 +18,10 @@ export interface FundingDataItem {
   fundingIntervalHours: number;
   maxLeverage: string;
   maxOrderQty: string;
+  /** Spot last price (only when symbol exists on spot). */
+  spotPrice?: string;
+  /** (futuresMarkPrice - spotPrice) / spotPrice * 100. */
+  spreadPct?: number;
 }
 
 export class FundingScanner {
@@ -29,14 +33,21 @@ export class FundingScanner {
   }
 
   async getFundingData(filters?: FundingDataFilters): Promise<FundingDataItem[]> {
-    const [tickersRes, rawInstruments] = await Promise.all([
+    const [tickersRes, spotTickersRes, rawInstruments] = await Promise.all([
       this.bybit.getTickers({ category: 'linear' }),
+      this.bybit.getTickers({ category: 'spot' }),
       getInstrumentsCache(),
     ]);
 
-    if (tickersRes.retCode !== 0) throw new Error(tickersRes.retMsg ?? 'Bybit tickers failed');
+    if (tickersRes.retCode !== 0) throw new Error(tickersRes.retMsg ?? 'Bybit linear tickers failed');
+    if (spotTickersRes.retCode !== 0) throw new Error(spotTickersRes.retMsg ?? 'Bybit spot tickers failed');
 
     const tickerList = (tickersRes.result as { list: TickerRow[] }).list ?? [];
+    const spotTickerList = (spotTickersRes.result as { list: SpotTickerRow[] }).list ?? [];
+    const spotSymbolSet = new Set(spotTickerList.map((t) => t.symbol));
+    const spotPriceBySymbol = new Map<string, string>(
+      spotTickerList.map((t) => [t.symbol, t.lastPrice ?? ''])
+    );
 
     // Strict filter: USDT perpetuals only (no dated/quarterly/options)
     const isCleanPerpetual = (symbol: string): boolean => {
@@ -61,6 +72,7 @@ export class FundingScanner {
     const items: FundingDataItem[] = [];
 
     for (const t of tickerList) {
+      if (!spotSymbolSet.has(t.symbol)) continue;
       const inst = instrumentBySymbol.get(t.symbol);
       if (!inst) continue;
 
@@ -81,6 +93,14 @@ export class FundingScanner {
         if (filters.type === 'negative' && fundingRate >= 0) continue;
       }
 
+      const markPriceFutures = parseFloat(t.markPrice ?? t.lastPrice ?? '0') || 0;
+      const spotPriceStr = spotPriceBySymbol.get(t.symbol) ?? '0';
+      const spotPriceNum = parseFloat(spotPriceStr) || 0;
+      const spreadPct =
+        spotPriceNum > 0
+          ? ((markPriceFutures - spotPriceNum) / spotPriceNum) * 100
+          : undefined;
+
       items.push({
         symbol: t.symbol,
         fundingRate,
@@ -92,6 +112,8 @@ export class FundingScanner {
         fundingIntervalHours,
         maxLeverage,
         maxOrderQty,
+        spotPrice: spotPriceStr || undefined,
+        spreadPct,
       });
     }
 
@@ -113,5 +135,10 @@ interface TickerRow {
   lastPrice?: string;
   markPrice?: string;
   turnover24h?: string;
+}
+
+interface SpotTickerRow {
+  symbol: string;
+  lastPrice?: string;
 }
 

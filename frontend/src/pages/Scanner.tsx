@@ -15,6 +15,8 @@ interface FundingItem {
   fundingIntervalHours: number;
   maxLeverage: string;
   maxOrderQty?: string;
+  spotPrice?: string;
+  spreadPct?: number;
 }
 
 type FilterType = 'all' | 'positive' | 'negative';
@@ -417,6 +419,8 @@ export default function Scanner() {
                 >
                   <th className="px-4 py-3">Token</th>
                   <th className="px-4 py-3">Price</th>
+                  <th className="px-4 py-3">Spot Price</th>
+                  <th className="px-4 py-3">Spread (%)</th>
                   <th className="px-4 py-3">Funding Rate</th>
                   <th className="px-4 py-3">Direction</th>
                   <th className="px-4 py-3">Countdown</th>
@@ -448,7 +452,7 @@ export default function Scanner() {
               <tbody>
                 {sortedData.length === 0 && !loading ? (
                   <tr>
-                    <td colSpan={10} className="px-4 py-8 text-center text-gray-500">
+                    <td colSpan={12} className="px-4 py-8 text-center text-gray-500">
                       {searchQuery || minFundingPct
                         ? 'No tokens match your filters.'
                         : 'No results yet.'}
@@ -477,6 +481,28 @@ export default function Scanner() {
                           minimumFractionDigits: 2,
                           maximumFractionDigits: 6,
                         })}
+                      </td>
+                      <td className="px-4 py-3 text-gray-300 font-mono text-sm">
+                        {row.spotPrice != null && row.spotPrice !== ''
+                          ? parseFloat(row.spotPrice).toLocaleString(undefined, {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 6,
+                            })
+                          : '—'}
+                      </td>
+                      <td className="px-4 py-3">
+                        {row.spreadPct != null ? (
+                          <span
+                            className="font-mono font-medium"
+                            style={{
+                              color: row.spreadPct > 0 ? '#22c55e' : row.spreadPct < 0 ? '#ef4444' : 'rgb(156, 163, 175)',
+                            }}
+                          >
+                            {row.spreadPct > 0 ? '+' : ''}{row.spreadPct.toFixed(3)}%
+                          </span>
+                        ) : (
+                          <span className="text-gray-500">—</span>
+                        )}
                       </td>
                       <td className="px-4 py-3">
                         <span
@@ -599,6 +625,8 @@ export default function Scanner() {
               >
                 <th className="px-4 py-3">Token</th>
                 <th className="px-4 py-3">Price</th>
+                <th className="px-4 py-3">Spot Price</th>
+                <th className="px-4 py-3">Spread (%)</th>
                 <th className="px-4 py-3">Funding Rate</th>
                 <th className="px-4 py-3">Direction</th>
                 <th className="px-4 py-3">Countdown</th>
@@ -612,7 +640,7 @@ export default function Scanner() {
             <tbody>
               {bannedDisplayTokens.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="px-4 py-6 text-center text-gray-500">
+                  <td colSpan={12} className="px-4 py-6 text-center text-gray-500">
                     No banned tokens in current scan.
                   </td>
                 </tr>
@@ -639,6 +667,28 @@ export default function Scanner() {
                         minimumFractionDigits: 2,
                         maximumFractionDigits: 6,
                       })}
+                    </td>
+                    <td className="px-4 py-3 text-gray-300 font-mono text-sm">
+                      {row.spotPrice != null && row.spotPrice !== ''
+                        ? parseFloat(row.spotPrice).toLocaleString(undefined, {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 6,
+                          })
+                        : '—'}
+                    </td>
+                    <td className="px-4 py-3">
+                      {row.spreadPct != null ? (
+                        <span
+                          className="font-mono font-medium"
+                          style={{
+                            color: row.spreadPct > 0 ? '#22c55e' : row.spreadPct < 0 ? '#ef4444' : 'rgb(156, 163, 175)',
+                          }}
+                        >
+                          {row.spreadPct > 0 ? '+' : ''}{row.spreadPct.toFixed(3)}%
+                        </span>
+                      ) : (
+                        <span className="text-gray-500">—</span>
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       <span

@@ -77,6 +77,34 @@ async function initDb() {
     const e = err as { code?: string };
     if (e.code !== '42701') console.error('Error adding exit_time_ms:', err);
   }
+  try {
+    await client.query('ALTER TABLE bot_settings ADD COLUMN spot_hedging_enabled BOOLEAN NOT NULL DEFAULT false');
+    console.log('Added spot_hedging_enabled column to database.');
+  } catch (err: unknown) {
+    const e = err as { code?: string };
+    if (e.code !== '42701') console.error('Error adding spot_hedging_enabled:', err);
+  }
+  try {
+    await client.query('ALTER TABLE bot_settings ADD COLUMN hedge_target_pct NUMERIC NOT NULL DEFAULT 2');
+    console.log('Added hedge_target_pct column to database.');
+  } catch (err: unknown) {
+    const e = err as { code?: string };
+    if (e.code !== '42701') console.error('Error adding hedge_target_pct:', err);
+  }
+  try {
+    await client.query('ALTER TABLE bot_settings ADD COLUMN hedge_stoploss_pct NUMERIC NOT NULL DEFAULT 5');
+    console.log('Added hedge_stoploss_pct column to database.');
+  } catch (err: unknown) {
+    const e = err as { code?: string };
+    if (e.code !== '42701') console.error('Error adding hedge_stoploss_pct:', err);
+  }
+  try {
+    await client.query('ALTER TABLE bot_settings ADD COLUMN hedge_pnl_depth NUMERIC NOT NULL DEFAULT 1');
+    console.log('Added hedge_pnl_depth column to database.');
+  } catch (err: unknown) {
+    const e = err as { code?: string };
+    if (e.code !== '42701') console.error('Error adding hedge_pnl_depth:', err);
+  }
 
   await client.query(`
     CREATE TABLE IF NOT EXISTS daily_snapshots (
@@ -124,6 +152,19 @@ async function initDb() {
   await client.query(`
     ALTER TABLE closed_trades ADD COLUMN IF NOT EXISTS exit_reason TEXT;
   `).catch(() => {});
+
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS hedge_groups (
+      hedge_group_id TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      symbol TEXT NOT NULL,
+      side TEXT NOT NULL,
+      funding_amount_received NUMERIC,
+      spot_qty NUMERIC NOT NULL,
+      spot_entry_price NUMERIC NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
 
   await client.query(`
     CREATE TABLE IF NOT EXISTS banned_tokens (

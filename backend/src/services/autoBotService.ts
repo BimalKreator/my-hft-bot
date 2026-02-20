@@ -13,15 +13,26 @@ import {
   placeMarketOrderReduceOnly,
   getOrderBookDepth,
   getOrderbook,
+  getSpotOrderbook,
+  getSpotInstrumentLotSize,
+  placeSpotMarginOrder,
   getActiveOrders,
   cancelAllOrders,
   getExecutionList,
   getClosedPnl,
   startExecutionStream,
+  getDepthPrice,
+  calculateUnrealizedPnLByDepth,
 } from './bybitService.js';
 import type { OrderbookResult } from './bybitService.js';
 import { FundingScanner } from './scannerService.js';
 import { insertClosedTrade } from '../models/closedTradesModel.js';
+import {
+  createHedgeGroup,
+  getHedgeGroupByPosition,
+  setFundingReceived,
+  deleteHedgeGroup,
+} from '../models/hedgeGroupModel.js';
 
 const INTERVAL_MS = 5_000;
 const ENTRY_FAST_INTERVAL_MS = 500; // when countdown <= 15s (zero latency in final seconds)
@@ -200,6 +211,51 @@ async function exitPositionWithIocSweep(
   return orderIds;
 }
 
+/**
+ * Close the spot (margin) leg of a hedge using IOC limit orderbook sweep.
+ * exitSide: same as futures position side (Buy to cover spot short, Sell to close spot long).
+ */
+async function exitSpotWithIocSweep(
+  apiKey: string,
+  apiSecret: string,
+  symbol: string,
+  exitSide: 'Buy' | 'Sell',
+  positionSizeQty: number
+): Promise<void> {
+  let remainingQty = positionSizeQty;
+  let retries = 0;
+  let tickSize = '0.01';
+  let qtyStepStr = '0.1';
+  try {
+    const ls = await getSpotInstrumentLotSize(symbol);
+    tickSize = ls.tickSize ?? '0.01';
+    qtyStepStr = ls.qtyStep;
+  } catch {
+    // use defaults
+  }
+  while (remainingQty > 0 && retries < MAX_IOC_RETRIES) {
+    const orderbook = await getSpotOrderbook(symbol, ORDERBOOK_SWEEP_LIMIT);
+    const sweepPrice = getSweepPrice(orderbook, exitSide, remainingQty);
+    if (!Number.isFinite(sweepPrice) || sweepPrice <= 0) break;
+    const priceStr = formatPriceToTick(sweepPrice, tickSize);
+    const qtyStr = formatQtyToStep(remainingQty, qtyStepStr);
+    if (parseFloat(qtyStr) <= 0) break;
+    try {
+      const { orderId } = await placeSpotMarginOrder(apiKey, apiSecret, symbol, exitSide, 'Limit', qtyStr, priceStr, 'IOC');
+      await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
+      const executions = await getExecutionList(apiKey, apiSecret, 'spot', orderId);
+      const filledQty = executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
+      remainingQty -= filledQty;
+      if (remainingQty <= 0) break;
+    } catch (e) {
+      console.error(`[autoBot] exitSpotWithIocSweep ${symbol} order failed:`, e);
+      break;
+    }
+    retries++;
+    await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
+  }
+}
+
 /** After a reduce-only close, allow Bybit to settle then fetch exact closed PnL & fees, persist to DB. orderIds: one or more (IOC sweep may produce multiple). */
 async function saveClosedTradeAfterExit(
   userId: number,
@@ -302,7 +358,21 @@ async function doExitAfterSettlement(userId: number, symbol: string): Promise<vo
     const fundingRate = marketData.find((m) => m.symbol === symbol)?.fundingRate ?? 0;
     const fundingReceived = (qty * entry) * (lockedFundingRates[symbol] ?? Math.abs(fundingRate));
     const estimatedMakerFee = 0.0002 * qty * entry;
-    const orderIds = await exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty);
+    const hedgeGroup = await getHedgeGroupByPosition(userId, pos.symbol, pos.side);
+    const doDualExit = settings.spotHedgingEnabled || hedgeGroup != null;
+    let orderIds: string[];
+    if (doDualExit) {
+      if (hedgeGroup != null && hedgeGroup.fundingAmountReceived == null) {
+        await setFundingReceived(hedgeGroup.hedgeGroupId, fundingReceived);
+      }
+      [orderIds] = await Promise.all([
+        exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty),
+        exitSpotWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty),
+      ]);
+      if (hedgeGroup != null) await deleteHedgeGroup(hedgeGroup.hedgeGroupId);
+    } else {
+      orderIds = await exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty);
+    }
     positionFundingTime.delete(key);
     if (orderIds.length > 0) {
       const ob = await getOrderBookDepth(apiKey, apiSecret, pos.symbol, settings.orderBookDepth ?? 2);
@@ -506,12 +576,110 @@ async function monitorExits(): Promise<void> {
           // Exit price never 0: use depth price or fallback (markPrice / avgPrice)
           const exitPrice = pos.side === 'Buy' ? bidPriceSafe : askPriceSafe;
 
+          const hedgeGroup = await getHedgeGroupByPosition(userId, pos.symbol, pos.side);
+
+          // Hedged position: live orderbook depth PnL, target/stoploss (dollar), timeout
+          if (hedgeGroup != null) {
+            const settlementTimeMs = fundingTimeMs ?? 0;
+            if (settlementTimeMs === 0 || now < settlementTimeMs) continue;
+
+            let fundingAmountReceived = hedgeGroup.fundingAmountReceived;
+            if (fundingAmountReceived == null) {
+              const rate = lockedFundingRates[pos.symbol] ?? Math.abs(fundingRate);
+              fundingAmountReceived = (qty * entry) * rate;
+              await setFundingReceived(hedgeGroup.hedgeGroupId, fundingAmountReceived);
+            }
+
+            const depthRow = Math.max(1, Math.min(50, settings.hedgePnlDepth ?? 1));
+            const [orderbookLinear, orderbookSpot] = await Promise.all([
+              getOrderbook(pos.symbol, 50, 'linear'),
+              getSpotOrderbook(pos.symbol, 50),
+            ]);
+            const currentDepthPriceFutures = getDepthPrice(orderbookLinear, pos.side, depthRow);
+            const spotSide: 'Buy' | 'Sell' = pos.side === 'Buy' ? 'Sell' : 'Buy';
+            const currentDepthPriceSpot = getDepthPrice(orderbookSpot, spotSide, depthRow);
+
+            const futuresPnl = calculateUnrealizedPnLByDepth(pos, currentDepthPriceFutures);
+            const spotPositionLike = {
+              side: spotSide,
+              avgPrice: String(hedgeGroup.spotEntryPrice),
+              size: String(hedgeGroup.spotQty),
+            };
+            const spotPnl = calculateUnrealizedPnLByDepth(spotPositionLike, currentDepthPriceSpot);
+            const avgDepthPrice = (currentDepthPriceFutures + currentDepthPriceSpot) / 2 || currentDepthPriceFutures;
+            const estimatedExitFees = 2 * 0.0002 * qty * avgDepthPrice;
+            const combinedPnl = futuresPnl + spotPnl + fundingAmountReceived - estimatedExitFees;
+
+            const totalMargin = qty * entry;
+            const hedgeTargetPct = settings.hedgeTargetPct ?? 2;
+            const hedgeStoplossPct = settings.hedgeStoplossPct ?? 5;
+            const targetDollar = hedgeTargetPct === 0
+              ? fundingAmountReceived
+              : (totalMargin * hedgeTargetPct) / 100;
+            const stoplossDollar = -(totalMargin * hedgeStoplossPct) / 100;
+
+            let shouldExit = false;
+            let exitReason: 'Time Exit' | 'Stoploss Hit' = 'Time Exit';
+            if (combinedPnl >= targetDollar) {
+              shouldExit = true;
+              console.log(`[autoBot] Hedged exit: Target | ${pos.symbol} Combined PnL=${combinedPnl.toFixed(4)} >= targetDollar=${targetDollar.toFixed(4)}`);
+            } else if (combinedPnl <= stoplossDollar) {
+              shouldExit = true;
+              exitReason = 'Stoploss Hit';
+              console.log(`[autoBot] Hedged exit: Stoploss | ${pos.symbol} Combined PnL=${combinedPnl.toFixed(4)} <= stoplossDollar=${stoplossDollar.toFixed(4)}`);
+            }
+            if (!shouldExit) {
+              const bannedList = await getBannedTokens(userId);
+              const minFunding = settings.minFundingRate ?? 0;
+              const maxTrades = settings.maxTrades ?? 1;
+              const queue = marketData
+                .filter((m) => Math.abs(m.fundingRate) >= minFunding && !bannedList.includes(m.symbol))
+                .sort((a, b) => (a.fundingIntervalHours ?? 0) - (b.fundingIntervalHours ?? 0) || Math.abs(b.fundingRate) - Math.abs(a.fundingRate));
+              const topTokens = queue.slice(0, maxTrades);
+              const nextFundingTimeMs = topTokens.length > 0
+                ? Math.min(...topTokens.map((t) => parseInt(t.nextFundingTime, 10) || 0))
+                : 0;
+              const timeoutThresholdMs = nextFundingTimeMs - 10 * 60 * 1000;
+              if (nextFundingTimeMs > 0 && now >= timeoutThresholdMs) {
+                shouldExit = true;
+                console.log(`[autoBot] Hedged exit: Timeout (next funding in <10m) | ${pos.symbol}`);
+              }
+            }
+            if (shouldExit) {
+              try {
+                const finalFundingRate = lockedFundingRates[pos.symbol] ?? Math.abs(fundingRate);
+                const fundingReceived = (qty * entry) * finalFundingRate;
+                const [orderIds] = await Promise.all([
+                  exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty),
+                  exitSpotWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty),
+                ]);
+                positionFundingTime.delete(key);
+                if (orderIds.length > 0) {
+                  await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderIds, exitReason, fundingReceived, currentDepthPriceFutures, estimatedMakerFee);
+                }
+                await deleteHedgeGroup(hedgeGroup.hedgeGroupId);
+                delete lockedFundingRates[pos.symbol];
+              } catch (e) {
+                console.error(`[autoBot] Hedged exit failed ${pos.symbol}:`, e);
+              }
+            }
+            continue;
+          }
+
           // Stoploss takes priority over time-based exit. Check pre-funding then post-funding stoploss first.
           if (isPreFunding && settings.slPreFundingEnabled) {
             const slThresholdPct = Math.abs(fundingRate) * 100 * (settings.slPreMultiplier ?? 1);
             if (pnlPct <= -slThresholdPct) {
               try {
-                const orderIds = await exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty);
+                let orderIds: string[];
+                if (settings.spotHedgingEnabled) {
+                  [orderIds] = await Promise.all([
+                    exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty),
+                    exitSpotWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty),
+                  ]);
+                } else {
+                  orderIds = await exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty);
+                }
                 positionFundingTime.delete(key);
                 if (orderIds.length > 0) {
                   await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderIds, 'Pre-Funding Stoploss', 0, exitPrice, estimatedMakerFee);
@@ -525,32 +693,22 @@ async function monitorExits(): Promise<void> {
             }
           }
 
-          if (isPostFunding && settings.slPostFundingEnabled) {
-            const slThresholdPct = (Math.abs(fundingRate) * 100) / 2;
-            if (pnlPct <= -slThresholdPct) {
-              try {
-                const finalFundingRate = lockedFundingRates[pos.symbol] ?? Math.abs(fundingRate);
-                const fundingReceived = (qty * entry) * finalFundingRate;
-                const orderIds = await exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty);
-                positionFundingTime.delete(key);
-                if (orderIds.length > 0) {
-                  await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderIds, 'Post-Funding Stoploss (L2 - 50% Funding)', fundingReceived, exitPrice, estimatedMakerFee);
-                }
-                delete lockedFundingRates[pos.symbol];
-                console.log(`[autoBot] Exit Triggered: Post-Funding Stoploss (L2 - 50% Funding) | PnL: ${pnl.toFixed(4)}`);
-              } catch (e) {
-                console.error(`[autoBot] Post-funding stoploss exit failed ${pos.symbol}:`, e);
-              }
-              continue;
-            }
-          }
+          // Post-Funding Stoploss removed for naked trades: only Time-Based Exit after funding (WebSocket + exitTimeMs or timer fallback).
 
-          // Time-based Auto Exit (after stoploss checks)
+          // Time-based Auto Exit (after funding time)
           if (settings.autoExitEnabled && exitThresholdMs > 0 && fundingTimeMs != null && now >= fundingTimeMs + exitThresholdMs) {
             try {
               const finalFundingRate = lockedFundingRates[pos.symbol] ?? Math.abs(fundingRate);
               const fundingReceived = (qty * entry) * finalFundingRate;
-              const orderIds = await exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty);
+              let orderIds: string[];
+              if (settings.spotHedgingEnabled) {
+                [orderIds] = await Promise.all([
+                  exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty),
+                  exitSpotWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty),
+                ]);
+              } else {
+                orderIds = await exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty);
+              }
               positionFundingTime.delete(key);
               if (orderIds.length > 0) {
                 await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderIds, 'Time Exit', fundingReceived, exitPrice, estimatedMakerFee);
@@ -897,62 +1055,161 @@ async function processUser(
         return;
       }
 
+      const actualLeverage = safeLeverage;
+
       let finalQty: number;
       let tickSize = '0.01';
       let qtyStepStr = '0.1';
-      try {
-        const ls = await getInstrumentLotSize(apiKey, apiSecret, topToken.symbol);
-        const { qtyStep, minOrderQty, maxOrderQty, maxMktOrderQty } = ls;
-        tickSize = ls.tickSize ?? '0.01';
-        qtyStepStr = qtyStep;
-        const step = parseFloat(qtyStep) || 0.1;
-        const minQty = parseFloat(minOrderQty) || 0;
-        const maxQty = parseFloat(maxMktOrderQty || maxOrderQty) || 999999;
-        const stepStr = step.toString();
-        const stepDecimals = stepStr.includes('.') ? stepStr.split('.')[1].length : 0;
-        finalQty = parseFloat((Math.floor(rawQty / step) * step).toFixed(stepDecimals));
-        if (finalQty > maxQty) {
-          finalQty = parseFloat((Math.floor(maxQty / step) * step).toFixed(stepDecimals));
-          console.log(`[autoBot] ${topToken.symbol} - Quantity capped to Bybit max limit: ${finalQty}`);
-        }
-        if (finalQty < minQty) {
-          if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: finalQty below minOrderQty', 'symbol:', topToken.symbol, 'finalQty:', finalQty, 'minOrderQty:', minQty);
-          console.warn(`[autoBot] ${topToken.symbol} - finalQty ${finalQty} < minOrderQty ${minQty}, skipping`);
+      const spotHedgingEnabled = Boolean(settings.spotHedgingEnabled);
+
+      if (spotHedgingEnabled) {
+        // Spot hedging: capital split and quantity valid for BOTH spot and linear
+        const spotCapital = finalMargin / (1 + 1 / actualLeverage);
+        const futuresMargin = finalMargin - spotCapital;
+        const rawQtySpot = spotCapital / entryPrice;
+        if (rawQtySpot <= 0) {
+          if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: spot rawQty <= 0', 'symbol:', topToken.symbol);
           return;
         }
-        console.log(`[autoBot] ${topToken.symbol} - Precision: Raw=${rawQty} Final=${finalQty}`);
-      } catch (e) {
-        if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: Instrument lot size failed', 'symbol:', topToken.symbol);
-        console.error(`[autoBot] ${topToken.symbol} - Instrument info failed:`, e);
-        return;
+        try {
+          const [ls, spotLs] = await Promise.all([
+            getInstrumentLotSize(apiKey, apiSecret, topToken.symbol),
+            getSpotInstrumentLotSize(topToken.symbol),
+          ]);
+          tickSize = ls.tickSize ?? '0.01';
+          qtyStepStr = ls.qtyStep;
+          const stepLinear = parseFloat(ls.qtyStep) || 0.1;
+          const stepSpot = parseFloat(spotLs.qtyStep) || 0.1;
+          const minQtyLinear = parseFloat(ls.minOrderQty) || 0;
+          const minQtySpot = parseFloat(spotLs.minOrderQty) || 0;
+          const maxQtyLinear = parseFloat(ls.maxMktOrderQty || ls.maxOrderQty) || 999999;
+          const maxQtySpot = parseFloat(spotLs.maxMktOrderQty || spotLs.maxOrderQty) || 999999;
+          const minQty = Math.max(minQtyLinear, minQtySpot);
+          const maxQty = Math.min(maxQtyLinear, maxQtySpot);
+          const stepDecimalsL = stepLinear.toString().includes('.') ? stepLinear.toString().split('.')[1]!.length : 0;
+          const stepDecimalsS = stepSpot.toString().includes('.') ? stepSpot.toString().split('.')[1]!.length : 0;
+          const roundedLinear = parseFloat((Math.floor(rawQtySpot / stepLinear) * stepLinear).toFixed(stepDecimalsL));
+          const roundedSpot = parseFloat((Math.floor(rawQtySpot / stepSpot) * stepSpot).toFixed(stepDecimalsS));
+          finalQty = Math.min(roundedLinear, roundedSpot);
+          if (finalQty > maxQty) {
+            const capLinear = parseFloat((Math.floor(maxQty / stepLinear) * stepLinear).toFixed(stepDecimalsL));
+            const capSpot = parseFloat((Math.floor(maxQty / stepSpot) * stepSpot).toFixed(stepDecimalsS));
+            const cap = Math.min(capLinear, capSpot);
+            const cappedLinear = parseFloat((Math.floor(cap / stepLinear) * stepLinear).toFixed(stepDecimalsL));
+            const cappedSpot = parseFloat((Math.floor(cap / stepSpot) * stepSpot).toFixed(stepDecimalsS));
+            finalQty = Math.min(cappedLinear, cappedSpot);
+            console.log(`[autoBot] ${topToken.symbol} - Spot hedge quantity capped to max: ${finalQty}`);
+          }
+          if (finalQty < minQty) {
+            if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: spot-hedge finalQty below min', 'symbol:', topToken.symbol, 'finalQty:', finalQty, 'minQty:', minQty);
+            console.warn(`[autoBot] ${topToken.symbol} - Spot hedge finalQty ${finalQty} < min ${minQty}, skipping`);
+            return;
+          }
+          console.log(`[autoBot] ${topToken.symbol} - Spot hedge: spotCapital=$${spotCapital.toFixed(2)} futuresMargin=$${futuresMargin.toFixed(2)} rawQty=${rawQtySpot} finalQty=${finalQty}`);
+        } catch (e) {
+          if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: Instrument/spot lot size failed', 'symbol:', topToken.symbol);
+          console.error(`[autoBot] ${topToken.symbol} - Instrument/spot info failed:`, e);
+          return;
+        }
+      } else {
+        try {
+          const ls = await getInstrumentLotSize(apiKey, apiSecret, topToken.symbol);
+          const { qtyStep, minOrderQty, maxOrderQty, maxMktOrderQty } = ls;
+          tickSize = ls.tickSize ?? '0.01';
+          qtyStepStr = qtyStep;
+          const step = parseFloat(qtyStep) || 0.1;
+          const minQty = parseFloat(minOrderQty) || 0;
+          const maxQty = parseFloat(maxMktOrderQty || maxOrderQty) || 999999;
+          const stepStr = step.toString();
+          const stepDecimals = stepStr.includes('.') ? stepStr.split('.')[1].length : 0;
+          finalQty = parseFloat((Math.floor(rawQty / step) * step).toFixed(stepDecimals));
+          if (finalQty > maxQty) {
+            finalQty = parseFloat((Math.floor(maxQty / step) * step).toFixed(stepDecimals));
+            console.log(`[autoBot] ${topToken.symbol} - Quantity capped to Bybit max limit: ${finalQty}`);
+          }
+          if (finalQty < minQty) {
+            if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: finalQty below minOrderQty', 'symbol:', topToken.symbol, 'finalQty:', finalQty, 'minOrderQty:', minQty);
+            console.warn(`[autoBot] ${topToken.symbol} - finalQty ${finalQty} < minOrderQty ${minQty}, skipping`);
+            return;
+          }
+          console.log(`[autoBot] ${topToken.symbol} - Precision: Raw=${rawQty} Final=${finalQty}`);
+        } catch (e) {
+          if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: Instrument lot size failed', 'symbol:', topToken.symbol);
+          console.error(`[autoBot] ${topToken.symbol} - Instrument info failed:`, e);
+          return;
+        }
       }
 
       processedTokens.add(procKey);
       enteredThisCycle.add(cycleKey);
 
       try {
-        let remainingQty = finalQty;
-        let retries = 0;
-        while (remainingQty > 0 && retries < MAX_IOC_RETRIES) {
-          const orderbook = await getOrderbook(topToken.symbol, ORDERBOOK_SWEEP_LIMIT);
-          const sweepPrice = getSweepPrice(orderbook, side, remainingQty);
-          if (!Number.isFinite(sweepPrice) || sweepPrice <= 0) break;
-          const priceStr = formatPriceToTick(sweepPrice, tickSize);
-          const qtyStr = formatQtyToStep(remainingQty, qtyStepStr);
-          if (parseFloat(qtyStr) <= 0) break;
-          console.log('[DEBUG PAYLOAD]', { symbol: topToken.symbol, side, orderType: 'Limit', timeInForce: 'IOC', qty: qtyStr, price: priceStr });
-          const response = await placeLimitOrder(apiKey, apiSecret, topToken.symbol, side, qtyStr, priceStr, 'IOC');
-          console.log('[DEBUG SUCCESS] Order Placed:', response);
-          await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
-          const executions = await getExecutionList(apiKey, apiSecret, 'linear', response.orderId);
-          const filledQty = executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
-          remainingQty -= filledQty;
-          if (remainingQty <= 0) break;
-          retries++;
-          await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
+        if (spotHedgingEnabled) {
+          // Funding < 0: Futures LONG (Buy), Spot SHORT (Sell). Funding > 0: Futures SHORT (Sell), Spot LONG (Buy).
+          const futuresSide: 'Buy' | 'Sell' = topToken.fundingRate < 0 ? 'Buy' : 'Sell';
+          const spotSide: 'Buy' | 'Sell' = topToken.fundingRate < 0 ? 'Sell' : 'Buy';
+          let remainingQty = finalQty;
+          let retries = 0;
+          while (remainingQty > 0 && retries < MAX_IOC_RETRIES) {
+            const [orderbookLinear, orderbookSpot] = await Promise.all([
+              getOrderbook(topToken.symbol, ORDERBOOK_SWEEP_LIMIT, 'linear'),
+              getSpotOrderbook(topToken.symbol, ORDERBOOK_SWEEP_LIMIT),
+            ]);
+            const sweepPriceLinear = getSweepPrice(orderbookLinear, futuresSide, remainingQty);
+            const sweepPriceSpot = getSweepPrice(orderbookSpot, spotSide, remainingQty);
+            if (!Number.isFinite(sweepPriceLinear) || sweepPriceLinear <= 0 || !Number.isFinite(sweepPriceSpot) || sweepPriceSpot <= 0) break;
+            const priceStrLinear = formatPriceToTick(sweepPriceLinear, tickSize);
+            const priceStrSpot = formatPriceToTick(sweepPriceSpot, tickSize);
+            const qtyStr = formatQtyToStep(remainingQty, qtyStepStr);
+            if (parseFloat(qtyStr) <= 0) break;
+            const [futuresRes, spotRes] = await Promise.all([
+              placeLimitOrder(apiKey, apiSecret, topToken.symbol, futuresSide, qtyStr, priceStrLinear, 'IOC'),
+              placeSpotMarginOrder(apiKey, apiSecret, topToken.symbol, spotSide, 'Limit', qtyStr, priceStrSpot, 'IOC'),
+            ]);
+            await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
+            const [execLinear, execSpot] = await Promise.all([
+              getExecutionList(apiKey, apiSecret, 'linear', futuresRes.orderId),
+              getExecutionList(apiKey, apiSecret, 'spot', spotRes.orderId),
+            ]);
+            const filledLinear = execLinear.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
+            const filledSpot = execSpot.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
+            const filledBoth = Math.min(filledLinear, filledSpot);
+            remainingQty -= filledBoth;
+            if (remainingQty <= 0) break;
+            retries++;
+            await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
+          }
+          const nextFundingMs = parseInt(topToken.nextFundingTime, 10) || 0;
+          positionFundingTime.set(positionKey(userId, topToken.symbol, side), nextFundingMs);
+          try {
+            await createHedgeGroup(userId, topToken.symbol, futuresSide, finalQty, entryPrice);
+          } catch (e) {
+            console.error(`[autoBot] ${topToken.symbol} - createHedgeGroup failed:`, e);
+          }
+        } else {
+          let remainingQty = finalQty;
+          let retries = 0;
+          while (remainingQty > 0 && retries < MAX_IOC_RETRIES) {
+            const orderbook = await getOrderbook(topToken.symbol, ORDERBOOK_SWEEP_LIMIT);
+            const sweepPrice = getSweepPrice(orderbook, side, remainingQty);
+            if (!Number.isFinite(sweepPrice) || sweepPrice <= 0) break;
+            const priceStr = formatPriceToTick(sweepPrice, tickSize);
+            const qtyStr = formatQtyToStep(remainingQty, qtyStepStr);
+            if (parseFloat(qtyStr) <= 0) break;
+            console.log('[DEBUG PAYLOAD]', { symbol: topToken.symbol, side, orderType: 'Limit', timeInForce: 'IOC', qty: qtyStr, price: priceStr });
+            const response = await placeLimitOrder(apiKey, apiSecret, topToken.symbol, side, qtyStr, priceStr, 'IOC');
+            console.log('[DEBUG SUCCESS] Order Placed:', response);
+            await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
+            const executions = await getExecutionList(apiKey, apiSecret, 'linear', response.orderId);
+            const filledQty = executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
+            remainingQty -= filledQty;
+            if (remainingQty <= 0) break;
+            retries++;
+            await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
+          }
+          const nextFundingMs = parseInt(topToken.nextFundingTime, 10) || 0;
+          positionFundingTime.set(positionKey(userId, topToken.symbol, side), nextFundingMs);
         }
-        const nextFundingMs = parseInt(topToken.nextFundingTime, 10) || 0;
-        positionFundingTime.set(positionKey(userId, topToken.symbol, side), nextFundingMs);
       } catch (e: unknown) {
         const err = e as { response?: { data?: unknown }; message?: string };
         console.error('[DEBUG ERROR] Order Failed:', err?.message ?? e, err?.response ?? '');
@@ -966,7 +1223,7 @@ async function processUser(
       }
     }));
 
-  if (inPrefetchWindow && prepCandidates.length > 0) {
+  if (inPrefetchWindow && prepCandidates.length > 0 && !settings.spotHedgingEnabled) {
     entryPrepCacheByUser.set(userId, {
       settings: { orderBookDepth: settings.orderBookDepth, capitalPercent: settings.capitalPercent, maxTrades, entryTimeSec },
       apiKey,

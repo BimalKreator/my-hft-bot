@@ -73,6 +73,28 @@ export async function updateSettingsHandler(
       const parsed = parseInt(orderBookDepthRaw, 10);
       if (!Number.isNaN(parsed) && parsed >= 1 && parsed <= 50) input.orderBookDepth = parsed;
     }
+    if (typeof body.spotHedgingEnabled === 'boolean') input.spotHedgingEnabled = body.spotHedgingEnabled;
+    const hedgeTargetRaw = body.hedgeTargetPct ?? body.hedge_target_pct;
+    if (typeof hedgeTargetRaw === 'number' && !Number.isNaN(hedgeTargetRaw) && hedgeTargetRaw >= 0) {
+      input.hedgeTargetPct = hedgeTargetRaw;
+    } else if (typeof hedgeTargetRaw === 'string') {
+      const v = parseFloat(hedgeTargetRaw);
+      if (!Number.isNaN(v) && v >= 0) input.hedgeTargetPct = v;
+    }
+    const hedgeStoplossRaw = body.hedgeStoplossPct ?? body.hedge_stoploss_pct;
+    if (typeof hedgeStoplossRaw === 'number' && !Number.isNaN(hedgeStoplossRaw) && hedgeStoplossRaw >= 0) {
+      input.hedgeStoplossPct = hedgeStoplossRaw;
+    } else if (typeof hedgeStoplossRaw === 'string') {
+      const v = parseFloat(hedgeStoplossRaw);
+      if (!Number.isNaN(v) && v >= 0) input.hedgeStoplossPct = v;
+    }
+    const hedgePnlDepthRaw = body.hedgePnlDepth ?? body.hedge_pnl_depth;
+    if (typeof hedgePnlDepthRaw === 'number' && !Number.isNaN(hedgePnlDepthRaw) && hedgePnlDepthRaw >= 1 && hedgePnlDepthRaw <= 50) {
+      input.hedgePnlDepth = Math.round(hedgePnlDepthRaw);
+    } else if (typeof hedgePnlDepthRaw === 'string') {
+      const v = parseInt(hedgePnlDepthRaw, 10);
+      if (!Number.isNaN(v) && v >= 1 && v <= 50) input.hedgePnlDepth = v;
+    }
     const settings = await updateSettings(userId, input);
     res.json(settings);
   } catch (err) {
