@@ -1,6 +1,6 @@
 import axios from 'axios';
 import CryptoJS from 'crypto-js';
-import { RestClientV5 } from 'bybit-api';
+import { RestClientV5, WebsocketClient } from 'bybit-api';
 
 const BASE_URL = process.env.BYBIT_TESTNET === 'true'
   ? 'https://api-testnet.bybit.com'
@@ -527,4 +527,53 @@ export async function getInstrumentLotSize(
   const maxMktOrderQty = filter?.maxMktOrderQty ?? '';
   const tickSize = priceFilter?.tickSize ?? '0.01';
   return { qtyStep, minOrderQty, maxOrderQty, maxMktOrderQty, tickSize };
+}
+
+export interface ExecutionSettlementCallback {
+  (userId: number, symbol: string, side: 'Buy' | 'Sell'): void;
+}
+
+/**
+ * Subscribe to the private execution stream and invoke onSettlement when execType === 'Settle' (funding settlement).
+ * Returns a handle with close() to disconnect. One stream per (apiKey, apiSecret) / user.
+ */
+export function startExecutionStream(
+  apiKey: string,
+  apiSecret: string,
+  userId: number,
+  onSettlement: ExecutionSettlementCallback
+): { close: () => void } {
+  const ws = new WebsocketClient({
+    key: apiKey,
+    secret: apiSecret,
+    testnet,
+    market: 'v5',
+  });
+
+  const handler = (payload: unknown) => {
+    const msg = payload as { topic?: string; data?: Array<{ execType?: string; symbol?: string; side?: string }> };
+    if (msg.topic !== 'execution' || !Array.isArray(msg.data)) return;
+    for (const item of msg.data) {
+      if (item.execType === 'Settle' || item.execType === 'Settlement') {
+        const symbol = item.symbol ?? '';
+        const side = item.side === 'Sell' ? 'Sell' : 'Buy';
+        if (symbol) onSettlement(userId, symbol, side);
+      }
+    }
+  };
+
+  ws.on('update', handler);
+  ws.connectPrivate();
+  ws.subscribeV5('execution', 'linear', true);
+
+  return {
+    close: () => {
+      ws.removeAllListeners('update');
+      try {
+        ws.unsubscribeV5('execution', 'linear', true);
+      } catch {
+        // ignore
+      }
+    },
+  };
 }

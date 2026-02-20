@@ -7,7 +7,8 @@ export interface BotSettings {
   capitalPercent: number;
   maxTrades: number;
   entryTimeSec: number;
-  exitTimeSec: number;
+  /** Exit delay after funding settlement, in milliseconds. */
+  exitTimeMs: number;
   minFundingRate: number;
   leverage: number;
   slPreFundingEnabled: boolean;
@@ -24,6 +25,7 @@ interface SettingsRow {
   max_trades: string;
   entry_time_sec: string;
   exit_time_sec: string;
+  exit_time_ms?: string | null;
   min_funding_rate?: string;
   leverage?: string;
   sl_pre_funding_enabled?: boolean;
@@ -33,6 +35,10 @@ interface SettingsRow {
 }
 
 function rowToSettings(row: SettingsRow): BotSettings {
+  const exitTimeMs =
+    row.exit_time_ms != null && row.exit_time_ms !== ''
+      ? parseFloat(row.exit_time_ms) || 3600000
+      : (parseFloat(row.exit_time_sec) || 3600) * 1000;
   return {
     userId: row.user_id,
     autoEntryEnabled: row.auto_entry_enabled,
@@ -40,7 +46,7 @@ function rowToSettings(row: SettingsRow): BotSettings {
     capitalPercent: parseFloat(row.capital_percent) || 10,
     maxTrades: parseFloat(row.max_trades) || 5,
     entryTimeSec: parseFloat(row.entry_time_sec) || 300,
-    exitTimeSec: parseFloat(row.exit_time_sec) || 3600,
+    exitTimeMs,
     minFundingRate: row.min_funding_rate != null ? parseFloat(row.min_funding_rate) : 0,
     leverage: row.leverage != null ? parseFloat(row.leverage) : 5,
     slPreFundingEnabled: row.sl_pre_funding_enabled ?? false,
@@ -56,7 +62,7 @@ const DEFAULTS: Omit<BotSettings, 'userId'> = {
   capitalPercent: 10,
   maxTrades: 5,
   entryTimeSec: 300,
-  exitTimeSec: 3600,
+  exitTimeMs: 3600000,
   minFundingRate: 0,
   leverage: 5,
   slPreFundingEnabled: false,
@@ -74,7 +80,7 @@ export async function getUsersWithAutoEntryEnabled(): Promise<number[]> {
 
 export async function getSettings(userId: number): Promise<BotSettings> {
   const result = await query<SettingsRow>(
-    `SELECT user_id, auto_entry_enabled, auto_exit_enabled, capital_percent, max_trades, entry_time_sec, exit_time_sec, min_funding_rate, leverage,
+    `SELECT user_id, auto_entry_enabled, auto_exit_enabled, capital_percent, max_trades, entry_time_sec, exit_time_sec, exit_time_ms, min_funding_rate, leverage,
             sl_pre_funding_enabled, sl_pre_multiplier, sl_post_funding_enabled, order_book_depth
      FROM bot_settings WHERE user_id = $1`,
     [userId]
@@ -92,7 +98,7 @@ export interface UpdateSettingsInput {
   capitalPercent?: number;
   maxTrades?: number;
   entryTimeSec?: number;
-  exitTimeSec?: number;
+  exitTimeMs?: number;
   minFundingRate?: number;
   leverage?: number;
   slPreFundingEnabled?: boolean;
@@ -113,7 +119,7 @@ export async function updateSettings(
     capitalPercent: input.capitalPercent ?? current.capitalPercent,
     maxTrades: input.maxTrades ?? current.maxTrades,
     entryTimeSec: input.entryTimeSec ?? current.entryTimeSec,
-    exitTimeSec: input.exitTimeSec ?? current.exitTimeSec,
+    exitTimeMs: input.exitTimeMs ?? current.exitTimeMs,
     minFundingRate: input.minFundingRate ?? current.minFundingRate,
     leverage: input.leverage ?? current.leverage,
     slPreFundingEnabled: input.slPreFundingEnabled ?? current.slPreFundingEnabled,
@@ -122,9 +128,10 @@ export async function updateSettings(
     orderBookDepth: input.orderBookDepth ?? current.orderBookDepth,
   };
   const depthInt = Math.max(1, Math.min(50, Math.round(merged.orderBookDepth) || 2));
+  const exitTimeMsInt = Math.max(0, Math.round(merged.exitTimeMs));
   await query(
-    `INSERT INTO bot_settings (user_id, auto_entry_enabled, auto_exit_enabled, capital_percent, max_trades, entry_time_sec, exit_time_sec, min_funding_rate, leverage, sl_pre_funding_enabled, sl_pre_multiplier, sl_post_funding_enabled, order_book_depth)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+    `INSERT INTO bot_settings (user_id, auto_entry_enabled, auto_exit_enabled, capital_percent, max_trades, entry_time_sec, exit_time_sec, exit_time_ms, min_funding_rate, leverage, sl_pre_funding_enabled, sl_pre_multiplier, sl_post_funding_enabled, order_book_depth)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
      ON CONFLICT (user_id) DO UPDATE SET
        auto_entry_enabled = EXCLUDED.auto_entry_enabled,
        auto_exit_enabled = EXCLUDED.auto_exit_enabled,
@@ -132,6 +139,7 @@ export async function updateSettings(
        max_trades = EXCLUDED.max_trades,
        entry_time_sec = EXCLUDED.entry_time_sec,
        exit_time_sec = EXCLUDED.exit_time_sec,
+       exit_time_ms = EXCLUDED.exit_time_ms,
        min_funding_rate = EXCLUDED.min_funding_rate,
        leverage = EXCLUDED.leverage,
        sl_pre_funding_enabled = EXCLUDED.sl_pre_funding_enabled,
@@ -145,7 +153,8 @@ export async function updateSettings(
       merged.capitalPercent,
       merged.maxTrades,
       merged.entryTimeSec,
-      merged.exitTimeSec,
+      Math.floor(merged.exitTimeMs / 1000),
+      exitTimeMsInt,
       merged.minFundingRate,
       merged.leverage,
       merged.slPreFundingEnabled,

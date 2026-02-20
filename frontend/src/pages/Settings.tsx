@@ -20,7 +20,7 @@ interface BotSettings {
   capitalPercent: number;
   maxTrades: number;
   entryTimeSec: number;
-  exitTimeSec: number;
+  exitTimeMs: number;
   leverage: number;
   orderBookDepth: number;
   slPreFundingEnabled: boolean;
@@ -34,7 +34,7 @@ const defaultSettings: Omit<BotSettings, 'userId'> = {
   capitalPercent: 10,
   maxTrades: 5,
   entryTimeSec: 300,
-  exitTimeSec: 3600,
+  exitTimeMs: 3600000,
   leverage: 5,
   orderBookDepth: 2,
   slPreFundingEnabled: false,
@@ -85,7 +85,7 @@ export default function Settings() {
         capitalPercent: Number(data.capitalPercent) ?? 10,
         maxTrades: Number(data.maxTrades) ?? 5,
         entryTimeSec: Number(data.entryTimeSec) ?? 300,
-        exitTimeSec: Number(data.exitTimeSec) ?? 3600,
+        exitTimeMs: Number(data.exitTimeMs) ?? 3600000,
         leverage: Number(data.leverage) ?? 5,
         orderBookDepth: Math.max(1, Math.min(50, Number(data.orderBookDepth) || 2)),
         slPreFundingEnabled: data.slPreFundingEnabled ?? false,
@@ -132,7 +132,7 @@ export default function Settings() {
           capitalPercent: Number(data.capitalPercent) ?? settings.capitalPercent,
           maxTrades: Number(data.maxTrades) ?? settings.maxTrades,
           entryTimeSec: Number(data.entryTimeSec) ?? settings.entryTimeSec,
-          exitTimeSec: Number(data.exitTimeSec) ?? settings.exitTimeSec,
+          exitTimeMs: Number(data.exitTimeMs) ?? settings.exitTimeMs,
           leverage: Number(data.leverage) ?? settings.leverage,
           orderBookDepth: Number(data.orderBookDepth) ?? settings.orderBookDepth,
           slPreFundingEnabled: data.slPreFundingEnabled ?? settings.slPreFundingEnabled,
@@ -158,7 +158,7 @@ export default function Settings() {
       capitalPercent: Number(settings.capitalPercent),
       maxTrades: Number(settings.maxTrades),
       entryTimeSec: Number(settings.entryTimeSec),
-      exitTimeSec: Number(settings.exitTimeSec),
+      exitTimeMs: Number(settings.exitTimeMs),
       leverage: Number(settings.leverage),
       orderBookDepth: Math.max(1, Math.min(50, Number(settings.orderBookDepth) || 2)),
       slPreFundingEnabled: Boolean(settings.slPreFundingEnabled),
@@ -487,27 +487,28 @@ export default function Settings() {
             />
           </div>
 
-          {/* Exit Time (Seconds) */}
+          {/* Exit Time (Milliseconds) — delay after funding settlement before closing position */}
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-2">
-              Exit Time (Seconds)
+              Exit Time (ms)
             </label>
             <input
               type="number"
-              min={1}
-              step={1}
-              value={settings.exitTimeSec}
+              min={0}
+              step={1000}
+              value={settings.exitTimeMs}
               onChange={(e) => {
                 const v = parseInt(e.target.value, 10);
-                if (!Number.isNaN(v)) {
-                  setSettings((s) => s ? { ...s, exitTimeSec: v } : s);
-                  debouncedSave({ exitTimeSec: Number(v) });
+                if (!Number.isNaN(v) && v >= 0) {
+                  setSettings((s) => s ? { ...s, exitTimeMs: v } : s);
+                  debouncedSave({ exitTimeMs: v });
                 }
               }}
               className="w-full rounded-lg border bg-black/50 px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-[#007BFF]"
               style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
-              placeholder="e.g. 20"
+              placeholder="e.g. 3600000 (1 hour)"
             />
+            <p className="text-xs text-gray-500 mt-1">Delay after settlement before exit (e.g. 3600000 = 1 hour)</p>
           </div>
 
           {/* Auto Exit Toggle */}

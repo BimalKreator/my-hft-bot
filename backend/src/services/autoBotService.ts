@@ -17,6 +17,7 @@ import {
   cancelAllOrders,
   getExecutionList,
   getClosedPnl,
+  startExecutionStream,
 } from './bybitService.js';
 import type { OrderbookResult } from './bybitService.js';
 import { FundingScanner } from './scannerService.js';
@@ -24,7 +25,7 @@ import { insertClosedTrade } from '../models/closedTradesModel.js';
 
 const INTERVAL_MS = 5_000;
 const ENTRY_FAST_INTERVAL_MS = 500; // when countdown <= 15s (zero latency in final seconds)
-const EXIT_INTERVAL_MS = 1_000;
+const EXIT_INTERVAL_MS = 2_000; // Fallback if WebSocket settlement event doesn't fire
 
 /** Prefetch window: fetch wallet when countdown 20–60s; never call getWalletBalance when countdown <= 15. */
 const WALLET_PREFETCH_MIN_SEC = 20;
@@ -71,8 +72,11 @@ const lockedFundingRates: Record<string, number> = {};
 const enteredThisCycle = new Set<string>();
 /** Retry prevention: once we attempt order for this key, do not retry even if order fails. */
 const processedTokens = new Set<string>();
-/** Track funding time per (userId, symbol, side) for auto exit: close at fundingTime + exitTimeSec. */
+/** Track funding time per (userId, symbol, side) for auto exit: close at fundingTime + exitTimeMs. */
 const positionFundingTime = new Map<string, number>();
+
+/** Execution WebSocket stream handles per userId (for Settlement-triggered exit). */
+const executionStreamsByUser = new Map<number, { close: () => void }>();
 
 function processedKey(userId: number, symbol: string, fundingTimestamp: string): string {
   return `${userId}_${symbol}_${fundingTimestamp}`;
@@ -270,9 +274,76 @@ async function saveClosedTradeAfterExit(
   }
 }
 
+/**
+ * Run exit for a position after WebSocket Settlement event; called after exitTimeMs delay.
+ */
+async function doExitAfterSettlement(userId: number, symbol: string): Promise<void> {
+  try {
+    const settings = await getSettings(userId);
+    if (!settings.autoExitEnabled) return;
+    const keys = await getExchangeKeys(userId, 'Bybit');
+    if (!keys) return;
+    const apiKey = decrypt(keys.api_key);
+    const apiSecret = decrypt(keys.api_secret);
+    const positions = await getPositionList(apiKey, apiSecret, { category: 'linear', settleCoin: 'USDT' });
+    const pos = positions.find((p) => p.symbol === symbol);
+    if (!pos) return;
+    const key = positionKey(userId, pos.symbol, pos.side);
+    const entry = parseFloat(pos.avgPrice) || 0;
+    const qty = parseFloat(pos.size) || 0;
+    const marketData = await fundingScanner.getFundingData();
+    const fundingRate = marketData.find((m) => m.symbol === symbol)?.fundingRate ?? 0;
+    const fundingReceived = (qty * entry) * (lockedFundingRates[symbol] ?? Math.abs(fundingRate));
+    const estimatedMakerFee = 0.0002 * qty * entry;
+    const orderIds = await exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty);
+    positionFundingTime.delete(key);
+    if (orderIds.length > 0) {
+      const ob = await getOrderBookDepth(apiKey, apiSecret, pos.symbol, settings.orderBookDepth ?? 2);
+      const exitPrice = pos.side === 'Buy' ? ob.bidPrice : ob.askPrice;
+      await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderIds, 'Time Exit', fundingReceived, exitPrice, estimatedMakerFee);
+    }
+    delete lockedFundingRates[symbol];
+    console.log(`[autoBot] Exit Triggered: WebSocket Settlement + exitTimeMs | ${symbol}`);
+  } catch (e) {
+    console.error(`[autoBot] doExitAfterSettlement failed ${symbol}:`, e);
+  }
+}
+
+/**
+ * Sync execution WebSocket streams: one per user with auto entry enabled.
+ * On Settlement (execType === 'Settle'), schedule exit after exitTimeMs using setTimeout.
+ */
+async function syncExecutionStreams(): Promise<void> {
+  const userIds = await getUsersWithAutoEntryEnabled();
+  const currentSet = new Set(userIds);
+  for (const userId of executionStreamsByUser.keys()) {
+    if (!currentSet.has(userId)) {
+      executionStreamsByUser.get(userId)?.close();
+      executionStreamsByUser.delete(userId);
+    }
+  }
+  for (const userId of userIds) {
+    if (executionStreamsByUser.has(userId)) continue;
+    const keys = await getExchangeKeys(userId, 'Bybit');
+    if (!keys) continue;
+    const apiKey = decrypt(keys.api_key);
+    const apiSecret = decrypt(keys.api_secret);
+    const handle = startExecutionStream(apiKey, apiSecret, userId, (uid, symbol) => {
+      getSettings(uid).then((settings) => {
+        const exitTimeMs = Math.max(0, settings.exitTimeMs ?? 3600000);
+        setTimeout(() => doExitAfterSettlement(uid, symbol), exitTimeMs);
+      }).catch((e) => console.error('[autoBot] getSettings for settlement exit:', e));
+    });
+    executionStreamsByUser.set(userId, handle);
+  }
+}
+
 export function startMonitoring(): void {
   setInterval(monitorExits, EXIT_INTERVAL_MS);
   scheduleNextTick();
+  syncExecutionStreams().then(() => {
+    setInterval(syncExecutionStreams, 60_000);
+  }).catch((e) => console.error('[autoBot] syncExecutionStreams failed:', e));
 }
 
 /** Run entry tick; when countdown <= 15s schedule next in 500ms, else 5s. */
@@ -351,7 +422,7 @@ async function monitorExits(): Promise<void> {
         const positions = await getPositionList(apiKey, apiSecret, { category: 'linear', settleCoin: 'USDT' });
         if (positions.length === 0) continue;
 
-        const exitThresholdMs = (settings.exitTimeSec ?? 0) * 1000;
+        const exitThresholdMs = settings.exitTimeMs ?? 0;
 
         for (const pos of positions) {
           const key = positionKey(userId, pos.symbol, pos.side);
@@ -691,11 +762,13 @@ async function processUser(
         let qtyStep = 0.1;
         let minOrderQty = 0;
         let maxOrderQty = 999999;
+        let tickSize = '0.01';
         try {
           const ls = await getInstrumentLotSize(apiKey, apiSecret, topToken.symbol);
           qtyStep = parseFloat(ls.qtyStep) || 0.1;
           minOrderQty = parseFloat(ls.minOrderQty) || 0;
           maxOrderQty = parseFloat(ls.maxMktOrderQty || ls.maxOrderQty) || 999999;
+          tickSize = ls.tickSize ?? '0.01';
         } catch {
           /* ignore */
         }
@@ -708,7 +781,7 @@ async function processUser(
           qtyStep,
           minOrderQty,
           maxOrderQty,
-          tickSize: ls.tickSize ?? '0.01',
+          tickSize,
         });
         return;
       }

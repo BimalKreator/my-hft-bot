@@ -67,6 +67,16 @@ async function initDb() {
     const e = err as { code?: string };
     if (e.code !== '42701') console.error('Error adding column:', err);
   }
+  try {
+    await client.query('ALTER TABLE bot_settings ADD COLUMN exit_time_ms NUMERIC DEFAULT NULL');
+    await client.query(
+      `UPDATE bot_settings SET exit_time_ms = exit_time_sec * 1000 WHERE exit_time_ms IS NULL`
+    );
+    console.log('Added exit_time_ms column to database.');
+  } catch (err: unknown) {
+    const e = err as { code?: string };
+    if (e.code !== '42701') console.error('Error adding exit_time_ms:', err);
+  }
 
   await client.query(`
     CREATE TABLE IF NOT EXISTS daily_snapshots (

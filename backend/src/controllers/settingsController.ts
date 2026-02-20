@@ -44,8 +44,9 @@ export async function updateSettingsHandler(
     if (typeof body.entryTimeSec === 'number' && !Number.isNaN(body.entryTimeSec)) {
       input.entryTimeSec = body.entryTimeSec;
     }
-    if (typeof body.exitTimeSec === 'number' && !Number.isNaN(body.exitTimeSec)) {
-      input.exitTimeSec = body.exitTimeSec;
+    const exitTimeMsRaw = body.exitTimeMs ?? body.exit_time_ms;
+    if (typeof exitTimeMsRaw === 'number' && !Number.isNaN(exitTimeMsRaw) && exitTimeMsRaw >= 0) {
+      input.exitTimeMs = Math.round(exitTimeMsRaw);
     }
     const minFundingRateRaw = body.minFundingRate ?? body.min_funding_rate;
     if (typeof minFundingRateRaw === 'number' && !Number.isNaN(minFundingRateRaw)) {
