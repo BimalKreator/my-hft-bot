@@ -73,7 +73,14 @@ export async function updateSettingsHandler(
       const parsed = parseInt(orderBookDepthRaw, 10);
       if (!Number.isNaN(parsed) && parsed >= 1 && parsed <= 50) input.orderBookDepth = parsed;
     }
-    if (typeof body.spotHedgingEnabled === 'boolean') input.spotHedgingEnabled = body.spotHedgingEnabled;
+    const spotHedgingRaw = body.spotHedgingEnabled ?? body.spot_hedging_enabled;
+    if (typeof spotHedgingRaw === 'boolean') {
+      input.spotHedgingEnabled = spotHedgingRaw;
+    } else if (spotHedgingRaw === 'true' || spotHedgingRaw === 1) {
+      input.spotHedgingEnabled = true;
+    } else if (spotHedgingRaw === 'false' || spotHedgingRaw === 0) {
+      input.spotHedgingEnabled = false;
+    }
     const hedgeTargetRaw = body.hedgeTargetPct ?? body.hedge_target_pct;
     if (typeof hedgeTargetRaw === 'number' && !Number.isNaN(hedgeTargetRaw) && hedgeTargetRaw >= 0) {
       input.hedgeTargetPct = hedgeTargetRaw;
@@ -98,6 +105,8 @@ export async function updateSettingsHandler(
     const settings = await updateSettings(userId, input);
     res.json(settings);
   } catch (err) {
+    const e = err as Error & { code?: string; detail?: string };
+    console.error('[settingsController] updateSettings failed:', e?.message ?? err, e?.code ?? '', e?.detail ?? '');
     const msg = err instanceof Error ? err.message : 'Failed to update settings';
     res.status(500).json({ error: msg });
   }

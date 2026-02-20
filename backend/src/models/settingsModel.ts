@@ -157,6 +157,7 @@ export async function updateSettings(
   const hedgeTargetNum = Math.max(0, merged.hedgeTargetPct);
   const hedgeStoplossNum = Math.max(0, merged.hedgeStoplossPct);
   const hedgePnlDepthInt = Math.max(1, Math.min(50, Math.round(merged.hedgePnlDepth) || 1));
+  // Requires spot_hedging_enabled (and hedge_*) columns. Run: npx tsx update-settings-table.ts
   await query(
     `INSERT INTO bot_settings (user_id, auto_entry_enabled, auto_exit_enabled, capital_percent, max_trades, entry_time_sec, exit_time_sec, exit_time_ms, min_funding_rate, leverage, sl_pre_funding_enabled, sl_pre_multiplier, sl_post_funding_enabled, order_book_depth, spot_hedging_enabled, hedge_target_pct, hedge_stoploss_pct, hedge_pnl_depth)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
