@@ -8,15 +8,17 @@ import {
   getInstrumentLotSize,
   getInstrumentDetails,
   setLeverage,
-  placeMarketOrder,
+  placeLimitOrder,
   placeLimitOrderReduceOnly,
   placeMarketOrderReduceOnly,
   getOrderBookDepth,
+  getOrderbook,
   getActiveOrders,
   cancelAllOrders,
   getExecutionList,
   getClosedPnl,
 } from './bybitService.js';
+import type { OrderbookResult } from './bybitService.js';
 import { FundingScanner } from './scannerService.js';
 import { insertClosedTrade } from '../models/closedTradesModel.js';
 
@@ -42,6 +44,7 @@ interface EntryPrepCandidate {
   qtyStep: number;
   minOrderQty: number;
   maxOrderQty: number;
+  tickSize: string;
 }
 interface EntryPrep {
   settings: { orderBookDepth?: number; capitalPercent?: number; maxTrades: number; entryTimeSec: number };
@@ -85,7 +88,108 @@ function entryCycleKey(userId: number, symbol: string, nextFundingTime: string):
   return `${userId}_${symbol}_${nextFundingTime}`;
 }
 
-/** After a reduce-only close, allow Bybit to settle then fetch exact closed PnL & fees, persist to DB. */
+const IOC_RETRY_DELAY_MS = 200;
+const MAX_IOC_RETRIES = 5;
+const ORDERBOOK_SWEEP_LIMIT = 100;
+
+/**
+ * Get the price level at which cumulative volume >= requiredQty when sweeping the orderbook.
+ * Buy: iterate asks (ascending), sum size until sum >= requiredQty, return that ask price.
+ * Sell: iterate bids (descending), sum size until sum >= requiredQty, return that bid price.
+ * If the book doesn't cover requiredQty, return the deepest available level's price.
+ */
+function getSweepPrice(orderbook: OrderbookResult, side: 'Buy' | 'Sell', requiredQty: number): number {
+  if (side === 'Buy') {
+    let sum = 0;
+    for (const level of orderbook.asks) {
+      const size = parseFloat(level.size) || 0;
+      sum += size;
+      if (sum >= requiredQty) return parseFloat(level.price) || 0;
+    }
+    const last = orderbook.asks[orderbook.asks.length - 1];
+    return last ? parseFloat(last.price) || 0 : 0;
+  } else {
+    let sum = 0;
+    for (const level of orderbook.bids) {
+      const size = parseFloat(level.size) || 0;
+      sum += size;
+      if (sum >= requiredQty) return parseFloat(level.price) || 0;
+    }
+    const last = orderbook.bids[orderbook.bids.length - 1];
+    return last ? parseFloat(last.price) || 0 : 0;
+  }
+}
+
+/** Format price to Bybit tick size (e.g. 0.01 → 2 decimals). */
+function formatPriceToTick(price: number, tickSize: string): string {
+  const tick = parseFloat(tickSize) || 0.01;
+  if (tick <= 0 || !Number.isFinite(price)) return String(price);
+  const decimals = tick.toString().includes('.') ? tick.toString().split('.')[1]!.length : 0;
+  const mult = Math.pow(10, decimals);
+  const rounded = Math.round(price / tick) * tick;
+  return rounded.toFixed(decimals);
+}
+
+/** Format qty to Bybit lot step. */
+function formatQtyToStep(qty: number, qtyStep: string): string {
+  const step = parseFloat(qtyStep) || 0.1;
+  if (step <= 0 || !Number.isFinite(qty)) return String(qty);
+  const stepStr = step.toString();
+  const stepDecimals = stepStr.includes('.') ? stepStr.split('.')[1]!.length : 0;
+  const rounded = parseFloat((Math.floor(qty / step) * step).toFixed(stepDecimals));
+  return String(rounded);
+}
+
+/**
+ * Close a position using IOC limit orderbook sweep. Returns order IDs for saveClosedTradeAfterExit.
+ */
+async function exitPositionWithIocSweep(
+  apiKey: string,
+  apiSecret: string,
+  symbol: string,
+  positionSide: 'Buy' | 'Sell',
+  positionSizeQty: number
+): Promise<string[]> {
+  const orderIds: string[] = [];
+  const exitSide = positionSide === 'Buy' ? 'Sell' : 'Buy';
+  let remainingQty = positionSizeQty;
+  let retries = 0;
+  let tickSize = '0.01';
+  let qtyStepStr = '0.1';
+  try {
+    const ls = await getInstrumentLotSize(apiKey, apiSecret, symbol);
+    tickSize = ls.tickSize ?? '0.01';
+    qtyStepStr = ls.qtyStep;
+  } catch {
+    // use defaults
+  }
+  while (remainingQty > 0 && retries < MAX_IOC_RETRIES) {
+    const orderbook = await getOrderbook(symbol, ORDERBOOK_SWEEP_LIMIT);
+    const sweepPrice = getSweepPrice(orderbook, exitSide, remainingQty);
+    if (!Number.isFinite(sweepPrice) || sweepPrice <= 0) break;
+    const priceStr = formatPriceToTick(sweepPrice, tickSize);
+    const qtyStr = formatQtyToStep(remainingQty, qtyStepStr);
+    if (parseFloat(qtyStr) <= 0) break;
+    try {
+      const { orderId } = await placeLimitOrderReduceOnly(apiKey, apiSecret, symbol, positionSide, qtyStr, priceStr, 'IOC');
+      orderIds.push(orderId);
+    } catch (e) {
+      console.error(`[autoBot] exitPositionWithIocSweep ${symbol} order failed:`, e);
+      break;
+    }
+    await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
+    const orderId = orderIds[orderIds.length - 1]!;
+    const executions = await getExecutionList(apiKey, apiSecret, 'linear', orderId);
+    const filledQty = executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
+    remainingQty -= filledQty;
+    if (remainingQty <= 0) break;
+    retries++;
+    await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
+  }
+  return orderIds;
+}
+
+/** After a reduce-only close, allow Bybit to settle then fetch exact closed PnL & fees, persist to DB. orderIds: one or more (IOC sweep may produce multiple). */
 async function saveClosedTradeAfterExit(
   userId: number,
   apiKey: string,
@@ -94,12 +198,13 @@ async function saveClosedTradeAfterExit(
   side: 'Buy' | 'Sell',
   entryPrice: number,
   qty: number,
-  orderId: string,
+  orderIds: string | string[],
   exitReason: 'Time Exit' | 'Stoploss Hit' | 'Pre-Funding Stoploss' | 'Post-Funding Stoploss' | 'Post-Funding Stoploss (L2 - 50% Funding)',
   fundingReceived: number = 0,
   estimatedExitPrice?: number,
   estimatedFeesWhenZero?: number
 ): Promise<void> {
+  const ids = Array.isArray(orderIds) ? orderIds : [orderIds];
   try {
     await new Promise((r) => setTimeout(r, 2000));
     const closedList = await getClosedPnl(apiKey, apiSecret, 'linear', symbol, 50);
@@ -124,10 +229,10 @@ async function saveClosedTradeAfterExit(
         if (avgExit) exitPrice = parseFloat(avgExit) || 0;
       }
     } else {
-      const executions = await getExecutionList(apiKey, apiSecret, 'linear', orderId);
-      if (executions.length > 0) {
-        let totalQty = 0;
-        let sumPxQty = 0;
+      let totalQty = 0;
+      let sumPxQty = 0;
+      for (const orderId of ids) {
+        const executions = await getExecutionList(apiKey, apiSecret, 'linear', orderId);
         for (const e of executions) {
           const eq = parseFloat(e.execQty) || 0;
           const ep = parseFloat(e.execPrice) || 0;
@@ -135,7 +240,11 @@ async function saveClosedTradeAfterExit(
           sumPxQty += ep * eq;
           fees += parseFloat(e.execFee ?? '0') || 0;
         }
-        exitPrice = totalQty > 0 ? sumPxQty / totalQty : parseFloat(executions[0]!.execPrice) || 0;
+      }
+      if (totalQty > 0) exitPrice = sumPxQty / totalQty;
+      else if (ids.length > 0) {
+        const firstExecs = await getExecutionList(apiKey, apiSecret, 'linear', ids[0]!);
+        if (firstExecs.length > 0) exitPrice = parseFloat(firstExecs[0]!.execPrice) || 0;
       }
       if (exitPrice === 0 && estimatedExitPrice != null && !Number.isNaN(estimatedExitPrice)) exitPrice = estimatedExitPrice;
       if (fees === 0 && estimatedFeesWhenZero != null && !Number.isNaN(estimatedFeesWhenZero)) fees = estimatedFeesWhenZero;
@@ -301,9 +410,11 @@ async function monitorExits(): Promise<void> {
             const slThresholdPct = Math.abs(fundingRate) * 100 * (settings.slPreMultiplier ?? 1);
             if (pnlPct <= -slThresholdPct) {
               try {
-                const { orderId } = await placeLimitOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, pos.size, String(exitPrice));
+                const orderIds = await exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty);
                 positionFundingTime.delete(key);
-                await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderId, 'Pre-Funding Stoploss', 0, exitPrice, estimatedMakerFee);
+                if (orderIds.length > 0) {
+                  await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderIds, 'Pre-Funding Stoploss', 0, exitPrice, estimatedMakerFee);
+                }
                 delete lockedFundingRates[pos.symbol];
                 console.log(`[autoBot] Exit Triggered: Pre-Funding Stoploss | PnL: ${pnl.toFixed(4)}`);
               } catch (e) {
@@ -319,9 +430,11 @@ async function monitorExits(): Promise<void> {
               try {
                 const finalFundingRate = lockedFundingRates[pos.symbol] ?? Math.abs(fundingRate);
                 const fundingReceived = (qty * entry) * finalFundingRate;
-                const { orderId } = await placeLimitOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, pos.size, String(exitPrice));
+                const orderIds = await exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty);
                 positionFundingTime.delete(key);
-                await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderId, 'Post-Funding Stoploss (L2 - 50% Funding)', fundingReceived, exitPrice, estimatedMakerFee);
+                if (orderIds.length > 0) {
+                  await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderIds, 'Post-Funding Stoploss (L2 - 50% Funding)', fundingReceived, exitPrice, estimatedMakerFee);
+                }
                 delete lockedFundingRates[pos.symbol];
                 console.log(`[autoBot] Exit Triggered: Post-Funding Stoploss (L2 - 50% Funding) | PnL: ${pnl.toFixed(4)}`);
               } catch (e) {
@@ -336,9 +449,11 @@ async function monitorExits(): Promise<void> {
             try {
               const finalFundingRate = lockedFundingRates[pos.symbol] ?? Math.abs(fundingRate);
               const fundingReceived = (qty * entry) * finalFundingRate;
-              const { orderId } = await placeLimitOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, pos.size, String(exitPrice));
+              const orderIds = await exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty);
               positionFundingTime.delete(key);
-              await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderId, 'Time Exit', fundingReceived, exitPrice, estimatedMakerFee);
+              if (orderIds.length > 0) {
+                await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderIds, 'Time Exit', fundingReceived, exitPrice, estimatedMakerFee);
+              }
               delete lockedFundingRates[pos.symbol];
               console.log(`[autoBot] Exit Triggered: Time (funding+exit) | PnL: ${pnl.toFixed(4)}`);
             } catch (e) {
@@ -358,7 +473,7 @@ async function monitorExits(): Promise<void> {
 
 /**
  * Critical path when countdown <= 15s: no DB, no getWalletBalance, no getInstrumentDetails, no getPositionList.
- * Only getOrderBookDepth + placeMarketOrder. Uses entryPrepCacheByUser and walletCacheByUser.
+ * IOC limit orderbook sweep for entry. Uses entryPrepCacheByUser and walletCacheByUser.
  */
 async function processUserCritical(
   userId: number,
@@ -387,8 +502,8 @@ async function processUserCritical(
 
     let entryPrice: number;
     try {
-      const ob = await getOrderBookDepth(prep.apiKey, prep.apiSecret, c.symbol, prep.settings.orderBookDepth ?? 2);
-      entryPrice = c.side === 'Buy' ? ob.askPrice : ob.bidPrice;
+      const obDepth = await getOrderBookDepth(prep.apiKey, prep.apiSecret, c.symbol, prep.settings.orderBookDepth ?? 2);
+      entryPrice = c.side === 'Buy' ? obDepth.askPrice : obDepth.bidPrice;
       if (!Number.isFinite(entryPrice) || entryPrice <= 0) continue;
     } catch {
       continue;
@@ -411,7 +526,28 @@ async function processUserCritical(
     enteredThisCycle.add(cycleKey);
 
     try {
-      await placeMarketOrder(prep.apiKey, prep.apiSecret, c.symbol, c.side, String(finalQty));
+      let remainingQty = finalQty;
+      let retries = 0;
+      const tickSize = c.tickSize ?? '0.01';
+
+      while (remainingQty > 0 && retries < MAX_IOC_RETRIES) {
+        const orderbook = await getOrderbook(c.symbol, ORDERBOOK_SWEEP_LIMIT);
+        const sweepPrice = getSweepPrice(orderbook, c.side, remainingQty);
+        if (!Number.isFinite(sweepPrice) || sweepPrice <= 0) break;
+        const priceStr = formatPriceToTick(sweepPrice, tickSize);
+        const qtyStr = formatQtyToStep(remainingQty, String(c.qtyStep));
+        if (parseFloat(qtyStr) <= 0) break;
+
+        const { orderId } = await placeLimitOrder(prep.apiKey, prep.apiSecret, c.symbol, c.side, qtyStr, priceStr, 'IOC');
+        await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
+        const executions = await getExecutionList(prep.apiKey, prep.apiSecret, 'linear', orderId);
+        const filledQty = executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
+        remainingQty -= filledQty;
+        if (remainingQty <= 0) break;
+        retries++;
+        await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
+      }
+
       const nextFundingMs = parseInt(c.nextFundingTime, 10) || 0;
       positionFundingTime.set(positionKey(userId, c.symbol, c.side), nextFundingMs);
     } catch {
@@ -572,6 +708,7 @@ async function processUser(
           qtyStep,
           minOrderQty,
           maxOrderQty,
+          tickSize: ls.tickSize ?? '0.01',
         });
         return;
       }
@@ -658,8 +795,13 @@ async function processUser(
       }
 
       let finalQty: number;
+      let tickSize = '0.01';
+      let qtyStepStr = '0.1';
       try {
-        const { qtyStep, minOrderQty, maxOrderQty, maxMktOrderQty } = await getInstrumentLotSize(apiKey, apiSecret, topToken.symbol);
+        const ls = await getInstrumentLotSize(apiKey, apiSecret, topToken.symbol);
+        const { qtyStep, minOrderQty, maxOrderQty, maxMktOrderQty } = ls;
+        tickSize = ls.tickSize ?? '0.01';
+        qtyStepStr = qtyStep;
         const step = parseFloat(qtyStep) || 0.1;
         const minQty = parseFloat(minOrderQty) || 0;
         const maxQty = parseFloat(maxMktOrderQty || maxOrderQty) || 999999;
@@ -682,15 +824,30 @@ async function processUser(
         return;
       }
 
-      const qtyStr = String(finalQty);
-      console.log('[DEBUG PAYLOAD]', { symbol: topToken.symbol, side, orderType: 'Market', qty: qtyStr });
-
       processedTokens.add(procKey);
       enteredThisCycle.add(cycleKey);
 
       try {
-        const response = await placeMarketOrder(apiKey, apiSecret, topToken.symbol, side, qtyStr);
-        console.log('[DEBUG SUCCESS] Order Placed:', response);
+        let remainingQty = finalQty;
+        let retries = 0;
+        while (remainingQty > 0 && retries < MAX_IOC_RETRIES) {
+          const orderbook = await getOrderbook(topToken.symbol, ORDERBOOK_SWEEP_LIMIT);
+          const sweepPrice = getSweepPrice(orderbook, side, remainingQty);
+          if (!Number.isFinite(sweepPrice) || sweepPrice <= 0) break;
+          const priceStr = formatPriceToTick(sweepPrice, tickSize);
+          const qtyStr = formatQtyToStep(remainingQty, qtyStepStr);
+          if (parseFloat(qtyStr) <= 0) break;
+          console.log('[DEBUG PAYLOAD]', { symbol: topToken.symbol, side, orderType: 'Limit', timeInForce: 'IOC', qty: qtyStr, price: priceStr });
+          const response = await placeLimitOrder(apiKey, apiSecret, topToken.symbol, side, qtyStr, priceStr, 'IOC');
+          console.log('[DEBUG SUCCESS] Order Placed:', response);
+          await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
+          const executions = await getExecutionList(apiKey, apiSecret, 'linear', response.orderId);
+          const filledQty = executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
+          remainingQty -= filledQty;
+          if (remainingQty <= 0) break;
+          retries++;
+          await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
+        }
         const nextFundingMs = parseInt(topToken.nextFundingTime, 10) || 0;
         positionFundingTime.set(positionKey(userId, topToken.symbol, side), nextFundingMs);
       } catch (e: unknown) {

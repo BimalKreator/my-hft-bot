@@ -286,7 +286,8 @@ export async function placeMarketOrderReduceOnly(
 }
 
 /**
- * Place a limit reduce-only order to close a position at the given price (GTC).
+ * Place a limit reduce-only order to close a position at the given price.
+ * @param timeInForce - 'GTC' (default) or 'IOC' for orderbook sweep exits.
  */
 export async function placeLimitOrderReduceOnly(
   apiKey: string,
@@ -294,7 +295,8 @@ export async function placeLimitOrderReduceOnly(
   symbol: string,
   positionSide: 'Buy' | 'Sell',
   qty: string,
-  price: string
+  price: string,
+  timeInForce: 'GTC' | 'IOC' = 'GTC'
 ): Promise<{ orderId: string; orderLinkId: string }> {
   const client = getClient(apiKey, apiSecret);
   const closeSide = positionSide === 'Buy' ? 'Sell' : 'Buy';
@@ -305,7 +307,7 @@ export async function placeLimitOrderReduceOnly(
     orderType: 'Limit',
     qty,
     price,
-    timeInForce: 'GTC',
+    timeInForce,
     reduceOnly: true,
   });
   if (res.retCode !== 0) {
@@ -493,6 +495,7 @@ export interface InstrumentLotSize {
   minOrderQty: string;
   maxOrderQty: string;
   maxMktOrderQty: string;
+  tickSize?: string;
 }
 
 /**
@@ -510,13 +513,18 @@ export async function getInstrumentLotSize(
     throw new Error(res.retMsg ?? 'Bybit get instruments info failed');
   }
   const list = (res.result as {
-    list?: Array<{ lotSizeFilter?: { qtyStep?: string; minOrderQty?: string; maxOrderQty?: string; maxMktOrderQty?: string } }>;
+    list?: Array<{
+      lotSizeFilter?: { qtyStep?: string; minOrderQty?: string; maxOrderQty?: string; maxMktOrderQty?: string };
+      priceFilter?: { tickSize?: string };
+    }>;
   })?.list ?? [];
   const inst = list[0];
   const filter = inst?.lotSizeFilter;
+  const priceFilter = inst?.priceFilter;
   const qtyStep = filter?.qtyStep ?? '0.1';
   const minOrderQty = filter?.minOrderQty ?? '0';
   const maxOrderQty = filter?.maxOrderQty ?? '999999';
   const maxMktOrderQty = filter?.maxMktOrderQty ?? '';
-  return { qtyStep, minOrderQty, maxOrderQty, maxMktOrderQty };
+  const tickSize = priceFilter?.tickSize ?? '0.01';
+  return { qtyStep, minOrderQty, maxOrderQty, maxMktOrderQty, tickSize };
 }
