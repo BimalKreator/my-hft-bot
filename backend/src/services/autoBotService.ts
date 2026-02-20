@@ -988,16 +988,17 @@ async function processUser(
       if (inPrefetchWindow) {
         try {
           const userLeverage = settings.leverage ?? 5;
-          // Do NOT call getInstrumentsInfo for spot — it can hang. Use hardcoded spot leverage.
+          const spotHedgingEnabled = Boolean(settings.spotHedgingEnabled);
+          // CRITICAL: Do NOT call getInstrumentsInfo({ category: 'spot' }) — the spot API hangs.
           const spotLeverage = 5;
-          let maxLeverageStr = '';
+          let futuresMaxLeverage = userLeverage;
           try {
             const details = await getInstrumentDetails(topToken.symbol);
-            maxLeverageStr = details.maxLeverage || String(userLeverage);
+            futuresMaxLeverage = parseFloat(details.maxLeverage) || userLeverage;
           } catch {
-            maxLeverageStr = String(userLeverage);
+            /* use user leverage as fallback */
           }
-          const futuresLeverage = Math.min(userLeverage, parseFloat(maxLeverageStr) || userLeverage);
+          const futuresLeverage = Math.min(settings.leverage || 10, futuresMaxLeverage);
           try {
             await setLeverage(apiKey, apiSecret, topToken.symbol, futuresLeverage);
           } catch {
@@ -1029,7 +1030,7 @@ async function processUser(
             tickSize,
           });
         } catch (err) {
-          console.error('[Spot Prep Error]', err);
+          console.error('Prep Error:', err);
         }
         return;
       }
@@ -1123,35 +1124,33 @@ async function processUser(
       const spotHedgingEnabled = Boolean(settings.spotHedgingEnabled);
 
       if (spotHedgingEnabled) {
-        // Spot hedging: max-quantity split formula. Do NOT call getInstrumentsInfo for spot (use hardcoded leverage).
+        // Spot hedging: margin split. CRITICAL: no getInstrumentsInfo({ category: 'spot' }) — it hangs.
         const spotLeverage = 5;
         const futuresLeverage = actualLeverage;
-        const C = finalMargin;
-        const totalPositionValue = C * (futuresLeverage * spotLeverage) / (futuresLeverage + spotLeverage);
+        const targetMargin = finalMargin;
+        const totalPositionValue = targetMargin * (futuresLeverage * spotLeverage) / (futuresLeverage + spotLeverage);
         const spotMarginUsed = totalPositionValue / spotLeverage;
         const futuresMarginUsed = totalPositionValue / futuresLeverage;
-        const baseQty = totalPositionValue / entryPrice;
+        const currentPrice = entryPrice;
+        const baseQty = totalPositionValue / currentPrice;
         if (baseQty <= 0) {
           if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: spot baseQty <= 0', 'symbol:', topToken.symbol);
           return;
         }
         try {
-          const [ls, spotLs] = await Promise.all([
-            getInstrumentLotSize(apiKey, apiSecret, topToken.symbol),
-            getSpotInstrumentLotSize(topToken.symbol),
-          ]);
+          const ls = await getInstrumentLotSize(apiKey, apiSecret, topToken.symbol);
           tickSize = ls.tickSize ?? '0.01';
           qtyStepStr = ls.qtyStep;
           const stepLinear = parseFloat(ls.qtyStep) || 0.1;
-          const stepSpot = parseFloat(spotLs.qtyStep) || 0.1;
+          const stepSpot = 0.1;
           const minQtyLinear = parseFloat(ls.minOrderQty) || 0;
-          const minQtySpot = parseFloat(spotLs.minOrderQty) || 0;
+          const minQtySpot = 0;
           const maxQtyLinear = parseFloat(ls.maxMktOrderQty || ls.maxOrderQty) || 999999;
-          const maxQtySpot = parseFloat(spotLs.maxMktOrderQty || spotLs.maxOrderQty) || 999999;
+          const maxQtySpot = maxQtyLinear;
           const minQty = Math.max(minQtyLinear, minQtySpot);
           const maxQty = Math.min(maxQtyLinear, maxQtySpot);
           const stepDecimalsL = stepLinear.toString().includes('.') ? stepLinear.toString().split('.')[1]!.length : 0;
-          const stepDecimalsS = stepSpot.toString().includes('.') ? stepSpot.toString().split('.')[1]!.length : 0;
+          const stepDecimalsS = 1;
           const roundedLinear = parseFloat((Math.floor(baseQty / stepLinear) * stepLinear).toFixed(stepDecimalsL));
           const roundedSpot = parseFloat((Math.floor(baseQty / stepSpot) * stepSpot).toFixed(stepDecimalsS));
           finalQty = Math.min(roundedLinear, roundedSpot);
@@ -1171,8 +1170,8 @@ async function processUser(
           }
           console.log(`[autoBot] ${topToken.symbol} - Spot hedge: totalPositionValue=$${totalPositionValue.toFixed(2)} spotMargin=$${spotMarginUsed.toFixed(2)} futuresMargin=$${futuresMarginUsed.toFixed(2)} baseQty=${baseQty} finalQty=${finalQty}`);
         } catch (e) {
-          if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: Instrument/spot lot size failed', 'symbol:', topToken.symbol);
-          console.error(`[autoBot] ${topToken.symbol} - Instrument/spot info failed:`, e);
+          if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: Instrument lot size failed', 'symbol:', topToken.symbol);
+          console.error(`[autoBot] ${topToken.symbol} - Instrument info failed:`, e);
           return;
         }
       } else {
