@@ -471,7 +471,7 @@ async function runTick(): Promise<number> {
       const nextFundingTime = String(manualMockFundingTimeMs);
       marketData = [{
         symbol: 'BTCUSDT',
-        fundingRate: 0.0001,
+        fundingRate: 0.01,
         nextFundingTime,
         countdownMs,
         markPrice: '0',
@@ -630,6 +630,34 @@ async function monitorExits(): Promise<void> {
           if (hedgeGroup != null) {
             const settlementTimeMs = fundingTimeMs ?? 0;
             if (settlementTimeMs === 0 || now < settlementTimeMs) continue;
+
+            // Emergency timeout: if WebSocket Settlement was missed, close after fundingTime + exitTimeMs so trade doesn't stay open forever
+            if (exitThresholdMs > 0 && now >= settlementTimeMs + exitThresholdMs) {
+              try {
+                let fundingAmountReceived = hedgeGroup.fundingAmountReceived;
+                if (fundingAmountReceived == null) {
+                  const rate = lockedFundingRates[pos.symbol] ?? Math.abs(fundingRate);
+                  fundingAmountReceived = (qty * entry) * rate;
+                  await setFundingReceived(hedgeGroup.hedgeGroupId, fundingAmountReceived);
+                }
+                const [orderIds] = await Promise.all([
+                  exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty),
+                  exitSpotWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty),
+                ]);
+                positionFundingTime.delete(key);
+                if (orderIds.length > 0) {
+                  const finalFundingRate = lockedFundingRates[pos.symbol] ?? Math.abs(fundingRate);
+                  const fundingReceived = (qty * entry) * finalFundingRate;
+                  await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderIds, 'Time Exit', fundingReceived, exitPrice, estimatedMakerFee);
+                }
+                await deleteHedgeGroup(hedgeGroup.hedgeGroupId);
+                delete lockedFundingRates[pos.symbol];
+                console.log(`[autoBot] Exit Triggered: Emergency timeout (WebSocket Settlement fallback) | ${pos.symbol}`);
+              } catch (e) {
+                console.error(`[autoBot] Hedged emergency exit failed ${pos.symbol}:`, e);
+              }
+              continue;
+            }
 
             let fundingAmountReceived = hedgeGroup.fundingAmountReceived;
             if (fundingAmountReceived == null) {
@@ -929,7 +957,7 @@ async function processUser(
   const minFundingRate = settings.minFundingRate ?? 0;
   let meetsMinFunding = marketData.filter(
     (token) => Math.abs(token.fundingRate) >= minFundingRate
-  );
+  ); // Math.abs so both negative and positive funding rates are compared against min
   let bannedSet: Set<string>;
   try {
     bannedSet = new Set(await getBannedTokens(userId));
@@ -1078,7 +1106,8 @@ async function processUser(
         return;
       }
 
-      console.log(`[autoBot] ${topToken.symbol} - Countdown: ${countdownSec}s | Base Capital: $${totalWalletBalance.toFixed(2)} | Target Margin: $${tradeMargin.toFixed(2)}`);
+      const spotTag = settings.spotHedgingEnabled ? ' [SPOT]' : '';
+      console.log(`[autoBot] ${topToken.symbol}${spotTag} - Countdown: ${countdownSec}s | Base Capital: $${totalWalletBalance.toFixed(2)} | Target Margin: $${tradeMargin.toFixed(2)}`);
 
       const cycleKey = entryCycleKey(userId, topToken.symbol, topToken.nextFundingTime);
       if (enteredThisCycle.has(cycleKey)) {
@@ -1239,6 +1268,8 @@ async function processUser(
           // Funding < 0: Futures LONG (Buy), Spot SHORT (Sell). Funding > 0: Futures SHORT (Sell), Spot LONG (Buy).
           const futuresSide: 'Buy' | 'Sell' = topToken.fundingRate < 0 ? 'Buy' : 'Sell';
           const spotSide: 'Buy' | 'Sell' = topToken.fundingRate < 0 ? 'Sell' : 'Buy';
+          const fundingPct = (topToken.fundingRate * 100).toFixed(4);
+          console.log(`[autoBot] Executing ${topToken.symbol} | Funding: ${fundingPct}% | Direction: ${futuresSide}/${spotSide} | Hedging: true`);
           let remainingQty = finalQty;
           let retries = 0;
           while (remainingQty > 0 && retries < MAX_IOC_RETRIES) {
@@ -1282,6 +1313,8 @@ async function processUser(
             console.error(`[autoBot] ${topToken.symbol} - createHedgeGroup failed:`, e);
           }
         } else {
+          const fundingPctNaked = (topToken.fundingRate * 100).toFixed(4);
+          console.log(`[autoBot] Executing ${topToken.symbol} | Funding: ${fundingPctNaked}% | Direction: ${side}/- | Hedging: false`);
           let remainingQty = finalQty;
           let retries = 0;
           while (remainingQty > 0 && retries < MAX_IOC_RETRIES) {
