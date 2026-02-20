@@ -713,9 +713,10 @@ async function monitorExits(): Promise<void> {
             if (!shouldExit) {
               const bannedList = await getBannedTokens(userId);
               const minFunding = settings.minFundingRate ?? 0;
+              const minPctExit = minFunding > 0 && minFunding < 0.1 ? minFunding * 100 : minFunding;
               const maxTrades = settings.maxTrades ?? 1;
               const queue = marketData
-                .filter((m) => Math.abs(m.fundingRate) >= minFunding && !bannedList.includes(m.symbol))
+                .filter((m) => Math.abs(m.fundingRate * 100) >= minPctExit && !bannedList.includes(m.symbol))
                 .sort((a, b) => (a.fundingIntervalHours ?? 0) - (b.fundingIntervalHours ?? 0) || Math.abs(b.fundingRate) - Math.abs(a.fundingRate));
               const topTokens = queue.slice(0, maxTrades);
               const nextFundingTimeMs = topTokens.length > 0
@@ -959,11 +960,24 @@ async function processUser(
 
   // Auto Exit is handled by monitorExits (1s loop) with reduce-only orders and unified logging.
 
-  // Auto Entry: filter by min funding rate, exclude banned tokens, Smart Sort, then top N
+  // Auto Entry: filter by min funding rate (compare % to % so negative/short-squeeze rates are not missed)
   const minFundingRate = settings.minFundingRate ?? 0;
-  let meetsMinFunding = marketData.filter(
-    (token) => Math.abs(token.fundingRate) >= minFundingRate
-  ); // Math.abs so both negative and positive funding rates are compared against min
+  const minPct = minFundingRate > 0 && minFundingRate < 0.1 ? minFundingRate * 100 : minFundingRate;
+
+  let meetsMinFunding: typeof marketData;
+  if (isManualMockActive) {
+    // Mock bypass: take #1 ranked token regardless of rate for testing
+    meetsMinFunding = [...marketData];
+  } else {
+    meetsMinFunding = marketData.filter((token) => {
+      const absRatePct = Math.abs(token.fundingRate * 100);
+      const passes = absRatePct >= minPct;
+      if (debugSkip && !passes && marketData.indexOf(token) < 5) {
+        console.log(`[DEBUG] Checking ${token.symbol}: Abs Rate ${absRatePct.toFixed(4)}% vs Min ${minPct}%`);
+      }
+      return passes;
+    });
+  }
   let bannedSet: Set<string>;
   try {
     bannedSet = new Set(await getBannedTokens(userId));
@@ -973,9 +987,9 @@ async function processUser(
   }
   meetsMinFunding = meetsMinFunding.filter((token) => !bannedSet.has(token.symbol));
   if (meetsMinFunding.length === 0) {
-    const pct = (minFundingRate * 100).toFixed(4);
-    if (debugSkip) console.log('[DEBUG] Trade Skipped Reason: No tokens meet Min Funding or all banned', 'minFundingRate%:', pct);
-    console.log(`[autoBot] No tokens meet Min Funding criteria (>= ${pct}%) or all are banned`);
+    const pctStr = minPct.toFixed(4);
+    if (debugSkip) console.log('[DEBUG] Trade Skipped Reason: No tokens meet Min Funding or all banned', 'minFundingRate%:', pctStr);
+    console.log(`[autoBot] No tokens meet Min Funding criteria (>= ${pctStr}%) or all are banned`);
     return;
   }
 
