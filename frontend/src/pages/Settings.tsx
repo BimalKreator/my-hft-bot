@@ -68,6 +68,7 @@ export default function Settings() {
   const [txListLoading, setTxListLoading] = useState(true);
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [mockTriggerLoading, setMockTriggerLoading] = useState(false);
+  const [mockCancelLoading, setMockCancelLoading] = useState(false);
 
   const fetchSettings = useCallback(async () => {
     const token = localStorage.getItem(TOKEN_KEY);
@@ -799,6 +800,40 @@ export default function Settings() {
             }}
           >
             {mockTriggerLoading ? 'Triggering…' : '🚀 Trigger 30s Mock Funding'}
+          </button>
+          <button
+            type="button"
+            disabled={mockCancelLoading}
+            onClick={async () => {
+              const token = localStorage.getItem(TOKEN_KEY);
+              if (!token) {
+                setError('Please log in again.');
+                return;
+              }
+              setMockCancelLoading(true);
+              setError(null);
+              setSuccessMessage(null);
+              try {
+                const res = await fetch('/api/settings/cancel-mock', {
+                  method: 'POST',
+                  headers: { Authorization: `Bearer ${token}` },
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                  setError(data.error ?? 'Failed to cancel mock');
+                  return;
+                }
+                setSuccessMessage('Mock test cancelled, returning to live sync.');
+                setTimeout(() => setSuccessMessage(null), 4000);
+              } catch {
+                setError('Failed to cancel mock');
+              } finally {
+                setMockCancelLoading(false);
+              }
+            }}
+            className="rounded-xl px-4 py-2.5 text-sm font-semibold text-red-400 transition disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-red-500 border border-red-500/60 hover:bg-red-500/10"
+          >
+            {mockCancelLoading ? 'Cancelling…' : '🛑 Cancel Mock Test'}
           </button>
         </div>
       </section>
