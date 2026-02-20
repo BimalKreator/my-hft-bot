@@ -461,54 +461,70 @@ export function cancelManualMock(): void {
 
 /** Returns minimum countdown in seconds across market data, or -1 if none. */
 async function runTick(): Promise<number> {
-  let marketData = await fundingScanner.getFundingData();
-  const now = Date.now();
+  try {
+    let marketData = await fundingScanner.getFundingData();
+    const now = Date.now();
 
-  if (process.env.TEST_MODE === 'true') {
-    if (mockFundingTimeMs === null || now >= mockFundingTimeMs) {
-      mockFundingTimeMs = now + 30_000;
-      console.log('[TEST MODE] Mocking funding time to 30s for testing.');
-    }
-    const countdownMs = Math.max(0, mockFundingTimeMs - now);
-    const nextFundingTime = String(mockFundingTimeMs);
-    marketData = marketData.map((m) => ({ ...m, nextFundingTime, countdownMs }));
-  } else if (isManualMockActive && manualMockFundingTimeMs != null && manualMockEndMs != null) {
-    if (now >= manualMockEndMs) {
-      isManualMockActive = false;
-      manualMockFundingTimeMs = null;
-      manualMockEndMs = null;
-      console.log('[autoBot] Manual mock cycle finished; resuming real-time sync.');
-    } else {
-      const countdownMs = Math.max(0, manualMockFundingTimeMs - now);
-      const nextFundingTime = String(manualMockFundingTimeMs);
-      marketData = marketData.map((m) => ({ ...m, nextFundingTime, countdownMs }));
-    }
-  }
-
-  const minCountdownSec =
-    marketData.length > 0
-      ? Math.min(...marketData.map((m) => Math.floor(m.countdownMs / 1000)))
-      : -1;
-
-  const isCritical = minCountdownSec >= 0 && minCountdownSec <= CRITICAL_COUNTDOWN_SEC;
-  const userIds = isCritical && entryUserIdsCache.length > 0
-    ? entryUserIdsCache
-    : await getUsersWithAutoEntryEnabled();
-  if (!isCritical) entryUserIdsCache = userIds;
-  if (userIds.length === 0) return minCountdownSec;
-
-  for (const userId of userIds) {
-    try {
-      if (isCritical) {
-        await processUserCritical(userId, marketData, now);
-      } else {
-        await processUser(userId, marketData, now);
+    if (process.env.TEST_MODE === 'true') {
+      if (mockFundingTimeMs === null || now >= mockFundingTimeMs) {
+        mockFundingTimeMs = now + 30_000;
+        console.log('[TEST MODE] Mocking funding time to 30s for testing.');
       }
-    } catch (err) {
-      console.error(`[autoBot] User ${userId} error:`, err);
+      const countdownMs = Math.max(0, mockFundingTimeMs - now);
+      const nextFundingTime = String(mockFundingTimeMs);
+      marketData = marketData.map((m) => ({ ...m, nextFundingTime, countdownMs }));
+    } else if (isManualMockActive) {
+      if (manualMockFundingTimeMs == null || manualMockEndMs == null) {
+        isManualMockActive = false;
+        manualMockFundingTimeMs = null;
+        manualMockEndMs = null;
+        console.log('[autoBot] Manual mock state cleared (missing times); resuming live sync.');
+      } else if (now >= manualMockEndMs) {
+        isManualMockActive = false;
+        manualMockFundingTimeMs = null;
+        manualMockEndMs = null;
+        console.log('[autoBot] Manual mock cycle finished; resuming real-time sync.');
+      } else {
+        const countdownMs = Math.max(0, manualMockFundingTimeMs - now);
+        const nextFundingTime = String(manualMockFundingTimeMs);
+        marketData = marketData.map((m) => ({ ...m, nextFundingTime, countdownMs }));
+      }
     }
+
+    const minCountdownSec =
+      marketData.length > 0
+        ? Math.min(...marketData.map((m) => Math.floor(m.countdownMs / 1000)))
+        : -1;
+
+    const isCritical = minCountdownSec >= 0 && minCountdownSec <= CRITICAL_COUNTDOWN_SEC;
+    let userIds: number[];
+    try {
+      userIds = isCritical && entryUserIdsCache.length > 0
+        ? entryUserIdsCache
+        : await getUsersWithAutoEntryEnabled();
+    } catch (e) {
+      console.error('[autoBot] getUsersWithAutoEntryEnabled failed:', e);
+      return minCountdownSec >= 0 ? minCountdownSec : -1;
+    }
+    if (!isCritical) entryUserIdsCache = userIds;
+    if (userIds.length === 0) return minCountdownSec;
+
+    for (const userId of userIds) {
+      try {
+        if (isCritical) {
+          await processUserCritical(userId, marketData, now);
+        } else {
+          await processUser(userId, marketData, now);
+        }
+      } catch (err) {
+        console.error(`[autoBot] User ${userId} error:`, err);
+      }
+    }
+    return minCountdownSec;
+  } catch (error) {
+    console.error('[autoBot] CRITICAL LOOP ERROR:', error);
+    return -1;
   }
-  return minCountdownSec;
 }
 
 async function monitorExits(): Promise<void> {
@@ -800,19 +816,23 @@ async function processUserCritical(
       const tickSize = c.tickSize ?? '0.01';
 
       while (remainingQty > 0 && retries < MAX_IOC_RETRIES) {
-        const orderbook = await getOrderbook(c.symbol, ORDERBOOK_SWEEP_LIMIT);
-        const sweepPrice = getSweepPrice(orderbook, c.side, remainingQty);
-        if (!Number.isFinite(sweepPrice) || sweepPrice <= 0) break;
-        const priceStr = formatPriceToTick(sweepPrice, tickSize);
-        const qtyStr = formatQtyToStep(remainingQty, String(c.qtyStep));
-        if (parseFloat(qtyStr) <= 0) break;
+        try {
+          const orderbook = await getOrderbook(c.symbol, ORDERBOOK_SWEEP_LIMIT);
+          const sweepPrice = getSweepPrice(orderbook, c.side, remainingQty);
+          if (!Number.isFinite(sweepPrice) || sweepPrice <= 0) break;
+          const priceStr = formatPriceToTick(sweepPrice, tickSize);
+          const qtyStr = formatQtyToStep(remainingQty, String(c.qtyStep));
+          if (parseFloat(qtyStr) <= 0) break;
 
-        const { orderId } = await placeLimitOrder(prep.apiKey, prep.apiSecret, c.symbol, c.side, qtyStr, priceStr, 'IOC');
-        await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
-        const executions = await getExecutionList(prep.apiKey, prep.apiSecret, 'linear', orderId);
-        const filledQty = executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
-        remainingQty -= filledQty;
-        if (remainingQty <= 0) break;
+          const { orderId } = await placeLimitOrder(prep.apiKey, prep.apiSecret, c.symbol, c.side, qtyStr, priceStr, 'IOC');
+          await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
+          const executions = await getExecutionList(prep.apiKey, prep.apiSecret, 'linear', orderId);
+          const filledQty = executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
+          remainingQty -= filledQty;
+          if (remainingQty <= 0) break;
+        } catch (e) {
+          console.error(`[autoBot] processUserCritical ${c.symbol} orderbook/order/execution failed:`, e);
+        }
         retries++;
         await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
       }
@@ -842,13 +862,25 @@ async function processUser(
     marketData.length > 0 ? Math.min(...marketData.map((m) => Math.floor(m.countdownMs / 1000))) : 9999;
   const debugSkip = globalMinCountdownSec <= 15;
 
-  const settings = await getSettings(userId);
+  let settings: Awaited<ReturnType<typeof getSettings>>;
+  try {
+    settings = await getSettings(userId);
+  } catch (e) {
+    console.error('[autoBot] getSettings failed for user', userId, e);
+    return;
+  }
   if (!settings.autoEntryEnabled) {
     if (debugSkip) console.log('[DEBUG] Trade Skipped Reason: autoEntryEnabled is false');
     return;
   }
 
-  const keys = await getExchangeKeys(userId, 'Bybit');
+  let keys: Awaited<ReturnType<typeof getExchangeKeys>>;
+  try {
+    keys = await getExchangeKeys(userId, 'Bybit');
+  } catch (e) {
+    console.error('[autoBot] getExchangeKeys failed for user', userId, e);
+    return;
+  }
   if (!keys) {
     if (debugSkip) console.log('[DEBUG] Trade Skipped Reason: No Bybit exchange keys');
     return;
@@ -856,7 +888,13 @@ async function processUser(
   const apiKey = decrypt(keys.api_key);
   const apiSecret = decrypt(keys.api_secret);
 
-  const positions = await getPositionList(apiKey, apiSecret, { category: 'linear', settleCoin: 'USDT' });
+  let positions: Awaited<ReturnType<typeof getPositionList>>;
+  try {
+    positions = await getPositionList(apiKey, apiSecret, { category: 'linear', settleCoin: 'USDT' });
+  } catch (e) {
+    console.error('[autoBot] getPositionList failed for user', userId, e);
+    return;
+  }
   const maxTrades = settings.maxTrades ?? 1;
   if (positions.length >= maxTrades) {
     if (debugSkip) console.log('[DEBUG] Trade Skipped Reason: Max concurrent positions reached', 'positions:', positions.length, 'maxTrades:', maxTrades);
@@ -870,7 +908,13 @@ async function processUser(
   let meetsMinFunding = marketData.filter(
     (token) => Math.abs(token.fundingRate) >= minFundingRate
   );
-  const bannedSet = new Set(await getBannedTokens(userId));
+  let bannedSet: Set<string>;
+  try {
+    bannedSet = new Set(await getBannedTokens(userId));
+  } catch (e) {
+    console.error('[autoBot] getBannedTokens failed for user', userId, e);
+    bannedSet = new Set();
+  }
   meetsMinFunding = meetsMinFunding.filter((token) => !bannedSet.has(token.symbol));
   if (meetsMinFunding.length === 0) {
     const pct = (minFundingRate * 100).toFixed(4);
@@ -1161,31 +1205,35 @@ async function processUser(
           let remainingQty = finalQty;
           let retries = 0;
           while (remainingQty > 0 && retries < MAX_IOC_RETRIES) {
-            const [orderbookLinear, orderbookSpot] = await Promise.all([
-              getOrderbook(topToken.symbol, ORDERBOOK_SWEEP_LIMIT, 'linear'),
-              getSpotOrderbook(topToken.symbol, ORDERBOOK_SWEEP_LIMIT),
-            ]);
-            const sweepPriceLinear = getSweepPrice(orderbookLinear, futuresSide, remainingQty);
-            const sweepPriceSpot = getSweepPrice(orderbookSpot, spotSide, remainingQty);
-            if (!Number.isFinite(sweepPriceLinear) || sweepPriceLinear <= 0 || !Number.isFinite(sweepPriceSpot) || sweepPriceSpot <= 0) break;
-            const priceStrLinear = formatPriceToTick(sweepPriceLinear, tickSize);
-            const priceStrSpot = formatPriceToTick(sweepPriceSpot, tickSize);
-            const qtyStr = formatQtyToStep(remainingQty, qtyStepStr);
-            if (parseFloat(qtyStr) <= 0) break;
-            const [futuresRes, spotRes] = await Promise.all([
-              placeLimitOrder(apiKey, apiSecret, topToken.symbol, futuresSide, qtyStr, priceStrLinear, 'IOC'),
-              placeSpotMarginOrder(apiKey, apiSecret, topToken.symbol, spotSide, 'Limit', qtyStr, priceStrSpot, 'IOC'),
-            ]);
-            await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
-            const [execLinear, execSpot] = await Promise.all([
-              getExecutionList(apiKey, apiSecret, 'linear', futuresRes.orderId),
-              getExecutionList(apiKey, apiSecret, 'spot', spotRes.orderId),
-            ]);
-            const filledLinear = execLinear.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
-            const filledSpot = execSpot.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
-            const filledBoth = Math.min(filledLinear, filledSpot);
-            remainingQty -= filledBoth;
-            if (remainingQty <= 0) break;
+            try {
+              const [orderbookLinear, orderbookSpot] = await Promise.all([
+                getOrderbook(topToken.symbol, ORDERBOOK_SWEEP_LIMIT, 'linear'),
+                getSpotOrderbook(topToken.symbol, ORDERBOOK_SWEEP_LIMIT),
+              ]);
+              const sweepPriceLinear = getSweepPrice(orderbookLinear, futuresSide, remainingQty);
+              const sweepPriceSpot = getSweepPrice(orderbookSpot, spotSide, remainingQty);
+              if (!Number.isFinite(sweepPriceLinear) || sweepPriceLinear <= 0 || !Number.isFinite(sweepPriceSpot) || sweepPriceSpot <= 0) break;
+              const priceStrLinear = formatPriceToTick(sweepPriceLinear, tickSize);
+              const priceStrSpot = formatPriceToTick(sweepPriceSpot, tickSize);
+              const qtyStr = formatQtyToStep(remainingQty, qtyStepStr);
+              if (parseFloat(qtyStr) <= 0) break;
+              const [futuresRes, spotRes] = await Promise.all([
+                placeLimitOrder(apiKey, apiSecret, topToken.symbol, futuresSide, qtyStr, priceStrLinear, 'IOC'),
+                placeSpotMarginOrder(apiKey, apiSecret, topToken.symbol, spotSide, 'Limit', qtyStr, priceStrSpot, 'IOC'),
+              ]);
+              await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
+              const [execLinear, execSpot] = await Promise.all([
+                getExecutionList(apiKey, apiSecret, 'linear', futuresRes.orderId),
+                getExecutionList(apiKey, apiSecret, 'spot', spotRes.orderId),
+              ]);
+              const filledLinear = execLinear.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
+              const filledSpot = execSpot.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
+              const filledBoth = Math.min(filledLinear, filledSpot);
+              remainingQty -= filledBoth;
+              if (remainingQty <= 0) break;
+            } catch (e) {
+              console.error(`[autoBot] ${topToken.symbol} spot-hedge orderbook/order/execution failed:`, e);
+            }
             retries++;
             await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
           }
@@ -1200,20 +1248,24 @@ async function processUser(
           let remainingQty = finalQty;
           let retries = 0;
           while (remainingQty > 0 && retries < MAX_IOC_RETRIES) {
-            const orderbook = await getOrderbook(topToken.symbol, ORDERBOOK_SWEEP_LIMIT);
-            const sweepPrice = getSweepPrice(orderbook, side, remainingQty);
-            if (!Number.isFinite(sweepPrice) || sweepPrice <= 0) break;
-            const priceStr = formatPriceToTick(sweepPrice, tickSize);
-            const qtyStr = formatQtyToStep(remainingQty, qtyStepStr);
-            if (parseFloat(qtyStr) <= 0) break;
-            console.log('[DEBUG PAYLOAD]', { symbol: topToken.symbol, side, orderType: 'Limit', timeInForce: 'IOC', qty: qtyStr, price: priceStr });
-            const response = await placeLimitOrder(apiKey, apiSecret, topToken.symbol, side, qtyStr, priceStr, 'IOC');
-            console.log('[DEBUG SUCCESS] Order Placed:', response);
-            await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
-            const executions = await getExecutionList(apiKey, apiSecret, 'linear', response.orderId);
-            const filledQty = executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
-            remainingQty -= filledQty;
-            if (remainingQty <= 0) break;
+            try {
+              const orderbook = await getOrderbook(topToken.symbol, ORDERBOOK_SWEEP_LIMIT);
+              const sweepPrice = getSweepPrice(orderbook, side, remainingQty);
+              if (!Number.isFinite(sweepPrice) || sweepPrice <= 0) break;
+              const priceStr = formatPriceToTick(sweepPrice, tickSize);
+              const qtyStr = formatQtyToStep(remainingQty, qtyStepStr);
+              if (parseFloat(qtyStr) <= 0) break;
+              console.log('[DEBUG PAYLOAD]', { symbol: topToken.symbol, side, orderType: 'Limit', timeInForce: 'IOC', qty: qtyStr, price: priceStr });
+              const response = await placeLimitOrder(apiKey, apiSecret, topToken.symbol, side, qtyStr, priceStr, 'IOC');
+              console.log('[DEBUG SUCCESS] Order Placed:', response);
+              await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
+              const executions = await getExecutionList(apiKey, apiSecret, 'linear', response.orderId);
+              const filledQty = executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
+              remainingQty -= filledQty;
+              if (remainingQty <= 0) break;
+            } catch (e) {
+              console.error(`[autoBot] ${topToken.symbol} naked orderbook/order/execution failed:`, e);
+            }
             retries++;
             await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
           }
