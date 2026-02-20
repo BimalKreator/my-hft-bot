@@ -462,8 +462,37 @@ export function cancelManualMock(): void {
 /** Returns minimum countdown in seconds across market data, or -1 if none. */
 async function runTick(): Promise<number> {
   try {
-    let marketData = await fundingScanner.getFundingData();
     const now = Date.now();
+    let marketData: Array<{ symbol: string; fundingRate: number; nextFundingTime: string; countdownMs: number; markPrice?: string; lastPrice?: string; fundingIntervalHours?: number }>;
+
+    if (isManualMockActive && manualMockFundingTimeMs != null && manualMockEndMs != null && now < manualMockEndMs) {
+      // CRITICAL: Do not call getFundingData() during mock — it can hang on spot/linear Bybit APIs and freeze the loop.
+      const countdownMs = Math.max(0, manualMockFundingTimeMs - now);
+      const nextFundingTime = String(manualMockFundingTimeMs);
+      marketData = [{
+        symbol: 'BTCUSDT',
+        fundingRate: 0.0001,
+        nextFundingTime,
+        countdownMs,
+        markPrice: '0',
+        lastPrice: '0',
+        fundingIntervalHours: 8,
+      }];
+    } else {
+      if (isManualMockActive && (manualMockFundingTimeMs == null || manualMockEndMs == null || now >= manualMockEndMs)) {
+        const wasEndOfCycle = manualMockEndMs != null && now >= manualMockEndMs;
+        const wasMissingTimes = manualMockFundingTimeMs == null || manualMockEndMs == null;
+        isManualMockActive = false;
+        manualMockFundingTimeMs = null;
+        manualMockEndMs = null;
+        if (wasEndOfCycle) {
+          console.log('[autoBot] Manual mock cycle finished; resuming real-time sync.');
+        } else if (wasMissingTimes) {
+          console.log('[autoBot] Manual mock state cleared (missing times); resuming live sync.');
+        }
+      }
+      marketData = await fundingScanner.getFundingData();
+    }
 
     if (process.env.TEST_MODE === 'true') {
       if (mockFundingTimeMs === null || now >= mockFundingTimeMs) {
@@ -473,22 +502,10 @@ async function runTick(): Promise<number> {
       const countdownMs = Math.max(0, mockFundingTimeMs - now);
       const nextFundingTime = String(mockFundingTimeMs);
       marketData = marketData.map((m) => ({ ...m, nextFundingTime, countdownMs }));
-    } else if (isManualMockActive) {
-      if (manualMockFundingTimeMs == null || manualMockEndMs == null) {
-        isManualMockActive = false;
-        manualMockFundingTimeMs = null;
-        manualMockEndMs = null;
-        console.log('[autoBot] Manual mock state cleared (missing times); resuming live sync.');
-      } else if (now >= manualMockEndMs) {
-        isManualMockActive = false;
-        manualMockFundingTimeMs = null;
-        manualMockEndMs = null;
-        console.log('[autoBot] Manual mock cycle finished; resuming real-time sync.');
-      } else {
-        const countdownMs = Math.max(0, manualMockFundingTimeMs - now);
-        const nextFundingTime = String(manualMockFundingTimeMs);
-        marketData = marketData.map((m) => ({ ...m, nextFundingTime, countdownMs }));
-      }
+    } else if (isManualMockActive && manualMockFundingTimeMs != null && manualMockEndMs != null && now < manualMockEndMs) {
+      const countdownMs = Math.max(0, manualMockFundingTimeMs - now);
+      const nextFundingTime = String(manualMockFundingTimeMs);
+      marketData = marketData.map((m) => ({ ...m, nextFundingTime, countdownMs }));
     }
 
     const minCountdownSec =
