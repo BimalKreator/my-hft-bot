@@ -285,10 +285,69 @@ export async function placeMarketOrderReduceOnly(
   return { orderId: result.orderId, orderLinkId: result.orderLinkId };
 }
 
+const SPOT_MARGIN_CHECK_TIMEOUT_MS = 3000;
+
+/**
+ * Check if a spot symbol supports margin trading (isMarginTrading !== 'none').
+ * Wrapped in try/catch + timeout; returns false on failure so we fall back to Pure Spot (1x).
+ */
+export async function getSpotMarginSupport(symbol: string): Promise<boolean> {
+  try {
+    const client = getPublicClient();
+    const res = await Promise.race([
+      client.getInstrumentsInfo({ category: 'spot', symbol }),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), SPOT_MARGIN_CHECK_TIMEOUT_MS)),
+    ]);
+    if (res.retCode !== 0) return false;
+    const list = (res.result as { list?: Array<{ marginTrading?: string }> })?.list ?? [];
+    const item = list[0];
+    return item != null && item.marginTrading != null && item.marginTrading !== 'none';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Place a spot order WITHOUT margin/leverage (pure spot, no borrowing).
+ * Use when symbol does not support margin or spotLeverage === 1.
+ */
+export async function placeSpotOrder(
+  apiKey: string,
+  apiSecret: string,
+  symbol: string,
+  side: 'Buy' | 'Sell',
+  orderType: 'Market' | 'Limit',
+  qty: string,
+  price?: string,
+  timeInForce: 'GTC' | 'IOC' | 'FOK' | 'PostOnly' = 'GTC'
+): Promise<{ orderId: string; orderLinkId: string }> {
+  const client = getClient(apiKey, apiSecret);
+  const params: Record<string, unknown> = {
+    category: 'spot',
+    symbol,
+    side,
+    orderType,
+    qty,
+    orderFilter: 'Order',
+  };
+  if (orderType === 'Limit') {
+    if (price != null) params.price = price;
+    params.timeInForce = timeInForce;
+  } else {
+    params.timeInForce = 'IOC';
+  }
+  const res = await client.submitOrder(params as Parameters<RestClientV5['submitOrder']>[0]);
+  if (res.retCode !== 0) {
+    throw new Error(res.retMsg ?? 'Bybit place spot order failed');
+  }
+  const result = res.result as { orderId: string; orderLinkId: string };
+  return { orderId: result.orderId, orderLinkId: result.orderLinkId };
+}
+
 /**
  * Place an order in the Spot market with margin enabled (isLeverage: 1).
  * Allows the bot to borrow and short in the spot market.
- * Use for 1:1 spot hedging. Pass category: 'spot' and isLeverage: 1.
+ * Use when spotLeverage > 1 (symbol supports margin).
  */
 export async function placeSpotMarginOrder(
   apiKey: string,

@@ -15,6 +15,8 @@ import {
   getOrderbook,
   getSpotOrderbook,
   getSpotInstrumentLotSize,
+  getSpotMarginSupport,
+  placeSpotOrder,
   placeSpotMarginOrder,
   getActiveOrders,
   cancelAllOrders,
@@ -1200,9 +1202,16 @@ async function processUser(
       let qtyStepStr = '0.1';
       const spotHedgingEnabled = Boolean(settings.spotHedgingEnabled);
 
+      let spotLeverageUsed = 1;
       if (spotHedgingEnabled) {
-        // Spot hedging: margin split. CRITICAL: no getInstrumentsInfo({ category: 'spot' }) — it hangs.
-        const spotLeverage = 5;
+        try {
+          const marginSupported = await getSpotMarginSupport(topToken.symbol);
+          spotLeverageUsed = marginSupported ? 5 : 1;
+        } catch {
+          spotLeverageUsed = 1;
+        }
+        console.log(`[autoBot] ${topToken.symbol} Hedging Mode: ${spotLeverageUsed > 1 ? 'Spot Margin' : 'Pure Spot (1x)'}`);
+        const spotLeverage = spotLeverageUsed;
         const futuresLeverage = actualLeverage;
         const targetMargin = finalMargin;
         const totalPositionValue = targetMargin * (futuresLeverage * spotLeverage) / (futuresLeverage + spotLeverage);
@@ -1309,9 +1318,12 @@ async function processUser(
               const priceStrSpot = formatPriceToTick(sweepPriceSpot, tickSize);
               const qtyStr = formatQtyToStep(remainingQty, qtyStepStr);
               if (parseFloat(qtyStr) <= 0) break;
+              const spotOrderPromise = spotLeverageUsed > 1
+                ? placeSpotMarginOrder(apiKey, apiSecret, topToken.symbol, spotSide, 'Limit', qtyStr, priceStrSpot, 'IOC')
+                : placeSpotOrder(apiKey, apiSecret, topToken.symbol, spotSide, 'Limit', qtyStr, priceStrSpot, 'IOC');
               const [futuresRes, spotRes] = await Promise.all([
                 placeLimitOrder(apiKey, apiSecret, topToken.symbol, futuresSide, qtyStr, priceStrLinear, 'IOC'),
-                placeSpotMarginOrder(apiKey, apiSecret, topToken.symbol, spotSide, 'Limit', qtyStr, priceStrSpot, 'IOC'),
+                spotOrderPromise,
               ]);
               await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
               const [execLinear, execSpot] = await Promise.all([
