@@ -529,7 +529,12 @@ async function runTick(): Promise<number> {
     for (const userId of userIds) {
       try {
         if (isCritical) {
-          await processUserCritical(userId, marketData, now);
+          const settings = await getSettings(userId);
+          if (settings.spotHedgingEnabled) {
+            await processUser(userId, marketData, now);
+          } else {
+            await processUserCritical(userId, marketData, now);
+          }
         } else {
           await processUser(userId, marketData, now);
         }
@@ -1049,7 +1054,13 @@ async function processUser(
         } catch (err) {
           console.error('Prep Error:', err);
         }
-        return;
+        if (settings.spotHedgingEnabled) {
+          const countdownSecPrefetch = Math.floor(topToken.countdownMs / 1000);
+          const inWindowPrefetch = countdownSecPrefetch <= entryTimeSec && countdownSecPrefetch > entryTimeSec - 10;
+          if (!inWindowPrefetch) return;
+        } else {
+          return;
+        }
       }
 
       const countdownSec = Math.floor(topToken.countdownMs / 1000);
