@@ -449,6 +449,16 @@ export function triggerManualMock(): void {
   console.log('[autoBot] Manual mock triggered: 30s countdown, will reset after cycle end.');
 }
 
+/**
+ * Cancel manual mock: reset to normal sync. No settlement event will fire; any open mock position stays until next real settlement or manual exit.
+ */
+export function cancelManualMock(): void {
+  isManualMockActive = false;
+  manualMockFundingTimeMs = null;
+  manualMockEndMs = null;
+  console.log('[autoBot] Manual mock cancelled; returning to live sync.');
+}
+
 /** Returns minimum countdown in seconds across market data, or -1 if none. */
 async function runTick(): Promise<number> {
   let marketData = await fundingScanner.getFundingData();
@@ -1209,6 +1219,16 @@ async function processUser(
           }
           const nextFundingMs = parseInt(topToken.nextFundingTime, 10) || 0;
           positionFundingTime.set(positionKey(userId, topToken.symbol, side), nextFundingMs);
+        }
+        if (isManualMockActive) {
+          setTimeout(() => {
+            doExitAfterSettlement(userId, topToken.symbol).finally(() => {
+              isManualMockActive = false;
+              manualMockFundingTimeMs = null;
+              manualMockEndMs = null;
+              console.log('[autoBot] Mock exit completed; mock mode off.');
+            });
+          }, 2000);
         }
       } catch (e: unknown) {
         const err = e as { response?: { data?: unknown }; message?: string };
