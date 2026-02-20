@@ -466,18 +466,24 @@ async function runTick(): Promise<number> {
     let marketData: Array<{ symbol: string; fundingRate: number; nextFundingTime: string; countdownMs: number; markPrice?: string; lastPrice?: string; fundingIntervalHours?: number }>;
 
     if (isManualMockActive && manualMockFundingTimeMs != null && manualMockEndMs != null && now < manualMockEndMs) {
-      // CRITICAL: Do not call getFundingData() during mock — it can hang on spot/linear Bybit APIs and freeze the loop.
-      const countdownMs = Math.max(0, manualMockFundingTimeMs - now);
-      const nextFundingTime = String(manualMockFundingTimeMs);
-      marketData = [{
-        symbol: 'BTCUSDT',
-        fundingRate: 0.01,
-        nextFundingTime,
-        countdownMs,
-        markPrice: '0',
-        lastPrice: '0',
-        fundingIntervalHours: 8,
-      }];
+      try {
+        marketData = await Promise.race([
+          fundingScanner.getFundingData(),
+          new Promise<never>((_, rej) => setTimeout(() => rej(new Error('getFundingData timeout')), 5000)),
+        ]);
+      } catch {
+        const countdownMs = Math.max(0, manualMockFundingTimeMs - now);
+        const nextFundingTime = String(manualMockFundingTimeMs);
+        marketData = [{
+          symbol: 'BTCUSDT',
+          fundingRate: 0.01,
+          nextFundingTime,
+          countdownMs,
+          markPrice: '0',
+          lastPrice: '0',
+          fundingIntervalHours: 8,
+        }];
+      }
     } else {
       if (isManualMockActive && (manualMockFundingTimeMs == null || manualMockEndMs == null || now >= manualMockEndMs)) {
         const wasEndOfCycle = manualMockEndMs != null && now >= manualMockEndMs;
@@ -1220,6 +1226,10 @@ async function processUser(
             finalQty = Math.min(cappedLinear, cappedSpot);
             console.log(`[autoBot] ${topToken.symbol} - Spot hedge quantity capped to max: ${finalQty}`);
           }
+          if (finalQty <= 0) {
+            console.warn(`[autoBot] Insufficient margin for minimum lot size | ${topToken.symbol}`);
+            return;
+          }
           if (finalQty < minQty) {
             if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: spot-hedge finalQty below min', 'symbol:', topToken.symbol, 'finalQty:', finalQty, 'minQty:', minQty);
             console.warn(`[autoBot] ${topToken.symbol} - Spot hedge finalQty ${finalQty} < min ${minQty}, skipping`);
@@ -1345,12 +1355,13 @@ async function processUser(
         if (isManualMockActive) {
           setTimeout(() => {
             doExitAfterSettlement(userId, topToken.symbol).finally(() => {
-              isManualMockActive = false;
-              manualMockFundingTimeMs = null;
-              manualMockEndMs = null;
               console.log('[autoBot] Mock exit completed; mock mode off.');
             });
           }, 2000);
+          isManualMockActive = false;
+          manualMockFundingTimeMs = null;
+          manualMockEndMs = null;
+          console.log('[autoBot] Mock entry attempt done; returning to live sync.');
         }
       } catch (e: unknown) {
         const err = e as { response?: { data?: unknown }; message?: string };
