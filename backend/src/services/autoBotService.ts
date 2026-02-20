@@ -65,6 +65,13 @@ let entryUserIdsCache: number[] = [];
 /** When TEST_MODE=true, mock funding time 30s ahead so countdown decrements each tick. */
 let mockFundingTimeMs: number | null = null;
 
+/** Manual mock: when true, force 30s countdown for one cycle; reset when cycle end time has passed (mock settlement + exit window). */
+let isManualMockActive = false;
+let manualMockFundingTimeMs: number | null = null;
+let manualMockEndMs: number | null = null;
+const MANUAL_MOCK_COUNTDOWN_MS = 30_000;
+const MANUAL_MOCK_EXIT_BUFFER_MS = 3600_000; // 1 hour after mock settlement so time-based exit can run, then reset
+
 /** Exact funding rate snapshot 1–2s before settlement, keyed by symbol. */
 const lockedFundingRates: Record<string, number> = {};
 
@@ -360,6 +367,18 @@ function scheduleNextTick(): void {
     });
 }
 
+/**
+ * Trigger a one-off manual mock cycle: force countdown to 30s for all symbols so entry/exit logic runs.
+ * Resets isManualMockActive when mock cycle end time has passed (settlement time + exit buffer).
+ */
+export function triggerManualMock(): void {
+  const now = Date.now();
+  isManualMockActive = true;
+  manualMockFundingTimeMs = now + MANUAL_MOCK_COUNTDOWN_MS;
+  manualMockEndMs = manualMockFundingTimeMs + MANUAL_MOCK_EXIT_BUFFER_MS;
+  console.log('[autoBot] Manual mock triggered: 30s countdown, will reset after cycle end.');
+}
+
 /** Returns minimum countdown in seconds across market data, or -1 if none. */
 async function runTick(): Promise<number> {
   let marketData = await fundingScanner.getFundingData();
@@ -373,6 +392,17 @@ async function runTick(): Promise<number> {
     const countdownMs = Math.max(0, mockFundingTimeMs - now);
     const nextFundingTime = String(mockFundingTimeMs);
     marketData = marketData.map((m) => ({ ...m, nextFundingTime, countdownMs }));
+  } else if (isManualMockActive && manualMockFundingTimeMs != null && manualMockEndMs != null) {
+    if (now >= manualMockEndMs) {
+      isManualMockActive = false;
+      manualMockFundingTimeMs = null;
+      manualMockEndMs = null;
+      console.log('[autoBot] Manual mock cycle finished; resuming real-time sync.');
+    } else {
+      const countdownMs = Math.max(0, manualMockFundingTimeMs - now);
+      const nextFundingTime = String(manualMockFundingTimeMs);
+      marketData = marketData.map((m) => ({ ...m, nextFundingTime, countdownMs }));
+    }
   }
 
   const minCountdownSec =

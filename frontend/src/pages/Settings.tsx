@@ -59,6 +59,7 @@ export default function Settings() {
   const [txLoading, setTxLoading] = useState(false);
   const [txListLoading, setTxListLoading] = useState(true);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [mockTriggerLoading, setMockTriggerLoading] = useState(false);
 
   const fetchSettings = useCallback(async () => {
     const token = localStorage.getItem(TOKEN_KEY);
@@ -632,6 +633,59 @@ export default function Settings() {
         >
           Save Settings
         </button>
+      </section>
+
+      <section
+        className="rounded-2xl border p-6"
+        style={{
+          backgroundColor: 'rgba(255, 255, 255, 0.04)',
+          borderColor: 'rgba(234, 88, 12, 0.4)',
+          boxShadow: '0 0 24px rgba(234, 88, 12, 0.1)',
+        }}
+      >
+        <h2 className="text-lg font-semibold text-white mb-5 flex items-center gap-2">
+          <span aria-hidden>🛠️</span> Developer Tools
+        </h2>
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            disabled={mockTriggerLoading}
+            onClick={async () => {
+              const token = localStorage.getItem(TOKEN_KEY);
+              if (!token) {
+                setError('Please log in again.');
+                return;
+              }
+              setMockTriggerLoading(true);
+              setError(null);
+              setSuccessMessage(null);
+              try {
+                const res = await fetch('/api/settings/trigger-mock', {
+                  method: 'POST',
+                  headers: { Authorization: `Bearer ${token}` },
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                  setError(data.error ?? 'Failed to trigger mock');
+                  return;
+                }
+                setSuccessMessage('Mock cycle started! Countdown set to 30s');
+                setTimeout(() => setSuccessMessage(null), 4000);
+              } catch {
+                setError('Failed to trigger mock');
+              } finally {
+                setMockTriggerLoading(false);
+              }
+            }}
+            className="rounded-xl px-4 py-2.5 text-sm font-semibold text-white transition disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-orange-500"
+            style={{
+              backgroundColor: '#ea580c',
+              boxShadow: '0 0 12px rgba(234, 88, 12, 0.4)',
+            }}
+          >
+            {mockTriggerLoading ? 'Triggering…' : '🚀 Trigger 30s Mock Funding'}
+          </button>
+        </div>
       </section>
 
       <section

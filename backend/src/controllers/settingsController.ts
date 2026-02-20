@@ -1,5 +1,6 @@
 import { Response } from 'express';
 import { getSettings, updateSettings, type UpdateSettingsInput } from '../models/settingsModel.js';
+import { triggerManualMock } from '../services/autoBotService.js';
 import { AuthRequest } from '../middleware/authMiddleware.js';
 
 export async function getSettingsHandler(
@@ -76,6 +77,19 @@ export async function updateSettingsHandler(
     res.json(settings);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to update settings';
+    res.status(500).json({ error: msg });
+  }
+}
+
+export async function triggerMockHandler(
+  _req: AuthRequest,
+  res: Response
+): Promise<void> {
+  try {
+    triggerManualMock();
+    res.status(200).json({ ok: true, message: 'Manual mock triggered; countdown forced to 30s for one cycle.' });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Trigger mock failed';
     res.status(500).json({ error: msg });
   }
 }
