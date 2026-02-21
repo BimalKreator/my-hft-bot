@@ -51,24 +51,32 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
   const subHedgingActive = !!(settings.subApiKey && settings.subApiSecret);
   let subEquity = 0;
   if (subHedgingActive && settings.subApiKey && settings.subApiSecret) {
+    let subKey = settings.subApiKey;
+    let subSecret = settings.subApiSecret;
     try {
-      let subKey = settings.subApiKey;
-      let subSecret = settings.subApiSecret;
-      try {
-        subKey = decrypt(settings.subApiKey);
-        subSecret = decrypt(settings.subApiSecret);
-      } catch {
-        /* use plain */
+      const dKey = decrypt(settings.subApiKey);
+      const dSecret = decrypt(settings.subApiSecret);
+      if (dKey && dSecret) {
+        subKey = dKey;
+        subSecret = dSecret;
       }
+    } catch {
+      /* use plain (subKey/subSecret already set from settings) */
+    }
+    try {
       const subBalance = await getWalletBalance(subKey, subSecret);
       subEquity = parseFloat(subBalance.totalEquity ?? '0') || 0;
-    } catch {
+    } catch (err) {
+      console.warn('[statsService] Sub wallet balance fetch failed:', err instanceof Error ? err.message : String(err));
       subEquity = 0;
     }
   }
 
   const walletBalance = mainEquity + subEquity;
   const capital = BASE_CAPITAL + walletBalance;
+  if (subHedgingActive && (subEquity > 0 || mainEquity > 0)) {
+    console.log('[statsService] Capital (main+sub):', { mainEquity, subEquity, walletBalance, capital });
+  }
 
   /** Margin Used = sum of (position.size * position.avgPrice) over main (and sub when hedging) active positions. */
   let marginUsed = 0;
@@ -83,8 +91,12 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
       let subKey = settings.subApiKey;
       let subSecret = settings.subApiSecret;
       try {
-        subKey = decrypt(settings.subApiKey);
-        subSecret = decrypt(settings.subApiSecret);
+        const dKey = decrypt(settings.subApiKey);
+        const dSecret = decrypt(settings.subApiSecret);
+        if (dKey && dSecret) {
+          subKey = dKey;
+          subSecret = dSecret;
+        }
       } catch {
         /* use plain */
       }
