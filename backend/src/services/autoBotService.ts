@@ -841,12 +841,12 @@ async function monitorExits(): Promise<void> {
               continue;
             }
 
-            // 2) Break-even: after funding only. Long: trigger if bid1 <= entry; Short: trigger if ask1 >= entry (inequality, no strict equality)
+            // 2) Break-even: after funding only. Long: trigger if bid1 >= entry (recovered to entry or above); Short: trigger if ask1 <= entry (recovered to entry or below)
             const breakEvenHit =
               entry > 0 &&
               Number.isFinite(bid1Safe) &&
               Number.isFinite(ask1Safe) &&
-              (pos.side === 'Buy' ? bid1Safe <= entry : ask1Safe >= entry);
+              (pos.side === 'Buy' ? bid1Safe >= entry : ask1Safe <= entry);
             if (breakEvenHit) {
               console.log('[EXIT CHECK] Break-even hit! Side:', pos.side, 'Entry:', entry, 'Current:', pos.side === 'Buy' ? bid1Safe : ask1Safe);
               await runSubHedgeExit('Break-even');
