@@ -300,7 +300,7 @@ async function saveClosedTradeAfterExit(
   entryPrice: number,
   qty: number,
   orderIds: string | string[],
-  exitReason: 'Time Exit' | 'Stoploss Hit' | 'Pre-Funding Stoploss' | 'Post-Funding Stoploss' | 'Post-Funding Stoploss (L2 - 50% Funding)' | 'PnL Positive Exit' | 'Universal Stoploss' | 'Break-even' | 'Next Trade Cleanup',
+  exitReason: 'Time Exit' | 'Stoploss Hit' | 'Pre-Funding Stoploss' | 'Post-Funding Stoploss' | 'Post-Funding Stoploss (L2 - 50% Funding)' | 'PnL Positive Exit' | 'Universal Stoploss' | 'Break-even' | 'Next Trade Cleanup' | 'Post-Funding Profit',
   fundingReceived: number = 0,
   estimatedExitPrice?: number,
   estimatedFeesWhenZero?: number
@@ -791,7 +791,7 @@ async function monitorExits(): Promise<void> {
             const combinedPnlPct = totalCapital > 0 ? (combinedPnl / totalCapital) * 100 : 0;
 
             const runSubHedgeExit = async (
-              exitReason: 'Universal Stoploss' | 'Break-even' | 'Next Trade Cleanup' | 'PnL Positive Exit'
+              exitReason: 'Universal Stoploss' | 'Break-even' | 'Next Trade Cleanup' | 'PnL Positive Exit' | 'Post-Funding Profit'
             ): Promise<boolean> => {
               try {
                 // Orphaned sub safety: close main always; close sub only if sub has an open position (subQty > 0)
@@ -822,6 +822,7 @@ async function monitorExits(): Promise<void> {
                 if (exitReason === 'Universal Stoploss') console.log('[EXIT] Universal Stoploss |', pos.symbol, 'combinedPnlPct=', combinedPnlPct.toFixed(2) + '%');
                 else if (exitReason === 'Break-even') console.log('[EXIT] Break-even |', pos.symbol);
                 else if (exitReason === 'Next Trade Cleanup') console.log('[EXIT] Next Trade Cleanup |', pos.symbol);
+                else if (exitReason === 'Post-Funding Profit') console.log('[EXIT] Post-Funding Profit |', pos.symbol);
                 else console.log('[EXIT] PnL Positive Exit |', pos.symbol);
                 return true;
               } catch (e) {
@@ -850,6 +851,14 @@ async function monitorExits(): Promise<void> {
             if (breakEvenHit) {
               console.log('[EXIT CHECK] Break-even hit! Side:', pos.side, 'Entry:', entry, 'Current:', pos.side === 'Buy' ? bid1Safe : ask1Safe);
               await runSubHedgeExit('Break-even');
+              continue;
+            }
+
+            // 2b) Post-Funding Profit: 5 minutes after funding and combined PnL strictly positive → Limit Exit
+            const fiveMinAfterFundingMs = 5 * 60 * 1000;
+            if (fundingTimeMs != null && now > fundingTimeMs + fiveMinAfterFundingMs && combinedPnl > 0) {
+              console.log('[EXIT CHECK] Positive Combined PnL 5 mins after funding. Combined PnL:', combinedPnl);
+              await runSubHedgeExit('Post-Funding Profit');
               continue;
             }
 
