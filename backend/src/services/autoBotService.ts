@@ -1149,7 +1149,7 @@ async function executeEntry(
     return;
   }
 
-  if (prep && c) {
+  if (prep && c && account !== 'sub') {
     let entryPrice: number;
     try {
       const obDepth = await getOrderBookDepth(prep.apiKey, prep.apiSecret, c.symbol, prep.settings.orderBookDepth ?? 2);
@@ -1349,13 +1349,14 @@ async function processUserCritical(
   const entryOffsetMs = Math.max(0, prep.settings.entryOffsetMs ?? 300000);
   const marketBySymbol = new Map(marketData.map((m) => [m.symbol, m]));
 
+  const scheduleNow = Date.now();
   for (const c of prep.candidates) {
     const token = marketBySymbol.get(c.symbol);
     if (!token) continue;
 
-    const fundingTimeMs = parseInt(c.nextFundingTime, 10) || now + token.countdownMs;
+    const fundingTimeMs = parseInt(c.nextFundingTime, 10) || scheduleNow + token.countdownMs;
     const exactEntryTimeMs = fundingTimeMs - entryOffsetMs;
-    const delayMs = exactEntryTimeMs - now;
+    const delayMs = fundingTimeMs - scheduleNow - entryOffsetMs;
     if (delayMs < ENTRY_SCHEDULE_MIN_MS || delayMs > ENTRY_SCHEDULE_MAX_MS) continue;
 
     const cycleKey = entryCycleKey(userId, c.symbol, c.nextFundingTime);
@@ -1370,7 +1371,7 @@ async function processUserCritical(
       executeEntry(userId, c.symbol, c.nextFundingTime, undefined, prepData).catch((e) =>
         console.error('[autoBot] executeEntry failed', e)
       );
-    }, delayMs);
+    }, Math.max(0, delayMs));
     entryTimeoutByCycle.set(cycleKey, t);
     console.log(`[autoBot] Entry scheduled exactly at ${exactEntryTimeMs} (in ${delayMs}ms).`);
   }
@@ -1737,18 +1738,21 @@ async function processUser(
             setLeverage(apiKey, apiSecret, topToken.symbol, leverageForEntry),
             setLeverage(subKey, subSecret, topToken.symbol, leverageForEntry),
           ]).catch(() => {});
+          const scheduleNow = Date.now();
+          const delayMain = fundingTimeMs - scheduleNow - entryOffsetMs;
+          const delaySub = fundingTimeMs - scheduleNow - subEntryOffsetMs;
           const tMain = setTimeout(() => {
             executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'main', passedData).catch((e) =>
               console.error('[autoBot] executeEntry main failed', e)
             );
-          }, Math.max(0, delayMs));
+          }, Math.max(0, delayMain));
           const tSub = setTimeout(() => {
             executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'sub', passedData).catch((e) =>
               console.error('[autoBot] executeEntry sub failed', e)
             );
-          }, Math.max(0, delaySubMs));
+          }, Math.max(0, delaySub));
           entryTimeoutByCycle.set(cycleKey, { main: tMain, sub: tSub });
-          console.log(`[autoBot] Sub-hedge entry scheduled: main at ${exactEntryTimeMs} (in ${delayMs}ms), sub at ${exactSubEntryTimeMs} (in ${delaySubMs}ms).`);
+          console.log(`[autoBot] Sub-hedge entry scheduled: main at ${exactEntryTimeMs} (in ${delayMain}ms), sub at ${exactSubEntryTimeMs} (in ${delaySub}ms).`);
         }
         return;
       }
@@ -1761,13 +1765,15 @@ async function processUser(
         const p = entryPrepCacheByUser.get(userId);
         const cand = p?.candidates.find((x) => x.symbol === topToken.symbol && x.nextFundingTime === topToken.nextFundingTime);
         const prepDataSingle: ExecuteEntryPrepData | undefined = p && cand ? { prep: p, candidate: cand } : undefined;
+        const scheduleNow = Date.now();
+        const delayMain = fundingTimeMs - scheduleNow - entryOffsetMs;
         const t = setTimeout(() => {
           executeEntry(userId, topToken.symbol, topToken.nextFundingTime, undefined, prepDataSingle).catch((e) =>
             console.error('[autoBot] executeEntry failed', e)
           );
-        }, delayMs);
+        }, Math.max(0, delayMain));
         entryTimeoutByCycle.set(cycleKey, t);
-        console.log(`[autoBot] Entry scheduled exactly at ${exactEntryTimeMs} (in ${delayMs}ms).`);
+        console.log(`[autoBot] Entry scheduled exactly at ${exactEntryTimeMs} (in ${delayMain}ms).`);
         return;
       }
       if (inPrefetchWindow) {
