@@ -760,7 +760,7 @@ async function monitorExits(): Promise<void> {
               try {
                 await Promise.all([
                   placeMarketOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, String(qty)),
-                  placeMarketOrderReduceOnly(subHedge.subApiKey, subHedge.subApiSecret, pos.symbol, pos.side, String(subHedge.qty)),
+                  placeMarketOrderReduceOnly(subHedge.subApiKey, subHedge.subApiSecret, pos.symbol, subHedge.side, String(subHedge.qty)),
                 ]);
                 positionFundingTime.delete(key);
                 subHedgeActive.delete(key);
@@ -1014,9 +1014,10 @@ async function executeEntry(
 
   if (account === 'sub' && pendingPayload?.sub) {
     const pl = pendingPayload.sub;
+    const orderSide: 'Buy' | 'Sell' = pl.side === 'Buy' ? 'Sell' : 'Buy';
     try {
       console.log('[DEBUG] Sending WS Order to Bybit for', account ?? 'sub');
-      const response = await placeLimitOrder(pl.apiKey, pl.apiSecret, pl.symbol, pl.side, pl.qtyStr, pl.priceStr, 'IOC');
+      const response = await placeLimitOrder(pl.apiKey, pl.apiSecret, pl.symbol, orderSide, pl.qtyStr, pl.priceStr, 'IOC');
       console.log(`[DEBUG] Bybit Response for sub:`, response);
       const mainFilled = mainFilledForSubHedge.get(cycleKey);
       if (mainFilled) {
@@ -1025,7 +1026,7 @@ async function executeEntry(
         subHedgeActive.set(posKey, {
           userId,
           symbol: pl.symbol,
-          side: pl.side,
+          side: orderSide,
           qty: mainFilled.qty,
           mainApiKey: mainFilled.mainApiKey,
           mainApiSecret: mainFilled.mainApiSecret,
@@ -1090,9 +1091,10 @@ async function executeEntry(
       console.log('[ABORT] executeEntry stopped at sub hedge qty zero or negative');
       return;
     }
+    const orderSide: 'Buy' | 'Sell' = c.side === 'Buy' ? 'Sell' : 'Buy';
     try {
       const orderbook = await getOrderbook(c.symbol, ORDERBOOK_SWEEP_LIMIT);
-      const sweepPrice = getSweepPrice(orderbook, c.side, finalQty);
+      const sweepPrice = getSweepPrice(orderbook, orderSide, finalQty);
       if (!Number.isFinite(sweepPrice) || sweepPrice <= 0) {
         console.log('[ABORT] executeEntry stopped at sub hedge invalid sweep price');
         return;
@@ -1101,7 +1103,7 @@ async function executeEntry(
       const subApiKey = prep.subApiKey!;
       const subApiSecret = prep.subApiSecret!;
       console.log('[DEBUG] Sending WS Order to Bybit for', account ?? 'sub');
-      const response = await placeLimitOrder(subApiKey, subApiSecret, c.symbol, c.side, qtyStr, priceStr, 'IOC');
+      const response = await placeLimitOrder(subApiKey, subApiSecret, c.symbol, orderSide, qtyStr, priceStr, 'IOC');
       console.log(`[DEBUG] Bybit Response for sub:`, response);
       await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
       const executions = await getExecutionList(subApiKey, subApiSecret, 'linear', response.orderId);
@@ -1116,7 +1118,7 @@ async function executeEntry(
         subHedgeActive.set(posKey, {
           userId,
           symbol: c.symbol,
-          side: c.side,
+          side: orderSide,
           qty: mainFilled.qty,
           mainApiKey: mainFilled.mainApiKey,
           mainApiSecret: mainFilled.mainApiSecret,
