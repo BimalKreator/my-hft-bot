@@ -10,7 +10,6 @@ import {
   setLeverage,
   placeLimitOrder,
   placeLimitOrderReduceOnly,
-  placeMarketOrderReduceOnly,
   getOrderBookDepth,
   getOrderbook,
   getSpotOrderbook,
@@ -300,7 +299,7 @@ async function saveClosedTradeAfterExit(
   entryPrice: number,
   qty: number,
   orderIds: string | string[],
-  exitReason: 'Time Exit' | 'Stoploss Hit' | 'Pre-Funding Stoploss' | 'Post-Funding Stoploss' | 'Post-Funding Stoploss (L2 - 50% Funding)' | 'PnL Positive Exit',
+  exitReason: 'Time Exit' | 'Stoploss Hit' | 'Pre-Funding Stoploss' | 'Post-Funding Stoploss' | 'Post-Funding Stoploss (L2 - 50% Funding)' | 'PnL Positive Exit' | 'Universal Stoploss' | 'Break-even' | 'Next Trade Cleanup',
   fundingReceived: number = 0,
   estimatedExitPrice?: number,
   estimatedFeesWhenZero?: number
@@ -695,7 +694,32 @@ async function monitorExits(): Promise<void> {
         const positions = await getPositionList(apiKey, apiSecret, { category: 'linear', settleCoin: 'USDT' });
         if (positions.length === 0) continue;
 
+        let subPositions: Awaited<ReturnType<typeof getPositionList>> = [];
+        if (settings.subApiKey && settings.subApiSecret) {
+          let subKey = settings.subApiKey;
+          let subSecret = settings.subApiSecret;
+          try {
+            const d = decrypt(settings.subApiKey);
+            const e = decrypt(settings.subApiSecret);
+            if (d && e) {
+              subKey = d;
+              subSecret = e;
+            }
+          } catch {
+            /* use plain */
+          }
+          try {
+            subPositions = await getPositionList(subKey, subSecret, { category: 'linear', settleCoin: 'USDT' });
+          } catch (e) {
+            console.error('[autoBot] getPositionList (sub) failed for user', userId, e);
+          }
+        }
+
         const exitThresholdMs = settings.exitTimeMs ?? 0;
+        const universalStoplossPct = Math.max(0, settings.universalStoplossPercent ?? 3);
+        const nextFundingTimesMs = marketData.map((m) => parseInt(m.nextFundingTime, 10)).filter((t) => t > 0);
+        const nearestNextFundingMs = nextFundingTimesMs.length > 0 ? Math.min(...nextFundingTimesMs) : 0;
+        const PRE_NEXT_FUNDING_MS = 15 * 60 * 1000;
 
         for (const pos of positions) {
           const key = positionKey(userId, pos.symbol, pos.side);
@@ -749,18 +773,29 @@ async function monitorExits(): Promise<void> {
           // Exit price never 0: use depth price or fallback (markPrice / avgPrice)
           const exitPrice = pos.side === 'Buy' ? bidPriceSafe : askPriceSafe;
 
-          // Subaccount future-to-future hedge: exit when MainAccount_UnrealizedPnL > estimated taker fees (only exit path for hedges).
-          // ENFORCED: PnL-triggered closes use Market reduce-only only (no Limit orders).
+          // Subaccount future-to-future hedge: Universal Stoploss (before funding), then after funding: Break-even, 15m Pre-next Funding, PnL Positive.
           const subHedge = subHedgeActive.get(key);
           if (subHedge != null) {
-            const notional = qty * entry;
-            const estimatedTakerFees = 2 * 0.0006 * notional;
-            const mainNetPnl = pnl - estimatedTakerFees;
-            if (mainNetPnl > 0) {
+            const subPos = subPositions.find((p) => p.symbol === pos.symbol);
+            const subEntry = subPos ? parseFloat(subPos.avgPrice) || 0 : 0;
+            const subQty = subPos ? parseFloat(subPos.size) || 0 : subHedge.qty;
+            const subPnl = subPos && Number.isFinite(currentPrice)
+              ? (subHedge.side === 'Buy' ? (currentPrice - subEntry) * subQty : (subEntry - currentPrice) * subQty)
+              : 0;
+            const combinedPnl = pnl + subPnl;
+            const cache = walletCacheByUser.get(userId);
+            const totalCapital = cache
+              ? (cache.subEquity != null ? cache.totalEquity + cache.subEquity : cache.totalEquity)
+              : 0;
+            const combinedPnlPct = totalCapital > 0 ? (combinedPnl / totalCapital) * 100 : 0;
+
+            const runSubHedgeExit = async (
+              exitReason: 'Universal Stoploss' | 'Break-even' | 'Next Trade Cleanup' | 'PnL Positive Exit'
+            ): Promise<boolean> => {
               try {
-                const [mainOrderRes, subOrderRes] = await Promise.all([
-                  placeMarketOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, String(qty)),
-                  placeMarketOrderReduceOnly(subHedge.subApiKey, subHedge.subApiSecret, pos.symbol, subHedge.side, String(subHedge.qty)),
+                const [mainOrderIds, subOrderIds] = await Promise.all([
+                  exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty),
+                  exitPositionWithIocSweep(subHedge.subApiKey, subHedge.subApiSecret, pos.symbol, subHedge.side, subHedge.qty),
                 ]);
                 positionFundingTime.delete(key);
                 subHedgeActive.delete(key);
@@ -771,17 +806,57 @@ async function monitorExits(): Promise<void> {
                   }
                 }
                 delete lockedFundingRates[pos.symbol];
-                const pnlExitReason: 'PnL Positive Exit' = 'PnL Positive Exit';
-                saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, mainOrderRes.orderId, pnlExitReason, 0, exitPrice).catch((e) =>
-                  console.error(`[autoBot] saveClosedTradeAfterExit (main) failed ${pos.symbol}:`, e)
-                );
-                saveClosedTradeAfterExit(userId, subHedge.subApiKey, subHedge.subApiSecret, pos.symbol, subHedge.side, entry, subHedge.qty, subOrderRes.orderId, pnlExitReason, 0, exitPrice).catch((e) =>
-                  console.error(`[autoBot] saveClosedTradeAfterExit (sub) failed ${pos.symbol}:`, e)
-                );
-                console.log(`[autoBot] Sub-hedge PnL exit: Main net PnL=${mainNetPnl.toFixed(4)} > 0 | ${pos.symbol}`);
+                if (mainOrderIds.length > 0) {
+                  saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, mainOrderIds, exitReason, 0, exitPrice).catch((e) =>
+                    console.error(`[autoBot] saveClosedTradeAfterExit (main) failed ${pos.symbol}:`, e)
+                  );
+                }
+                if (subOrderIds.length > 0) {
+                  saveClosedTradeAfterExit(userId, subHedge.subApiKey, subHedge.subApiSecret, pos.symbol, subHedge.side, entry, subHedge.qty, subOrderIds, exitReason, 0, exitPrice).catch((e) =>
+                    console.error(`[autoBot] saveClosedTradeAfterExit (sub) failed ${pos.symbol}:`, e)
+                  );
+                }
+                if (exitReason === 'Universal Stoploss') console.log('[EXIT] Universal Stoploss |', pos.symbol, 'combinedPnlPct=', combinedPnlPct.toFixed(2) + '%');
+                else if (exitReason === 'Break-even') console.log('[EXIT] Break-even |', pos.symbol);
+                else if (exitReason === 'Next Trade Cleanup') console.log('[EXIT] Next Trade Cleanup |', pos.symbol);
+                else console.log('[EXIT] PnL Positive Exit |', pos.symbol);
+                return true;
               } catch (e) {
-                console.error(`[autoBot] Sub-hedge parallel close failed ${pos.symbol}:`, e);
+                console.error(`[autoBot] Sub-hedge exit failed ${pos.symbol}:`, e);
+                return false;
               }
+            };
+
+            // 1) Universal Stoploss (3%): immediate exit even before funding if combined loss % exceeds settings.universal_stoploss_percent. Uses Limit (IOC sweep).
+            if (combinedPnlPct <= -universalStoplossPct && totalCapital > 0) {
+              await runSubHedgeExit('Universal Stoploss');
+              continue;
+            }
+
+            // Funding guard: no automated exit (except Universal Stoploss) before tradeFundingTime
+            if (fundingTimeMs == null || now < fundingTimeMs) {
+              continue;
+            }
+
+            // 2) Break-even: after funding, main price reaches entry → Limit Exit
+            const breakEvenTolerance = 0.0001;
+            if (entry > 0 && Number.isFinite(currentPrice) && Math.abs(currentPrice - entry) / entry <= breakEvenTolerance) {
+              await runSubHedgeExit('Break-even');
+              continue;
+            }
+
+            // 3) 15-min window: currentTime within 15 mins of next potential trade funding → Limit Exit (Next Trade Cleanup)
+            if (nearestNextFundingMs > 0 && now >= nearestNextFundingMs - PRE_NEXT_FUNDING_MS) {
+              await runSubHedgeExit('Next Trade Cleanup');
+              continue;
+            }
+
+            // 4) PnL Positive: main net PnL > 0 (after funding) → Limit Exit
+            const notional = qty * entry;
+            const estimatedTakerFees = 2 * 0.0006 * notional;
+            const mainNetPnl = pnl - estimatedTakerFees;
+            if (mainNetPnl > 0) {
+              await runSubHedgeExit('PnL Positive Exit');
             }
             continue;
           }

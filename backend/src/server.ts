@@ -15,6 +15,7 @@ import exchangeRoutes from './routes/exchangeRoutes.js';
 import scannerRoutes from './routes/scannerRoutes.js';
 import settingsRoutes from './routes/settingsRoutes.js';
 import statsRoutes from './routes/statsRoutes.js';
+import positionRoutes from './routes/positionRoutes.js';
 import tradeRoutes from './routes/tradeRoutes.js';
 import transactionRoutes from './routes/transactionRoutes.js';
 
@@ -36,6 +37,7 @@ app.use('/api/exchange', exchangeRoutes);
 app.use('/api/scanner', scannerRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/stats', statsRoutes);
+app.use('/api/positions', positionRoutes);
 app.use('/api/trade', tradeRoutes);
 app.use('/api/transactions', transactionRoutes);
 

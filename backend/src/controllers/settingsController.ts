@@ -120,6 +120,13 @@ export async function updateSettingsHandler(
       const parsed = parseInt(subEntryOffsetRaw, 10);
       if (!Number.isNaN(parsed) && parsed >= 0) input.subEntryOffsetMs = parsed;
     }
+    const universalStoplossRaw = body.universalStoplossPercent ?? body.universal_stoploss_percent;
+    if (typeof universalStoplossRaw === 'number' && !Number.isNaN(universalStoplossRaw) && universalStoplossRaw >= 0) {
+      input.universalStoplossPercent = universalStoplossRaw;
+    } else if (typeof universalStoplossRaw === 'string') {
+      const v = parseFloat(universalStoplossRaw);
+      if (!Number.isNaN(v) && v >= 0) input.universalStoplossPercent = v;
+    }
     let settings = await updateSettings(userId, input);
     if (settings.subApiSecret) {
       settings = { ...settings, subApiSecret: '********' };

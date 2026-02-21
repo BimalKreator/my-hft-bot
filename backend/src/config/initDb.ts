@@ -105,6 +105,9 @@ async function initDb() {
     const e = err as { code?: string };
     if (e.code !== '42701') console.error('Error adding hedge_pnl_depth:', err);
   }
+  await client.query(`
+    ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS universal_stoploss_percent NUMERIC NOT NULL DEFAULT 3;
+  `).catch(() => {});
   try {
     await client.query('ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS entry_offset_ms INTEGER');
     await client.query(
