@@ -389,6 +389,10 @@ export async function placeMarketOrderReduceOnly(
     reduceOnly: true,
   });
   if (res.retCode !== 0) {
+    const msg = (res.retMsg ?? '').toLowerCase();
+    if (qty && (msg.includes('position') || msg.includes('insufficient') || msg.includes('size') || msg.includes('zero'))) {
+      return { orderId: '', orderLinkId: '' };
+    }
     throw new Error(res.retMsg ?? 'Bybit place reduce-only order failed');
   }
   const result = res.result as { orderId: string; orderLinkId: string };
@@ -531,6 +535,10 @@ export async function placeLimitOrderReduceOnly(
     reduceOnly: true,
   });
   if (res.retCode !== 0) {
+    const msg = (res.retMsg ?? '').toLowerCase();
+    if (qty && (msg.includes('position') || msg.includes('insufficient') || msg.includes('size') || msg.includes('zero'))) {
+      return { orderId: '', orderLinkId: '' };
+    }
     throw new Error(res.retMsg ?? 'Bybit place limit reduce-only order failed');
   }
   const result = res.result as { orderId: string; orderLinkId: string };

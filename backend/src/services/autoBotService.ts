@@ -723,7 +723,7 @@ async function monitorExits(): Promise<void> {
           // Exit price never 0: use depth price or fallback (markPrice / avgPrice)
           const exitPrice = pos.side === 'Buy' ? bidPriceSafe : askPriceSafe;
 
-          // Subaccount future-to-future hedge: exit when MainAccount_UnrealizedPnL > estimated taker fees
+          // Subaccount future-to-future hedge: exit when MainAccount_UnrealizedPnL > estimated taker fees (only exit path for hedges)
           const subHedge = subHedgeActive.get(key);
           if (subHedge != null) {
             const notional = qty * entry;
@@ -737,6 +737,12 @@ async function monitorExits(): Promise<void> {
                 ]);
                 positionFundingTime.delete(key);
                 subHedgeActive.delete(key);
+                for (const [ck, v] of mainFilledForSubHedge.entries()) {
+                  if (v.userId === userId && v.symbol === pos.symbol && v.side === pos.side) {
+                    mainFilledForSubHedge.delete(ck);
+                    break;
+                  }
+                }
                 delete lockedFundingRates[pos.symbol];
                 console.log(`[autoBot] Sub-hedge PnL exit: Main net PnL=${mainNetPnl.toFixed(4)} > 0 | ${pos.symbol}`);
               } catch (e) {
@@ -896,7 +902,10 @@ async function monitorExits(): Promise<void> {
 
           if (subHedgeActive.has(key)) continue;
 
-          // Time-based Auto Exit (after funding time) — skipped for sub-hedge; only PnL-based exit applies
+          const userSubHedgingEnabled = !!(settings.subApiKey && settings.subApiSecret);
+          if (userSubHedgingEnabled) continue;
+
+          // Time-based Auto Exit (after funding time) — disabled when subaccount hedging; only PnL-based exit applies for hedges
           if (settings.autoExitEnabled && exitThresholdMs > 0 && fundingTimeMs != null && now >= fundingTimeMs + exitThresholdMs) {
             try {
               const finalFundingRate = lockedFundingRates[pos.symbol] ?? Math.abs(fundingRate);
@@ -1650,7 +1659,7 @@ async function processUser(
       if (subHedgingEnabled) {
         const cacheForLog = walletCacheByUser.get(userId);
         const mainCap = totalWalletBalance;
-        const subCap = cacheForLog?.subEquity ?? totalWalletBalance;
+        const subCap = cacheForLog?.subEquity ?? 0;
         console.log(`[autoBot] ${topToken.symbol} - Countdown: ${countdownSec}s | Main: $${mainCap.toFixed(2)} | Sub: $${subCap.toFixed(2)} | Target: $${tradeMargin.toFixed(2)}`);
       } else {
         console.log(`[autoBot] ${topToken.symbol}${spotTag} - Countdown: ${countdownSec}s | Base Capital: $${totalWalletBalance.toFixed(2)} | Target Margin: $${tradeMargin.toFixed(2)}`);
