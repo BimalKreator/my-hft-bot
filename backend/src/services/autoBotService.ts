@@ -1296,10 +1296,18 @@ async function processUser(
         ...(subEquity !== undefined && { subEquity }),
         ...(subAvailableBalance !== undefined && { subAvailableBalance }),
       });
+      if (subHedgingEnabled && subEquity !== undefined) {
+        const minBal = Math.min(totalEquity, subEquity);
+        console.log(`[autoBot] Balances synced - Main: $${totalEquity.toFixed(2)}, Sub: $${subEquity.toFixed(2)}. Using Min: $${minBal.toFixed(2)} for quantity calculation.`);
+      }
     } catch (e) {
       console.error('[autoBot] getWalletBalance (prefetch) failed:', e);
     }
   }
+
+  const subHasScheduledTimers = subHedgingEnabled && candidates.some(
+    (c) => entryTimeoutByCycle.has(entryCycleKey(userId, c.symbol, c.nextFundingTime))
+  );
 
   let totalWalletBalance = 0;
   let tradeMargin = 0;
@@ -1316,6 +1324,35 @@ async function processUser(
         cachedAvailableMargin = Math.min(cache.totalAvailableBalance, cache.subAvailableBalance ?? cache.totalAvailableBalance);
       } else {
         tradeMargin = totalWalletBalance * capPct;
+      }
+    } else if (subHasScheduledTimers) {
+      // Sub-hedging with precision timers already scheduled: fetch balances instead of skipping so timers have data when they fire
+      try {
+        let mainEquity = 0;
+        let mainAvailable = 0;
+        const wallet = await getWalletBalance(apiKey, apiSecret);
+        mainEquity = parseFloat(wallet.totalEquity) || 0;
+        mainAvailable = parseFloat(wallet.totalAvailableBalance) || 0;
+        let subEquity: number | null = null;
+        let subAvailable: number | null = null;
+        if (settings.subApiKey && settings.subApiSecret) {
+          const subWallet = await getWalletBalance(settings.subApiKey, settings.subApiSecret);
+          subEquity = parseFloat(subWallet.totalEquity) || 0;
+          subAvailable = parseFloat(subWallet.totalAvailableBalance) || 0;
+        }
+        totalWalletBalance = mainEquity;
+        cachedAvailableMargin = subEquity != null ? Math.min(mainAvailable, subAvailable ?? mainAvailable) : mainAvailable;
+        const minBalance = subEquity != null ? Math.min(mainEquity, subEquity) : mainEquity;
+        tradeMargin = minBalance * ((settings.capitalPercent ?? 0) / 100);
+        walletCacheByUser.set(userId, {
+          totalEquity: mainEquity,
+          totalAvailableBalance: mainAvailable,
+          ...(subEquity != null && { subEquity, subAvailableBalance: subAvailable ?? 0 }),
+        });
+      } catch (e) {
+        if (debugSkip) console.log('[DEBUG] Trade Skipped Reason: Entry window but no wallet cache (critical path)');
+        console.warn('[autoBot] Entry window but no wallet cache; fetch failed:', e);
+        return;
       }
     } else {
       if (debugSkip) console.log('[DEBUG] Trade Skipped Reason: Entry window but no wallet cache (critical path)');
@@ -1500,7 +1537,14 @@ async function processUser(
       }
 
       const spotTag = settings.spotHedgingEnabled ? ' [SPOT]' : '';
-      console.log(`[autoBot] ${topToken.symbol}${spotTag} - Countdown: ${countdownSec}s | Base Capital: $${totalWalletBalance.toFixed(2)} | Target Margin: $${tradeMargin.toFixed(2)}`);
+      if (subHedgingEnabled) {
+        const cacheForLog = walletCacheByUser.get(userId);
+        const mainCap = totalWalletBalance;
+        const subCap = cacheForLog?.subEquity ?? totalWalletBalance;
+        console.log(`[autoBot] ${topToken.symbol} - Countdown: ${countdownSec}s | Main: $${mainCap.toFixed(2)} | Sub: $${subCap.toFixed(2)} | Target: $${tradeMargin.toFixed(2)}`);
+      } else {
+        console.log(`[autoBot] ${topToken.symbol}${spotTag} - Countdown: ${countdownSec}s | Base Capital: $${totalWalletBalance.toFixed(2)} | Target Margin: $${tradeMargin.toFixed(2)}`);
+      }
 
       if (enteredThisCycle.has(cycleKey)) {
         if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: Already entered this cycle', 'symbol:', topToken.symbol);
@@ -1508,9 +1552,11 @@ async function processUser(
       }
 
       const entryOffsetSec = Math.floor(entryOffsetMs / 1000);
-      const inWindow = countdownSec <= entryOffsetSec && countdownSec > Math.max(0, entryOffsetSec - 10);
+      const inWindow = (isManualMockActive && subHedgingEnabled)
+        ? (countdownSec <= 30 && countdownSec >= -5)
+        : (countdownSec <= entryOffsetSec && countdownSec > Math.max(0, entryOffsetSec - 10));
       if (!inWindow) {
-        if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: Countdown not in entry window', 'symbol:', topToken.symbol, 'countdown:', countdownSec, 'window:', Math.max(0, entryOffsetSec - 10), '-', entryOffsetSec);
+        if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: Countdown not in entry window', 'symbol:', topToken.symbol, 'countdown:', countdownSec, 'window:', (isManualMockActive && subHedgingEnabled) ? '30 to -5s' : `${Math.max(0, entryOffsetSec - 10)}-${entryOffsetSec}s`);
         return;
       }
 
