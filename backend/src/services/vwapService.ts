@@ -1,6 +1,7 @@
 import { getOrderbook, getOrderBookDepth } from './bybitService.js';
 import { getPositionList, type LinearPosition } from './bybitService.js';
 import { getExchangeKeys } from '../models/exchangeModel.js';
+import { getSettings } from '../models/settingsModel.js';
 import { decrypt } from '../utils/encryption.js';
 import { FundingScanner } from './scannerService.js';
 import { getHedgeGroupByPosition } from '../models/hedgeGroupModel.js';
@@ -47,6 +48,8 @@ export async function calculateVWAP(
   return totalValue / totalQty;
 }
 
+export type AccountType = 'main' | 'sub';
+
 export interface EnrichedPosition extends LinearPosition {
   vwapPrice: number;
   pnl: number;
@@ -59,10 +62,14 @@ export interface EnrichedPosition extends LinearPosition {
   spotQty?: number;
   spotEntryPrice?: number;
   isPaired?: boolean;
+  /** Set when subaccount hedging is enabled: which account this position belongs to */
+  accountType?: AccountType;
 }
 
 /**
  * Fetch active positions for the user and enrich each with VWAP exit price, PnL, SL price, and target price.
+ * When subaccount hedging is enabled (settings.subApiKey + subApiSecret), fetches positions from BOTH
+ * main and sub accounts and injects accountType ('main' | 'sub') into each position.
  */
 export async function getEnrichedPositions(userId: number): Promise<EnrichedPosition[]> {
   const keys = await getExchangeKeys(userId, 'Bybit');
@@ -71,10 +78,37 @@ export async function getEnrichedPositions(userId: number): Promise<EnrichedPosi
   const apiKey = decrypt(keys.api_key);
   const apiSecret = decrypt(keys.api_secret);
 
-  const [positions, fundingData] = await Promise.all([
+  const settings = await getSettings(userId);
+  const subHedgingEnabled = !!(settings.subApiKey && settings.subApiSecret);
+  let subApiKey: string | null = null;
+  let subApiSecret: string | null = null;
+  if (subHedgingEnabled && settings.subApiKey && settings.subApiSecret) {
+    try {
+      subApiKey = decrypt(settings.subApiKey);
+      subApiSecret = decrypt(settings.subApiSecret);
+    } catch {
+      subApiKey = settings.subApiKey;
+      subApiSecret = settings.subApiSecret;
+    }
+    if (!subApiKey || !subApiSecret) {
+      subApiKey = settings.subApiKey;
+      subApiSecret = settings.subApiSecret;
+    }
+  }
+
+  const [mainPositions, fundingData] = await Promise.all([
     getPositionList(apiKey, apiSecret, { category: 'linear', settleCoin: 'USDT' }),
     fundingScanner.getFundingData(),
   ]);
+
+  let subPositions: LinearPosition[] = [];
+  if (subHedgingEnabled && subApiKey && subApiSecret) {
+    try {
+      subPositions = await getPositionList(subApiKey, subApiSecret, { category: 'linear', settleCoin: 'USDT' });
+    } catch (e) {
+      console.warn('[vwapService] Sub account positions fetch failed:', e);
+    }
+  }
 
   const fundingBySymbol = new Map(
     fundingData.map((item) => [item.symbol, item.fundingRate])
@@ -82,55 +116,65 @@ export async function getEnrichedPositions(userId: number): Promise<EnrichedPosi
 
   const enriched: EnrichedPosition[] = [];
 
-  for (const pos of positions) {
-    const entry = parseFloat(pos.avgPrice) || 0;
-    const qty = parseFloat(pos.size) || 0;
-    const fundingRate = fundingBySymbol.get(pos.symbol) ?? 0;
+  async function enrichList(
+    positions: LinearPosition[],
+    accountType: AccountType,
+    keys: { apiKey: string; apiSecret: string }
+  ): Promise<void> {
+    for (const pos of positions) {
+      const entry = parseFloat(pos.avgPrice) || 0;
+      const qty = parseFloat(pos.size) || 0;
+      const fundingRate = fundingBySymbol.get(pos.symbol) ?? 0;
 
-    const hedgeGroup = await getHedgeGroupByPosition(userId, pos.symbol, pos.side);
+      const hedgeGroup = await getHedgeGroupByPosition(userId, pos.symbol, pos.side);
 
-    // Depth-based price for Active Positions table: Long = bidPrice (sell to close), Short = askPrice (buy to close). Default depth 2.
-    let vwapPrice = 0;
-    try {
-      const ob = await getOrderBookDepth(apiKey, apiSecret, pos.symbol, 2);
-      vwapPrice = pos.side === 'Buy' ? ob.bidPrice : ob.askPrice;
-      if (!Number.isFinite(vwapPrice)) vwapPrice = 0;
-    } catch {
-      // fallback to VWAP if order book fails
-      vwapPrice = await calculateVWAP(pos.symbol, pos.side, qty);
+      let vwapPrice = 0;
+      try {
+        const ob = await getOrderBookDepth(keys.apiKey, keys.apiSecret, pos.symbol, 2);
+        vwapPrice = pos.side === 'Buy' ? ob.bidPrice : ob.askPrice;
+        if (!Number.isFinite(vwapPrice)) vwapPrice = 0;
+      } catch {
+        vwapPrice = await calculateVWAP(pos.symbol, pos.side, qty);
+      }
+
+      const pnl =
+        pos.side === 'Buy'
+          ? (vwapPrice - entry) * qty
+          : (entry - vwapPrice) * qty;
+
+      const slPercent = fundingRate;
+      const slPrice =
+        pos.side === 'Buy'
+          ? entry * (1 - slPercent)
+          : entry * (1 + slPercent);
+
+      const targetPrice =
+        pos.side === 'Buy'
+          ? entry * (1 + fundingRate)
+          : entry * (1 - fundingRate);
+
+      enriched.push({
+        ...pos,
+        vwapPrice,
+        pnl,
+        slPrice,
+        targetPrice,
+        fundingRate,
+        accountType,
+        ...(hedgeGroup != null && {
+          hedgeGroupId: hedgeGroup.hedgeGroupId,
+          fundingAmountReceived: hedgeGroup.fundingAmountReceived,
+          spotQty: hedgeGroup.spotQty,
+          spotEntryPrice: hedgeGroup.spotEntryPrice,
+          isPaired: true,
+        }),
+      });
     }
+  }
 
-    const pnl =
-      pos.side === 'Buy'
-        ? (vwapPrice - entry) * qty
-        : (entry - vwapPrice) * qty;
-
-    const slPercent = fundingRate;
-    const slPrice =
-      pos.side === 'Buy'
-        ? entry * (1 - slPercent)
-        : entry * (1 + slPercent);
-
-    const targetPrice =
-      pos.side === 'Buy'
-        ? entry * (1 + fundingRate)
-        : entry * (1 - fundingRate);
-
-    enriched.push({
-      ...pos,
-      vwapPrice,
-      pnl,
-      slPrice,
-      targetPrice,
-      fundingRate,
-      ...(hedgeGroup != null && {
-        hedgeGroupId: hedgeGroup.hedgeGroupId,
-        fundingAmountReceived: hedgeGroup.fundingAmountReceived,
-        spotQty: hedgeGroup.spotQty,
-        spotEntryPrice: hedgeGroup.spotEntryPrice,
-        isPaired: true,
-      }),
-    });
+  await enrichList(mainPositions, 'main', { apiKey, apiSecret });
+  if (subHedgingEnabled && subApiKey && subApiSecret) {
+    await enrichList(subPositions, 'sub', { apiKey: subApiKey, apiSecret: subApiSecret });
   }
 
   return enriched;

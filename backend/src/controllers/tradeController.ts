@@ -12,6 +12,7 @@ import {
 import { getEnrichedPositions } from '../services/vwapService.js';
 import { AuthRequest } from '../middleware/authMiddleware.js';
 import { insertClosedTrade, getClosedTrades } from '../models/closedTradesModel.js';
+import { getSettings } from '../models/settingsModel.js';
 
 const TRADE_TYPE = ['Manual', 'Auto'] as const;
 type TradeType = (typeof TRADE_TYPE)[number];
@@ -126,13 +127,14 @@ export async function closePosition(
       return;
     }
 
-    const { symbol, side, qty, size, exitReason: bodyExitReason, fundingReceived: bodyFundingReceived } = req.body;
+    const { symbol, side, qty, size, exitReason: bodyExitReason, fundingReceived: bodyFundingReceived, accountType: bodyAccountType } = req.body;
     const exitReason = typeof bodyExitReason === 'string' && bodyExitReason.trim()
       ? bodyExitReason.trim()
       : 'Manual';
     const fundingReceived = typeof bodyFundingReceived === 'number' && !Number.isNaN(bodyFundingReceived)
       ? bodyFundingReceived
       : 0;
+    const useSubAccount = bodyAccountType === 'sub';
     const qtyVal = qty ?? size;
     if (
       !symbol ||
@@ -148,16 +150,33 @@ export async function closePosition(
       return;
     }
 
-    const keys = await getExchangeKeys(userId, 'Bybit');
-    if (!keys) {
-      res.status(404).json({
-        error: 'No Bybit keys found. Add keys in Exchange Setup.',
-      });
-      return;
+    let apiKey: string;
+    let apiSecret: string;
+    if (useSubAccount) {
+      const settings = await getSettings(userId);
+      if (!settings.subApiKey || !settings.subApiSecret) {
+        res.status(400).json({ error: 'Sub-account close requested but no sub-account keys in settings.' });
+        return;
+      }
+      try {
+        apiKey = decrypt(settings.subApiKey);
+        apiSecret = decrypt(settings.subApiSecret);
+      } catch {
+        apiKey = settings.subApiKey;
+        apiSecret = settings.subApiSecret;
+      }
+    } else {
+      const keys = await getExchangeKeys(userId, 'Bybit');
+      if (!keys) {
+        res.status(404).json({
+          error: 'No Bybit keys found. Add keys in Exchange Setup.',
+        });
+        return;
+      }
+      apiKey = decrypt(keys.api_key);
+      apiSecret = decrypt(keys.api_secret);
     }
 
-    const apiKey = decrypt(keys.api_key);
-    const apiSecret = decrypt(keys.api_secret);
     const qtyStr = typeof qtyVal === 'number' ? String(qtyVal) : String(qtyVal);
     const qtyNum = typeof qtyVal === 'number' ? qtyVal : parseFloat(String(qtyVal));
 
