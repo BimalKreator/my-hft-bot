@@ -999,7 +999,7 @@ async function executeEntry(
         entryTimeoutByCycle.delete(cycleKey);
       }
     }
-    // When prepData is injected, use it only (no cache) so order uses correct qty, leverage, and keys.
+    // When prepData (passedData) is injected, use it only: sub uses prep.subApiKey/subApiSecret and candidate.fixedQty; main uses prep.apiKey/apiSecret and candidate.fixedQty.
     const prep = prepData ? prepData.prep : entryPrepCacheByUser.get(userId);
     const c = prepData ? prepData.candidate : prep?.candidates.find((x) => x.symbol === symbol && x.nextFundingTime === nextFundingTime);
     if (prepData && (!prep || !c)) {
@@ -1218,6 +1218,11 @@ async function executeEntry(
       /* ignore */
     }
     console.log('[ABORT] executeEntry stopped at main prep path completed');
+    return;
+  }
+
+  if (account === 'sub') {
+    console.log('[ABORT] executeEntry stopped at sub account fallback disabled (use passedData only)');
     return;
   }
 
@@ -1636,20 +1641,82 @@ async function processUser(
           }
           isExecutionImminent = true;
           executionImminentUntilMs = Math.max(executionImminentUntilMs, fundingTimeMs + 2000);
-          const prepDataMain: ExecuteEntryPrepData | undefined = prepForPayload && cForPayload
-            ? { prep: prepForPayload, candidate: cForPayload }
-            : (() => {
-                const p = entryPrepCacheByUser.get(userId);
-                const cand = p?.candidates.find((x) => x.symbol === topToken.symbol && x.nextFundingTime === topToken.nextFundingTime);
-                return p && cand ? { prep: p, candidate: cand } : undefined;
-              })();
+          let passedData: ExecuteEntryPrepData;
+          if (prepForPayload && cForPayload && cForPayload.fixedQty != null) {
+            passedData = { prep: prepForPayload, candidate: cForPayload };
+          } else {
+            const cache = walletCacheByUser.get(userId);
+            const totalW = cache?.totalEquity ?? totalWalletBalance;
+            const tradeM = cache && cache.subEquity != null
+              ? Math.min(cache.totalEquity, cache.subEquity) * ((settings.capitalPercent ?? 0) / 100)
+              : totalWalletBalance * ((settings.capitalPercent ?? 0) / 100);
+            const cachedAvail = cache
+              ? (subHedgingEnabled && cache.subAvailableBalance != null ? Math.min(cache.totalAvailableBalance, cache.subAvailableBalance) : cache.totalAvailableBalance)
+              : cachedAvailableMargin;
+            const prepBuilt: EntryPrep = {
+              settings: { orderBookDepth: settings.orderBookDepth, capitalPercent: settings.capitalPercent, maxTrades, entryOffsetMs, subEntryOffsetMs: settings.subEntryOffsetMs ?? 10 },
+              apiKey,
+              apiSecret,
+              totalWalletBalance: totalW,
+              tradeMargin: tradeM,
+              cachedAvailableMargin: cachedAvail,
+              positionsCount: positions.length,
+              maxTrades,
+              candidates: [],
+              subApiKey: settings.subApiKey,
+              subApiSecret: settings.subApiSecret,
+              subEntryOffsetMs: settings.subEntryOffsetMs ?? 10,
+            };
+            let qtyStep = 0.1;
+            let minOrderQty = 0;
+            let maxOrderQty = 999999;
+            let tickSize = '0.01';
+            let futuresLeverage = settings.leverage ?? 10;
+            try {
+              const ls = await getInstrumentLotSize(apiKey, apiSecret, topToken.symbol);
+              qtyStep = parseFloat(ls.qtyStep) || 0.1;
+              minOrderQty = parseFloat(ls.minOrderQty) || 0;
+              maxOrderQty = parseFloat(ls.maxMktOrderQty || ls.maxOrderQty) || 999999;
+              tickSize = ls.tickSize ?? '0.01';
+            } catch { /* ignore */ }
+            try {
+              const details = await getInstrumentDetails(topToken.symbol);
+              futuresLeverage = Math.min(settings.leverage ?? 10, parseFloat(details.maxLeverage) || futuresLeverage);
+            } catch { /* ignore */ }
+            let fixedQty: number | undefined;
+            try {
+              const ob = await getOrderBookDepth(apiKey, apiSecret, topToken.symbol, settings.orderBookDepth ?? 2);
+              const entryPrice = side === 'Buy' ? ob.askPrice : ob.bidPrice;
+              if (Number.isFinite(entryPrice) && entryPrice > 0) {
+                const rawQty = (tradeM * futuresLeverage) / entryPrice;
+                const step = qtyStep;
+                const stepDecimals = step.toString().includes('.') ? step.toString().split('.')[1]!.length : 0;
+                let q = parseFloat((Math.floor(rawQty / step) * step).toFixed(stepDecimals));
+                if (q > maxOrderQty) q = parseFloat((Math.floor(maxOrderQty / step) * step).toFixed(stepDecimals));
+                if (q >= minOrderQty) fixedQty = q;
+              }
+            } catch { /* ignore */ }
+            const candidateBuilt: EntryPrepCandidate = {
+              symbol: topToken.symbol,
+              nextFundingTime: topToken.nextFundingTime,
+              fundingRate: topToken.fundingRate,
+              side,
+              safeLeverage: futuresLeverage,
+              qtyStep,
+              minOrderQty,
+              maxOrderQty,
+              tickSize,
+              ...(fixedQty != null && { fixedQty }),
+            };
+            passedData = { prep: prepBuilt, candidate: candidateBuilt };
+          }
           const tMain = setTimeout(() => {
-            executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'main', prepDataMain).catch((e) =>
+            executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'main', passedData).catch((e) =>
               console.error('[autoBot] executeEntry main failed', e)
             );
           }, Math.max(0, delayMs));
           const tSub = setTimeout(() => {
-            executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'sub', prepDataMain).catch((e) =>
+            executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'sub', passedData).catch((e) =>
               console.error('[autoBot] executeEntry sub failed', e)
             );
           }, Math.max(0, delaySubMs));
