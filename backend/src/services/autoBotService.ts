@@ -1178,7 +1178,7 @@ async function processUser(
       const delayMs = exactEntryTimeMs - now;
       const cycleKey = entryCycleKey(userId, topToken.symbol, topToken.nextFundingTime);
       if (!settings.spotHedgingEnabled && delayMs >= ENTRY_SCHEDULE_MIN_MS && delayMs <= ENTRY_SCHEDULE_MAX_MS && !entryTimeoutByCycle.has(cycleKey)) {
-        if (processedTokens.has(processedKey(userId, topToken.symbol, topToken.nextFundingTime)) return;
+        if (processedTokens.has(processedKey(userId, topToken.symbol, topToken.nextFundingTime))) return;
         if (enteredThisCycle.has(cycleKey)) return;
         const t = setTimeout(() => {
           executeEntry(userId, topToken.symbol, topToken.nextFundingTime).catch((e) =>
