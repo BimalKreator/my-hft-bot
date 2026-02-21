@@ -11,6 +11,7 @@ import {
   placeLimitOrder,
   placeLimitOrderReduceOnly,
   getOrderBookDepth,
+  ORDERBOOK_DEPTH_BEST,
   getOrderbook,
   getSpotOrderbook,
   getSpotInstrumentLotSize,
@@ -749,29 +750,28 @@ async function monitorExits(): Promise<void> {
             }
           }
 
-          // Depth-based PnL: Long = value at bidPrice (sell to close), Short = value at askPrice (buy to close)
-          let bidPrice = 0;
-          let askPrice = 0;
+          // Real-time PnL: fetch bid1 (best bid) and ask1 (best ask). LONG = exit at bid → PnL = (bid1 - entry)*qty; SHORT = exit at ask → PnL = (entry - ask1)*qty
+          let bid1Price = 0;
+          let ask1Price = 0;
           try {
-            const ob = await getOrderBookDepth(apiKey, apiSecret, pos.symbol, settings.orderBookDepth ?? 2);
-            bidPrice = ob.bidPrice;
-            askPrice = ob.askPrice;
+            const ob = await getOrderBookDepth(apiKey, apiSecret, pos.symbol, ORDERBOOK_DEPTH_BEST);
+            bid1Price = ob.bidPrice;
+            ask1Price = ob.askPrice;
           } catch (e) {
             console.error(`[autoBot] getOrderBookDepth failed ${pos.symbol}:`, e);
             continue;
           }
-          // Fallback so exit price is never 0: markPrice then avgPrice
           const fallbackPrice = parseFloat(pos.markPrice ?? '') || entry;
-          const bidPriceSafe = (Number.isFinite(bidPrice) && bidPrice > 0) ? bidPrice : fallbackPrice;
-          const askPriceSafe = (Number.isFinite(askPrice) && askPrice > 0) ? askPrice : fallbackPrice;
-          const currentPrice = pos.side === 'Buy' ? bidPriceSafe : askPriceSafe;
-          const pnlPct = entry <= 0 || !Number.isFinite(currentPrice) ? 0 : (pos.side === 'Buy' ? (currentPrice - entry) / entry : (entry - currentPrice) / entry) * 100;
-          const pnl = !Number.isFinite(currentPrice) ? 0 : pos.side === 'Buy' ? (currentPrice - entry) * qty : (entry - currentPrice) * qty;
+          const bid1Safe = (Number.isFinite(bid1Price) && bid1Price > 0) ? bid1Price : fallbackPrice;
+          const ask1Safe = (Number.isFinite(ask1Price) && ask1Price > 0) ? ask1Price : fallbackPrice;
+          const realTimeExitPrice = pos.side === 'Buy' ? bid1Safe : ask1Safe;
+          const pnlPct = entry <= 0 || !Number.isFinite(realTimeExitPrice) ? 0 : (pos.side === 'Buy' ? (realTimeExitPrice - entry) / entry : (entry - realTimeExitPrice) / entry) * 100;
+          const pnl = !Number.isFinite(realTimeExitPrice) ? 0 : pos.side === 'Buy' ? (bid1Safe - entry) * qty : (entry - ask1Safe) * qty;
           // Maker fee estimate (0.02%) when Bybit returns 0
-          const estimatedMakerFee = 0.0002 * qty * currentPrice;
+          const estimatedMakerFee = 0.0002 * qty * realTimeExitPrice;
 
-          // Exit price never 0: use depth price or fallback (markPrice / avgPrice)
-          const exitPrice = pos.side === 'Buy' ? bidPriceSafe : askPriceSafe;
+          // Real-time exit price for triggers and saveClosedTradeAfterExit: LONG = bid1, SHORT = ask1
+          const exitPrice = pos.side === 'Buy' ? bid1Safe : ask1Safe;
 
           // Subaccount future-to-future hedge: Universal Stoploss (before funding), then after funding: Break-even, 15m Pre-next Funding, PnL Positive.
           const subHedge = subHedgeActive.get(key);
@@ -779,9 +779,10 @@ async function monitorExits(): Promise<void> {
             const subPos = subPositions.find((p) => p.symbol === pos.symbol);
             const subEntry = subPos ? parseFloat(subPos.avgPrice) || 0 : 0;
             const subQty = subPos ? parseFloat(subPos.size) || 0 : subHedge.qty;
-            const subPnl = subPos && Number.isFinite(currentPrice)
-              ? (subHedge.side === 'Buy' ? (currentPrice - subEntry) * subQty : (subEntry - currentPrice) * subQty)
-              : 0;
+            const subPnl =
+              subPos && (Number.isFinite(bid1Safe) && Number.isFinite(ask1Safe))
+                ? (subHedge.side === 'Buy' ? (bid1Safe - subEntry) * subQty : (subEntry - ask1Safe) * subQty)
+                : 0;
             const combinedPnl = pnl + subPnl;
             const cache = walletCacheByUser.get(userId);
             const totalCapital = cache
@@ -793,10 +794,12 @@ async function monitorExits(): Promise<void> {
               exitReason: 'Universal Stoploss' | 'Break-even' | 'Next Trade Cleanup' | 'PnL Positive Exit'
             ): Promise<boolean> => {
               try {
-                const [mainOrderIds, subOrderIds] = await Promise.all([
-                  exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty),
-                  exitPositionWithIocSweep(subHedge.subApiKey, subHedge.subApiSecret, pos.symbol, subHedge.side, subHedge.qty),
-                ]);
+                // Orphaned sub safety: close main always; close sub only if sub has an open position (subQty > 0)
+                const mainOrderIds = await exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty);
+                const subOrderIds =
+                  subQty > 0
+                    ? await exitPositionWithIocSweep(subHedge.subApiKey, subHedge.subApiSecret, pos.symbol, subHedge.side, subQty)
+                    : [];
                 positionFundingTime.delete(key);
                 subHedgeActive.delete(key);
                 for (const [ck, v] of mainFilledForSubHedge.entries()) {
@@ -812,7 +815,7 @@ async function monitorExits(): Promise<void> {
                   );
                 }
                 if (subOrderIds.length > 0) {
-                  saveClosedTradeAfterExit(userId, subHedge.subApiKey, subHedge.subApiSecret, pos.symbol, subHedge.side, entry, subHedge.qty, subOrderIds, exitReason, 0, exitPrice).catch((e) =>
+                  saveClosedTradeAfterExit(userId, subHedge.subApiKey, subHedge.subApiSecret, pos.symbol, subHedge.side, subPos ? parseFloat(subPos.avgPrice) || entry : entry, subQty, subOrderIds, exitReason, 0, exitPrice).catch((e) =>
                     console.error(`[autoBot] saveClosedTradeAfterExit (sub) failed ${pos.symbol}:`, e)
                   );
                 }
@@ -838,9 +841,14 @@ async function monitorExits(): Promise<void> {
               continue;
             }
 
-            // 2) Break-even: after funding, main price reaches entry → Limit Exit
-            const breakEvenTolerance = 0.0001;
-            if (entry > 0 && Number.isFinite(currentPrice) && Math.abs(currentPrice - entry) / entry <= breakEvenTolerance) {
+            // 2) Break-even: after funding only. Long: trigger if bid1 <= entry; Short: trigger if ask1 >= entry (inequality, no strict equality)
+            const breakEvenHit =
+              entry > 0 &&
+              Number.isFinite(bid1Safe) &&
+              Number.isFinite(ask1Safe) &&
+              (pos.side === 'Buy' ? bid1Safe <= entry : ask1Safe >= entry);
+            if (breakEvenHit) {
+              console.log('[EXIT CHECK] Break-even hit! Side:', pos.side, 'Entry:', entry, 'Current:', pos.side === 'Buy' ? bid1Safe : ask1Safe);
               await runSubHedgeExit('Break-even');
               continue;
             }

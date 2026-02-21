@@ -1,4 +1,4 @@
-import { getOrderbook, getOrderBookDepth } from './bybitService.js';
+import { getOrderbook, getOrderBookDepth, ORDERBOOK_DEPTH_BEST } from './bybitService.js';
 import { getPositionList, type LinearPosition } from './bybitService.js';
 import { getExchangeKeys } from '../models/exchangeModel.js';
 import { getSettings } from '../models/settingsModel.js';
@@ -130,7 +130,7 @@ export async function getEnrichedPositions(userId: number): Promise<EnrichedPosi
 
       let vwapPrice = 0;
       try {
-        const ob = await getOrderBookDepth(keys.apiKey, keys.apiSecret, pos.symbol, 2);
+        const ob = await getOrderBookDepth(keys.apiKey, keys.apiSecret, pos.symbol, ORDERBOOK_DEPTH_BEST);
         vwapPrice = pos.side === 'Buy' ? ob.bidPrice : ob.askPrice;
         if (!Number.isFinite(vwapPrice)) vwapPrice = 0;
       } catch {

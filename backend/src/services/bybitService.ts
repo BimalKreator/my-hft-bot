@@ -760,8 +760,11 @@ export interface OrderBookDepthResult {
   askPrice: number;
 }
 
+/** Depth 1 = best bid / best ask (bid1Price, ask1Price). Use for real-time PnL and exit triggers. */
+export const ORDERBOOK_DEPTH_BEST = 1;
+
 /**
- * Get orderbook price at a specific depth (1 = best bid/ask). Fetches 50 rows, then indexes by depth (0-indexed: rowIndex = depth - 1).
+ * Get orderbook price at a specific depth (1 = best bid/ask, i.e. bid1Price and ask1Price). Fetches 50 rows, then indexes by depth (0-indexed: rowIndex = depth - 1).
  */
 export async function getOrderBookDepth(
   apiKey: string,
