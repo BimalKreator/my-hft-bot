@@ -112,6 +112,17 @@ const mainFilledForSubHedge = new Map<string, { userId: number; symbol: string; 
 /** Active subaccount hedge pairs: key = positionKey(userId, symbol, side). Exit when MainAccount_UnrealizedPnL > fees. */
 const subHedgeActive = new Map<string, { userId: number; symbol: string; side: 'Buy' | 'Sell'; qty: number; mainApiKey: string; mainApiSecret: string; subApiKey: string; subApiSecret: string }>();
 
+/** Pre-calculated order payloads for zero-API executeEntry (key = entryCycleKey). When timer fires, only ws.send(). */
+interface PendingOrderPayload {
+  apiKey: string;
+  apiSecret: string;
+  symbol: string;
+  side: 'Buy' | 'Sell';
+  qtyStr: string;
+  priceStr: string;
+}
+const pendingOrderPayloadByCycle = new Map<string, { main?: PendingOrderPayload; sub?: PendingOrderPayload }>();
+
 /** Execution WebSocket stream handles per userId (for Settlement-triggered exit). */
 const executionStreamsByUser = new Map<number, { close: () => void }>();
 
@@ -506,6 +517,7 @@ export function cancelManualMock(): void {
     }
   }
   entryTimeoutByCycle.clear();
+  pendingOrderPayloadByCycle.clear();
   console.log('[autoBot] Manual mock cancelled; returning to live sync.');
 }
 
@@ -619,6 +631,14 @@ async function runTick(): Promise<number> {
       const nextMs = parseInt(nextFundingTimeStr, 10) || 0;
       if (nextMs > 0 && now > nextMs + 60_000) {
         mainFilledForSubHedge.delete(cycleKey);
+      }
+    }
+    for (const cycleKey of pendingOrderPayloadByCycle.keys()) {
+      const parts = cycleKey.split('_');
+      const nextFundingTimeStr = parts.length >= 3 ? parts[parts.length - 1]! : '';
+      const nextMs = parseInt(nextFundingTimeStr, 10) || 0;
+      if (nextMs > 0 && now > nextMs + 60_000) {
+        pendingOrderPayloadByCycle.delete(cycleKey);
       }
     }
     return minCountdownSec;
@@ -874,7 +894,9 @@ async function monitorExits(): Promise<void> {
 
           // Post-Funding Stoploss removed for naked trades: only Time-Based Exit after funding (WebSocket + exitTimeMs or timer fallback).
 
-          // Time-based Auto Exit (after funding time)
+          if (subHedgeActive.has(key)) continue;
+
+          // Time-based Auto Exit (after funding time) — skipped for sub-hedge; only PnL-based exit applies
           if (settings.autoExitEnabled && exitThresholdMs > 0 && fundingTimeMs != null && now >= fundingTimeMs + exitThresholdMs) {
             try {
               const finalFundingRate = lockedFundingRates[pos.symbol] ?? Math.abs(fundingRate);
@@ -935,6 +957,68 @@ async function executeEntry(userId: number, symbol: string, nextFundingTime: str
   const isSubHedge = account === 'sub' && prep?.subApiKey && prep?.subApiSecret && c?.fixedQty != null;
   const isMainHedge = account !== 'sub' && prep?.subApiKey && prep?.subApiSecret;
 
+  const pendingPayload = pendingOrderPayloadByCycle.get(cycleKey);
+
+  if (account === 'sub' && pendingPayload?.sub) {
+    const pl = pendingPayload.sub;
+    try {
+      await placeLimitOrder(pl.apiKey, pl.apiSecret, pl.symbol, pl.side, pl.qtyStr, pl.priceStr, 'IOC');
+      const mainFilled = mainFilledForSubHedge.get(cycleKey);
+      if (mainFilled) {
+        const posKey = positionKey(userId, pl.symbol, pl.side);
+        const qtyNum = parseFloat(pl.qtyStr) || 0;
+        subHedgeActive.set(posKey, {
+          userId,
+          symbol: pl.symbol,
+          side: pl.side,
+          qty: mainFilled.qty,
+          mainApiKey: mainFilled.mainApiKey,
+          mainApiSecret: mainFilled.mainApiSecret,
+          subApiKey: pl.apiKey,
+          subApiSecret: pl.apiSecret,
+        });
+        mainFilledForSubHedge.delete(cycleKey);
+        console.log(`[autoBot] Sub-hedge both filled | ${pl.symbol} qty=${mainFilled.qty}`);
+      }
+      processedTokens.add(procKey);
+      enteredThisCycle.add(cycleKey);
+    } catch (e) {
+      console.error(`[autoBot] executeEntry sub (payload) ${pendingPayload.sub.symbol} failed:`, e);
+    }
+    pendingOrderPayloadByCycle.delete(cycleKey);
+    return;
+  }
+
+  if (account !== 'sub' && pendingPayload?.main) {
+    const pl = pendingPayload.main;
+    try {
+      await placeLimitOrder(pl.apiKey, pl.apiSecret, pl.symbol, pl.side, pl.qtyStr, pl.priceStr, 'IOC');
+      const nextFundingMs = parseInt(nextFundingTime, 10) || 0;
+      positionFundingTime.set(positionKey(userId, pl.symbol, pl.side), nextFundingMs);
+      if (prep?.subApiKey && prep?.subApiSecret) {
+        const qtyNum = parseFloat(pl.qtyStr) || 0;
+        if (qtyNum > 0) {
+          mainFilledForSubHedge.set(cycleKey, {
+            userId,
+            symbol: pl.symbol,
+            side: pl.side,
+            qty: qtyNum,
+            mainApiKey: pl.apiKey,
+            mainApiSecret: pl.apiSecret,
+          });
+        }
+      }
+    } catch (e) {
+      console.error(`[autoBot] executeEntry main (payload) ${pl.symbol} failed:`, e);
+    }
+    if (pendingPayload.sub) {
+      pendingOrderPayloadByCycle.set(cycleKey, { sub: pendingPayload.sub });
+    } else {
+      pendingOrderPayloadByCycle.delete(cycleKey);
+    }
+    return;
+  }
+
   if (isSubHedge && prep && c) {
     if (processedTokens.has(procKey)) return;
     const tickSize = c.tickSize ?? '0.01';
@@ -978,7 +1062,7 @@ async function executeEntry(userId: number, symbol: string, nextFundingTime: str
   if (processedTokens.has(procKey) || enteredThisCycle.has(cycleKey)) return;
 
   if (prep && c) {
-    if (prep.positionsCount >= prep.maxTrades) return;
+    if (account !== 'sub' && prep.positionsCount >= prep.maxTrades) return;
     let entryPrice: number;
     try {
       const obDepth = await getOrderBookDepth(prep.apiKey, prep.apiSecret, c.symbol, prep.settings.orderBookDepth ?? 2);
@@ -1400,12 +1484,38 @@ async function processUser(
       const delaySubMs = exactSubEntryTimeMs - now;
       const cycleKey = entryCycleKey(userId, topToken.symbol, topToken.nextFundingTime);
 
+      if (subHedgingEnabled && entryTimeoutByCycle.has(cycleKey)) {
+        return;
+      }
+
       if (subHedgingEnabled && settings.subApiKey && settings.subApiSecret && !entryTimeoutByCycle.has(cycleKey)) {
         if (processedTokens.has(processedKey(userId, topToken.symbol, topToken.nextFundingTime))) return;
         if (enteredThisCycle.has(cycleKey)) return;
         const inRangeMain = delayMs >= ENTRY_SCHEDULE_MIN_MS && delayMs <= ENTRY_SCHEDULE_MAX_MS;
         const inRangeSub = delaySubMs > 0 && delaySubMs <= ENTRY_SCHEDULE_MAX_MS + 5000;
         if (inRangeMain || inRangeSub) {
+          const prepForPayload = entryPrepCacheByUser.get(userId);
+          const cForPayload = prepForPayload?.candidates.find((x) => x.symbol === topToken.symbol && x.nextFundingTime === topToken.nextFundingTime);
+          const side: 'Buy' | 'Sell' = topToken.fundingRate < 0 ? 'Buy' : 'Sell';
+          if (prepForPayload && cForPayload && cForPayload.fixedQty != null && prepForPayload.subApiKey && prepForPayload.subApiSecret) {
+            try {
+              const orderbook = await getOrderbook(topToken.symbol, ORDERBOOK_SWEEP_LIMIT);
+              const sweepPrice = getSweepPrice(orderbook, side, cForPayload.fixedQty);
+              if (Number.isFinite(sweepPrice) && sweepPrice > 0) {
+                const tickSize = cForPayload.tickSize ?? '0.01';
+                const priceStr = formatPriceToTick(sweepPrice, tickSize);
+                const qtyStr = formatQtyToStep(cForPayload.fixedQty, String(cForPayload.qtyStep));
+                if (parseFloat(qtyStr) > 0) {
+                  pendingOrderPayloadByCycle.set(cycleKey, {
+                    main: { apiKey: prepForPayload.apiKey, apiSecret: prepForPayload.apiSecret, symbol: topToken.symbol, side, qtyStr, priceStr },
+                    sub: { apiKey: prepForPayload.subApiKey, apiSecret: prepForPayload.subApiSecret, symbol: topToken.symbol, side, qtyStr, priceStr },
+                  });
+                }
+              }
+            } catch (e) {
+              console.warn('[autoBot] Pre-compute payload failed, executeEntry will compute:', e);
+            }
+          }
           const tMain = setTimeout(() => {
             executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'main').catch((e) =>
               console.error('[autoBot] executeEntry main failed', e)
