@@ -127,7 +127,7 @@ export async function closePosition(
       return;
     }
 
-    const { symbol, side, qty, size, exitReason: bodyExitReason, fundingReceived: bodyFundingReceived, accountType: bodyAccountType } = req.body;
+    const { symbol, side, qty, size, exitReason: bodyExitReason, fundingReceived: bodyFundingReceived, accountType: bodyAccountType, hedgeClose: bodyHedgeClose } = req.body;
     const exitReason = typeof bodyExitReason === 'string' && bodyExitReason.trim()
       ? bodyExitReason.trim()
       : 'Manual';
@@ -135,7 +135,57 @@ export async function closePosition(
       ? bodyFundingReceived
       : 0;
     const useSubAccount = bodyAccountType === 'sub';
+    const hedgeClose = bodyHedgeClose === true;
     const qtyVal = qty ?? size;
+
+    if (hedgeClose) {
+      if (!symbol || typeof symbol !== 'string') {
+        res.status(400).json({ error: 'hedgeClose requires symbol (string).' });
+        return;
+      }
+      const settings = await getSettings(userId);
+      if (!settings.subApiKey || !settings.subApiSecret) {
+        res.status(400).json({ error: 'Subaccount hedging not configured. Cannot close hedge.' });
+        return;
+      }
+      const keys = await getExchangeKeys(userId, 'Bybit');
+      if (!keys) {
+        res.status(404).json({ error: 'No Bybit keys found.' });
+        return;
+      }
+      const mainKey = decrypt(keys.api_key);
+      const mainSecret = decrypt(keys.api_secret);
+      let subKey: string;
+      let subSecret: string;
+      try {
+        subKey = decrypt(settings.subApiKey);
+        subSecret = decrypt(settings.subApiSecret);
+      } catch {
+        subKey = settings.subApiKey;
+        subSecret = settings.subApiSecret;
+      }
+      const [mainPositions, subPositions] = await Promise.all([
+        getPositionList(mainKey, mainSecret, { category: 'linear', settleCoin: 'USDT' }),
+        getPositionList(subKey, subSecret, { category: 'linear', settleCoin: 'USDT' }),
+      ]);
+      const mainPos = mainPositions.find((p) => p.symbol === symbol);
+      const subPos = subPositions.find((p) => p.symbol === symbol);
+      const closes: Promise<{ orderId: string; orderLinkId: string }>[] = [];
+      if (mainPos && parseFloat(mainPos.size) > 0) {
+        closes.push(placeMarketOrderReduceOnly(mainKey, mainSecret, symbol, mainPos.side, mainPos.size));
+      }
+      if (subPos && parseFloat(subPos.size) > 0) {
+        closes.push(placeMarketOrderReduceOnly(subKey, subSecret, symbol, subPos.side, subPos.size));
+      }
+      if (closes.length === 0) {
+        res.status(400).json({ error: `No open position for ${symbol} on main or sub.` });
+        return;
+      }
+      await Promise.all(closes);
+      res.status(200).json({ ok: true, message: 'Hedge closed (main + sub).' });
+      return;
+    }
+
     if (
       !symbol ||
       typeof symbol !== 'string' ||

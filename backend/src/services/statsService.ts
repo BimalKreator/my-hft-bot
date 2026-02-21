@@ -1,5 +1,6 @@
 import { query } from '../config/db.js';
 import { getExchangeKeys } from '../models/exchangeModel.js';
+import { getSettings } from '../models/settingsModel.js';
 import { decrypt } from '../utils/encryption.js';
 import { getWalletBalance, getPositionList } from './bybitService.js';
 
@@ -33,6 +34,7 @@ export interface DashboardStats {
 
 /**
  * Fetch dashboard stats: capital, opening balance, today's profit (adjusted for deposits/withdrawals), daily ROI.
+ * When subaccount_hedging is active (sub API keys exist), capital = main equity + sub equity (combined).
  */
 export async function getDashboardStats(userId: number): Promise<DashboardStats | null> {
   const keys = await getExchangeKeys(userId, 'Bybit');
@@ -41,11 +43,34 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
   const apiKey = decrypt(keys.api_key);
   const apiSecret = decrypt(keys.api_secret);
 
+  let mainEquity = 0;
   const balance = await getWalletBalance(apiKey, apiSecret);
-  const walletBalance = parseFloat(balance.totalEquity ?? '0') || 0;
+  mainEquity = parseFloat(balance.totalEquity ?? '0') || 0;
+
+  const settings = await getSettings(userId);
+  const subHedgingActive = !!(settings.subApiKey && settings.subApiSecret);
+  let subEquity = 0;
+  if (subHedgingActive && settings.subApiKey && settings.subApiSecret) {
+    try {
+      let subKey = settings.subApiKey;
+      let subSecret = settings.subApiSecret;
+      try {
+        subKey = decrypt(settings.subApiKey);
+        subSecret = decrypt(settings.subApiSecret);
+      } catch {
+        /* use plain */
+      }
+      const subBalance = await getWalletBalance(subKey, subSecret);
+      subEquity = parseFloat(subBalance.totalEquity ?? '0') || 0;
+    } catch {
+      subEquity = 0;
+    }
+  }
+
+  const walletBalance = mainEquity + subEquity;
   const capital = BASE_CAPITAL + walletBalance;
 
-  /** Margin Used = sum of (position.size * position.avgPrice) over all active positions. Not exchange margin. */
+  /** Margin Used = sum of (position.size * position.avgPrice) over main (and sub when hedging) active positions. */
   let marginUsed = 0;
   try {
     const positions = await getPositionList(apiKey, apiSecret, { category: 'linear', settleCoin: 'USDT' });
@@ -53,6 +78,22 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
       const size = parseFloat(pos.size) || 0;
       const avgPrice = parseFloat(pos.avgPrice) || 0;
       marginUsed += size * avgPrice;
+    }
+    if (subHedgingActive && settings.subApiKey && settings.subApiSecret) {
+      let subKey = settings.subApiKey;
+      let subSecret = settings.subApiSecret;
+      try {
+        subKey = decrypt(settings.subApiKey);
+        subSecret = decrypt(settings.subApiSecret);
+      } catch {
+        /* use plain */
+      }
+      const subPositions = await getPositionList(subKey, subSecret, { category: 'linear', settleCoin: 'USDT' });
+      for (const pos of subPositions) {
+        const size = parseFloat(pos.size) || 0;
+        const avgPrice = parseFloat(pos.avgPrice) || 0;
+        marginUsed += size * avgPrice;
+      }
     }
   } catch {
     marginUsed = 0;
