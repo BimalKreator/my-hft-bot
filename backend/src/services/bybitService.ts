@@ -18,7 +18,10 @@ const axiosBybit = axios.create({ httpsAgent: keepAliveAgent });
 /** Network options passed to RestClientV5 so all SDK requests use the same agent. */
 const restNetworkOptions = { httpsAgent: keepAliveAgent };
 
-/** Per-credential V5 Private Trade WebSocket client cache (for low-latency order placement). */
+/**
+ * Per-credential V5 Private Trade WebSocket client cache (for low-latency order placement).
+ * Main and Sub accounts each get their own client when using subaccount hedging (different apiKey).
+ */
 const wsClientByKey = new Map<string, WebsocketClient>();
 
 function getWsClient(apiKey: string, apiSecret: string): WebsocketClient {

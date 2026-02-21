@@ -49,8 +49,8 @@ const CRITICAL_COUNTDOWN_SEC = 15; // below this: use cache only, no DB/heavy AP
 const ENTRY_SCHEDULE_MIN_MS = 5_000;
 const ENTRY_SCHEDULE_MAX_MS = 10_000;
 
-/** Cached wallet when countdown was 20–60s; used in entry window so we never call getWalletBalance when countdown <= 15. */
-const walletCacheByUser = new Map<number, { totalEquity: number; totalAvailableBalance: number }>();
+/** Cached wallet when countdown was 20–60s; used in entry window so we never call getWalletBalance when countdown <= 15. Sub-hedge: optional subEquity/subAvailableBalance for min(main,sub) sizing. */
+const walletCacheByUser = new Map<number, { totalEquity: number; totalAvailableBalance: number; subEquity?: number; subAvailableBalance?: number }>();
 
 /** Entry prep cache: populated when 20s <= countdown <= 60s; used in critical path (countdown <= 15) so no DB/heavy API. */
 interface EntryPrepCandidate {
@@ -63,9 +63,11 @@ interface EntryPrepCandidate {
   minOrderQty: number;
   maxOrderQty: number;
   tickSize: string;
+  /** When subaccount hedging: precomputed Q so main and sub use same size. */
+  fixedQty?: number;
 }
 interface EntryPrep {
-  settings: { orderBookDepth?: number; capitalPercent?: number; maxTrades: number; entryOffsetMs: number };
+  settings: { orderBookDepth?: number; capitalPercent?: number; maxTrades: number; entryOffsetMs: number; subEntryOffsetMs?: number };
   apiKey: string;
   apiSecret: string;
   totalWalletBalance: number;
@@ -74,6 +76,10 @@ interface EntryPrep {
   positionsCount: number;
   maxTrades: number;
   candidates: EntryPrepCandidate[];
+  /** Subaccount hedging: sub credentials and offset for dual scheduled entry. */
+  subApiKey?: string;
+  subApiSecret?: string;
+  subEntryOffsetMs?: number;
 }
 const entryPrepCacheByUser = new Map<number, EntryPrep>();
 /** Cached user IDs with auto entry enabled; used when countdown <= 15 to avoid DB. */
@@ -96,10 +102,15 @@ const lockedFundingRates: Record<string, number> = {};
 const enteredThisCycle = new Set<string>();
 /** Retry prevention: once we attempt order for this key, do not retry even if order fails. */
 const processedTokens = new Set<string>();
-/** Precise entry timeouts: key = entryCycleKey(userId, symbol, nextFundingTime). Cleared on mock cancel or cycle reset. */
-const entryTimeoutByCycle = new Map<string, ReturnType<typeof setTimeout>>();
+/** Precise entry timeouts: key = entryCycleKey(userId, symbol, nextFundingTime). Value single timeout (naked) or { main, sub } for subaccount hedging. */
+const entryTimeoutByCycle = new Map<string, ReturnType<typeof setTimeout> | { main: ReturnType<typeof setTimeout>; sub: ReturnType<typeof setTimeout> }>();
 /** Track funding time per (userId, symbol, side) for auto exit: close at fundingTime + exitTimeMs. */
 const positionFundingTime = new Map<string, number>();
+
+/** After main entry fills for sub-hedge, store here so when sub entry fills we can register subHedgeActive. */
+const mainFilledForSubHedge = new Map<string, { userId: number; symbol: string; side: 'Buy' | 'Sell'; qty: number; mainApiKey: string; mainApiSecret: string }>();
+/** Active subaccount hedge pairs: key = positionKey(userId, symbol, side). Exit when MainAccount_UnrealizedPnL > fees. */
+const subHedgeActive = new Map<string, { userId: number; symbol: string; side: 'Buy' | 'Sell'; qty: number; mainApiKey: string; mainApiSecret: string; subApiKey: string; subApiSecret: string }>();
 
 /** Execution WebSocket stream handles per userId (for Settlement-triggered exit). */
 const executionStreamsByUser = new Map<number, { close: () => void }>();
@@ -432,7 +443,7 @@ export function startMonitoring(): void {
   warmupWsConnections().catch((e) => console.error('[autoBot] warmupWsConnections failed:', e));
 }
 
-/** Warm up WebSocket Private Trade connections for all users with auto entry so first order has minimal latency. */
+/** Warm up WebSocket Private Trade connections for all users with auto entry (main + sub when subaccount hedging) so first order has minimal latency. */
 async function warmupWsConnections(): Promise<void> {
   const userIds = await getUsersWithAutoEntryEnabled();
   for (const userId of userIds) {
@@ -440,7 +451,13 @@ async function warmupWsConnections(): Promise<void> {
       const keys = await getExchangeKeys(userId, 'Bybit');
       if (!keys) continue;
       await warmupWsConnection(decrypt(keys.api_key), decrypt(keys.api_secret));
-      console.log(`[autoBot] WS warmup done for user ${userId}`);
+      const settings = await getSettings(userId);
+      if (settings.subApiKey && settings.subApiSecret) {
+        await warmupWsConnection(settings.subApiKey, settings.subApiSecret);
+        console.log(`[autoBot] WS warmup done for user ${userId} (main + sub)`);
+      } else {
+        console.log(`[autoBot] WS warmup done for user ${userId}`);
+      }
     } catch (e) {
       console.warn(`[autoBot] WS warmup failed for user ${userId}:`, e);
     }
@@ -480,7 +497,14 @@ export function cancelManualMock(): void {
   isManualMockActive = false;
   manualMockFundingTimeMs = null;
   manualMockEndMs = null;
-  for (const [, t] of entryTimeoutByCycle) clearTimeout(t);
+  for (const [, t] of entryTimeoutByCycle) {
+    if (typeof t === 'object' && t != null && 'main' in t) {
+      clearTimeout(t.main);
+      clearTimeout(t.sub);
+    } else {
+      clearTimeout(t as ReturnType<typeof setTimeout>);
+    }
+  }
   entryTimeoutByCycle.clear();
   console.log('[autoBot] Manual mock cancelled; returning to live sync.');
 }
@@ -562,7 +586,8 @@ async function runTick(): Promise<number> {
       try {
         if (isCritical) {
           const settings = await getSettings(userId);
-          if (settings.spotHedgingEnabled) {
+          const subHedgingEnabled = !!(settings.subApiKey && settings.subApiSecret);
+          if (settings.spotHedgingEnabled || subHedgingEnabled) {
             await processUser(userId, marketData, now);
           } else {
             await processUserCritical(userId, marketData, now);
@@ -579,8 +604,21 @@ async function runTick(): Promise<number> {
       const nextFundingTimeStr = parts.length >= 3 ? parts[parts.length - 1]! : '';
       const nextMs = parseInt(nextFundingTimeStr, 10) || 0;
       if (nextMs > 0 && now > nextMs + 60_000) {
-        clearTimeout(t);
+        if (typeof t === 'object' && t != null && 'main' in t) {
+          clearTimeout(t.main);
+          clearTimeout(t.sub);
+        } else {
+          clearTimeout(t as ReturnType<typeof setTimeout>);
+        }
         entryTimeoutByCycle.delete(key);
+      }
+    }
+    for (const cycleKey of mainFilledForSubHedge.keys()) {
+      const parts = cycleKey.split('_');
+      const nextFundingTimeStr = parts.length >= 3 ? parts[parts.length - 1]! : '';
+      const nextMs = parseInt(nextFundingTimeStr, 10) || 0;
+      if (nextMs > 0 && now > nextMs + 60_000) {
+        mainFilledForSubHedge.delete(cycleKey);
       }
     }
     return minCountdownSec;
@@ -664,6 +702,29 @@ async function monitorExits(): Promise<void> {
 
           // Exit price never 0: use depth price or fallback (markPrice / avgPrice)
           const exitPrice = pos.side === 'Buy' ? bidPriceSafe : askPriceSafe;
+
+          // Subaccount future-to-future hedge: exit when MainAccount_UnrealizedPnL > estimated taker fees
+          const subHedge = subHedgeActive.get(key);
+          if (subHedge != null) {
+            const notional = qty * entry;
+            const estimatedTakerFees = 2 * 0.0006 * notional;
+            const mainNetPnl = pnl - estimatedTakerFees;
+            if (mainNetPnl > 0) {
+              try {
+                await Promise.all([
+                  placeMarketOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, String(qty)),
+                  placeMarketOrderReduceOnly(subHedge.subApiKey, subHedge.subApiSecret, pos.symbol, pos.side, String(subHedge.qty)),
+                ]);
+                positionFundingTime.delete(key);
+                subHedgeActive.delete(key);
+                delete lockedFundingRates[pos.symbol];
+                console.log(`[autoBot] Sub-hedge PnL exit: Main net PnL=${mainNetPnl.toFixed(4)} > 0 | ${pos.symbol}`);
+              } catch (e) {
+                console.error(`[autoBot] Sub-hedge parallel close failed ${pos.symbol}:`, e);
+              }
+            }
+            continue;
+          }
 
           const hedgeGroup = await getHedgeGroupByPosition(userId, pos.symbol, pos.side);
 
@@ -850,19 +911,72 @@ async function monitorExits(): Promise<void> {
 
 /**
  * Run entry at exact timestamp (called from precise setTimeout). Uses prep cache when available; otherwise full flow.
+ * For subaccount hedging: account 'main' fires at funding - entry_offset_ms, 'sub' at funding - sub_entry_offset_ms; both use same Q from min(balances).
  */
-async function executeEntry(userId: number, symbol: string, nextFundingTime: string): Promise<void> {
+async function executeEntry(userId: number, symbol: string, nextFundingTime: string, account?: 'main' | 'sub'): Promise<void> {
   const cycleKey = entryCycleKey(userId, symbol, nextFundingTime);
   const procKey = processedKey(userId, symbol, nextFundingTime);
   const existing = entryTimeoutByCycle.get(cycleKey);
   if (existing) {
-    clearTimeout(existing);
-    entryTimeoutByCycle.delete(cycleKey);
+    if (typeof existing === 'object' && existing != null && 'main' in existing) {
+      if (account === 'main') {
+        clearTimeout(existing.main);
+      } else if (account === 'sub') {
+        clearTimeout(existing.sub);
+        entryTimeoutByCycle.delete(cycleKey);
+      }
+    } else {
+      clearTimeout(existing as ReturnType<typeof setTimeout>);
+      entryTimeoutByCycle.delete(cycleKey);
+    }
   }
-  if (processedTokens.has(procKey) || enteredThisCycle.has(cycleKey)) return;
-
   const prep = entryPrepCacheByUser.get(userId);
   const c = prep?.candidates.find((x) => x.symbol === symbol && x.nextFundingTime === nextFundingTime);
+  const isSubHedge = account === 'sub' && prep?.subApiKey && prep?.subApiSecret && c?.fixedQty != null;
+  const isMainHedge = account !== 'sub' && prep?.subApiKey && prep?.subApiSecret;
+
+  if (isSubHedge && prep && c) {
+    if (processedTokens.has(procKey)) return;
+    const tickSize = c.tickSize ?? '0.01';
+    const finalQty = c.fixedQty!;
+    const qtyStr = formatQtyToStep(finalQty, String(c.qtyStep));
+    if (parseFloat(qtyStr) <= 0) return;
+    try {
+      const orderbook = await getOrderbook(c.symbol, ORDERBOOK_SWEEP_LIMIT);
+      const sweepPrice = getSweepPrice(orderbook, c.side, finalQty);
+      if (!Number.isFinite(sweepPrice) || sweepPrice <= 0) return;
+      const priceStr = formatPriceToTick(sweepPrice, tickSize);
+      const { orderId } = await placeLimitOrder(prep.subApiKey!, prep.subApiSecret!, c.symbol, c.side, qtyStr, priceStr, 'IOC');
+      await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
+      const executions = await getExecutionList(prep.subApiKey!, prep.subApiSecret!, 'linear', orderId);
+      const filledQty = executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
+      if (filledQty <= 0) return;
+      const mainFilled = mainFilledForSubHedge.get(cycleKey);
+      if (mainFilled) {
+        const posKey = positionKey(userId, c.symbol, c.side);
+        subHedgeActive.set(posKey, {
+          userId,
+          symbol: c.symbol,
+          side: c.side,
+          qty: mainFilled.qty,
+          mainApiKey: mainFilled.mainApiKey,
+          mainApiSecret: mainFilled.mainApiSecret,
+          subApiKey: prep.subApiKey!,
+          subApiSecret: prep.subApiSecret!,
+        });
+        mainFilledForSubHedge.delete(cycleKey);
+        console.log(`[autoBot] Sub-hedge both filled | ${c.symbol} qty=${mainFilled.qty}`);
+      }
+      processedTokens.add(procKey);
+      enteredThisCycle.add(cycleKey);
+    } catch (e) {
+      console.error(`[autoBot] executeEntry sub ${c.symbol} failed:`, e);
+    }
+    return;
+  }
+
+  if (processedTokens.has(procKey) || enteredThisCycle.has(cycleKey)) return;
+
   if (prep && c) {
     if (prep.positionsCount >= prep.maxTrades) return;
     let entryPrice: number;
@@ -881,11 +995,13 @@ async function executeEntry(userId: number, symbol: string, nextFundingTime: str
     const maxQty = c.maxOrderQty;
     const stepStr = step.toString();
     const stepDecimals = stepStr.includes('.') ? stepStr.split('.')[1]!.length : 0;
-    let finalQty = parseFloat((Math.floor(rawQty / step) * step).toFixed(stepDecimals));
+    let finalQty = c.fixedQty ?? parseFloat((Math.floor(rawQty / step) * step).toFixed(stepDecimals));
     if (finalQty > maxQty) finalQty = parseFloat((Math.floor(maxQty / step) * step).toFixed(stepDecimals));
     if (finalQty < minQty) return;
-    processedTokens.add(procKey);
-    enteredThisCycle.add(cycleKey);
+    if (!isMainHedge) {
+      processedTokens.add(procKey);
+      enteredThisCycle.add(cycleKey);
+    }
     try {
       let remainingQty = finalQty;
       let retries = 0;
@@ -912,6 +1028,19 @@ async function executeEntry(userId: number, symbol: string, nextFundingTime: str
       }
       const nextFundingMs = parseInt(c.nextFundingTime, 10) || 0;
       positionFundingTime.set(positionKey(userId, c.symbol, c.side), nextFundingMs);
+      if (isMainHedge && prep.subApiKey && prep.subApiSecret) {
+        const filledTotal = finalQty - remainingQty;
+        if (filledTotal > 0) {
+          mainFilledForSubHedge.set(cycleKey, {
+            userId,
+            symbol: c.symbol,
+            side: c.side,
+            qty: filledTotal,
+            mainApiKey: prep.apiKey,
+            mainApiSecret: prep.apiSecret,
+          });
+        }
+      }
     } catch {
       /* ignore */
     }
@@ -1146,13 +1275,26 @@ async function processUser(
   const inEntryWindow = minDelayToEntry > 0 && minDelayToEntry <= ENTRY_SCHEDULE_MAX_MS + 5000;
   const inPrefetchWindow = minCountdownSec >= WALLET_PREFETCH_MIN_SEC && minCountdownSec <= WALLET_PREFETCH_MAX_SEC;
 
-  // Pre-fetch wallet when countdown 20–60s; never call getWalletBalance when countdown <= 15 (critical path uses cache only)
+  const subHedgingEnabled = !!(settings.subApiKey && settings.subApiSecret);
+
+  // Pre-fetch wallet when countdown 20–60s; never call getWalletBalance when countdown <= 15 (critical path uses cache only). Sub-hedge: also fetch sub balance.
   if (inPrefetchWindow) {
     try {
-      const wallet = await getWalletBalance(apiKey, apiSecret);
+      const [wallet, subWallet] = subHedgingEnabled && settings.subApiKey && settings.subApiSecret
+        ? await Promise.all([
+            getWalletBalance(apiKey, apiSecret),
+            getWalletBalance(settings.subApiKey, settings.subApiSecret),
+          ])
+        : [await getWalletBalance(apiKey, apiSecret), null];
+      const totalEquity = parseFloat(wallet.totalEquity) || 0;
+      const totalAvailableBalance = parseFloat(wallet.totalAvailableBalance) || 0;
+      const subEquity = subWallet ? parseFloat(subWallet.totalEquity) || 0 : undefined;
+      const subAvailableBalance = subWallet ? parseFloat(subWallet.totalAvailableBalance) || 0 : undefined;
       walletCacheByUser.set(userId, {
-        totalEquity: parseFloat(wallet.totalEquity) || 0,
-        totalAvailableBalance: parseFloat(wallet.totalAvailableBalance) || 0,
+        totalEquity,
+        totalAvailableBalance,
+        ...(subEquity !== undefined && { subEquity }),
+        ...(subAvailableBalance !== undefined && { subAvailableBalance }),
       });
     } catch (e) {
       console.error('[autoBot] getWalletBalance (prefetch) failed:', e);
@@ -1167,7 +1309,14 @@ async function processUser(
     if (cache) {
       totalWalletBalance = cache.totalEquity;
       cachedAvailableMargin = cache.totalAvailableBalance;
-      tradeMargin = totalWalletBalance * ((settings.capitalPercent ?? 0) / 100);
+      const capPct = (settings.capitalPercent ?? 0) / 100;
+      if (subHedgingEnabled && cache.subEquity != null) {
+        const minEquity = Math.min(cache.totalEquity, cache.subEquity);
+        tradeMargin = minEquity * capPct;
+        cachedAvailableMargin = Math.min(cache.totalAvailableBalance, cache.subAvailableBalance ?? cache.totalAvailableBalance);
+      } else {
+        tradeMargin = totalWalletBalance * capPct;
+      }
     } else {
       if (debugSkip) console.log('[DEBUG] Trade Skipped Reason: Entry window but no wallet cache (critical path)');
       console.warn('[autoBot] Entry window but no wallet cache; skip to avoid getWalletBalance in critical path');
@@ -1175,11 +1324,27 @@ async function processUser(
     }
   } else {
     try {
+      let mainEquity = 0;
+      let mainAvailable = 0;
       const wallet = await getWalletBalance(apiKey, apiSecret);
-      totalWalletBalance = parseFloat(wallet.totalEquity) || 0;
-      cachedAvailableMargin = parseFloat(wallet.totalAvailableBalance) || 0;
-      tradeMargin = totalWalletBalance * ((settings.capitalPercent ?? 0) / 100);
-      walletCacheByUser.set(userId, { totalEquity: totalWalletBalance, totalAvailableBalance: cachedAvailableMargin });
+      mainEquity = parseFloat(wallet.totalEquity) || 0;
+      mainAvailable = parseFloat(wallet.totalAvailableBalance) || 0;
+      let subEquity: number | null = null;
+      let subAvailable: number | null = null;
+      if (subHedgingEnabled && settings.subApiKey && settings.subApiSecret) {
+        const subWallet = await getWalletBalance(settings.subApiKey, settings.subApiSecret);
+        subEquity = parseFloat(subWallet.totalEquity) || 0;
+        subAvailable = parseFloat(subWallet.totalAvailableBalance) || 0;
+      }
+      totalWalletBalance = mainEquity;
+      cachedAvailableMargin = subEquity != null ? Math.min(mainAvailable, subAvailable ?? mainAvailable) : mainAvailable;
+      const minBalance = subEquity != null ? Math.min(mainEquity, subEquity) : mainEquity;
+      tradeMargin = minBalance * ((settings.capitalPercent ?? 0) / 100);
+      walletCacheByUser.set(userId, {
+        totalEquity: mainEquity,
+        totalAvailableBalance: mainAvailable,
+        ...(subEquity != null && { subEquity, subAvailableBalance: subAvailable ?? 0 }),
+      });
     } catch (e) {
       if (debugSkip) console.log('[DEBUG] Trade Skipped Reason: getWalletBalance failed');
       console.error('[autoBot] getWalletBalance failed:', e);
@@ -1193,8 +1358,34 @@ async function processUser(
       const fundingTimeMs = parseInt(topToken.nextFundingTime, 10) || 0;
       const exactEntryTimeMs = fundingTimeMs - entryOffsetMs;
       const delayMs = exactEntryTimeMs - now;
+      const subEntryOffsetMs = Math.max(0, settings.subEntryOffsetMs ?? 10);
+      const exactSubEntryTimeMs = fundingTimeMs - subEntryOffsetMs;
+      const delaySubMs = exactSubEntryTimeMs - now;
       const cycleKey = entryCycleKey(userId, topToken.symbol, topToken.nextFundingTime);
-      if (!settings.spotHedgingEnabled && delayMs >= ENTRY_SCHEDULE_MIN_MS && delayMs <= ENTRY_SCHEDULE_MAX_MS && !entryTimeoutByCycle.has(cycleKey)) {
+
+      if (subHedgingEnabled && settings.subApiKey && settings.subApiSecret && !entryTimeoutByCycle.has(cycleKey)) {
+        if (processedTokens.has(processedKey(userId, topToken.symbol, topToken.nextFundingTime))) return;
+        if (enteredThisCycle.has(cycleKey)) return;
+        const inRangeMain = delayMs >= ENTRY_SCHEDULE_MIN_MS && delayMs <= ENTRY_SCHEDULE_MAX_MS;
+        const inRangeSub = delaySubMs > 0 && delaySubMs <= ENTRY_SCHEDULE_MAX_MS + 5000;
+        if (inRangeMain || inRangeSub) {
+          const tMain = setTimeout(() => {
+            executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'main').catch((e) =>
+              console.error('[autoBot] executeEntry main failed', e)
+            );
+          }, Math.max(0, delayMs));
+          const tSub = setTimeout(() => {
+            executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'sub').catch((e) =>
+              console.error('[autoBot] executeEntry sub failed', e)
+            );
+          }, Math.max(0, delaySubMs));
+          entryTimeoutByCycle.set(cycleKey, { main: tMain, sub: tSub });
+          console.log(`[autoBot] Sub-hedge entry scheduled: main at ${exactEntryTimeMs} (in ${delayMs}ms), sub at ${exactSubEntryTimeMs} (in ${delaySubMs}ms).`);
+        }
+        return;
+      }
+
+      if (!settings.spotHedgingEnabled && !subHedgingEnabled && delayMs >= ENTRY_SCHEDULE_MIN_MS && delayMs <= ENTRY_SCHEDULE_MAX_MS && !entryTimeoutByCycle.has(cycleKey)) {
         if (processedTokens.has(processedKey(userId, topToken.symbol, topToken.nextFundingTime))) return;
         if (enteredThisCycle.has(cycleKey)) return;
         const t = setTimeout(() => {
@@ -1225,6 +1416,13 @@ async function processUser(
           } catch {
             /* ignore */
           }
+          if (subHedgingEnabled && settings.subApiKey && settings.subApiSecret) {
+            try {
+              await setLeverage(settings.subApiKey, settings.subApiSecret, topToken.symbol, futuresLeverage);
+            } catch {
+              /* ignore */
+            }
+          }
           const side: 'Buy' | 'Sell' = topToken.fundingRate < 0 ? 'Buy' : 'Sell';
           let qtyStep = 0.1;
           let minOrderQty = 0;
@@ -1239,6 +1437,28 @@ async function processUser(
           } catch {
             /* ignore */
           }
+          let fixedQty: number | undefined;
+          if (subHedgingEnabled) {
+            const cache = walletCacheByUser.get(userId);
+            const minEquity = cache && cache.subEquity != null
+              ? Math.min(cache.totalEquity, cache.subEquity)
+              : totalWalletBalance;
+            const tradeMarginPrefetch = minEquity * ((settings.capitalPercent ?? 0) / 100);
+            try {
+              const ob = await getOrderBookDepth(apiKey, apiSecret, topToken.symbol, settings.orderBookDepth ?? 2);
+              const entryPrice = side === 'Buy' ? ob.askPrice : ob.bidPrice;
+              if (Number.isFinite(entryPrice) && entryPrice > 0) {
+                const rawQty = (tradeMarginPrefetch * futuresLeverage) / entryPrice;
+                const step = parseFloat(String(qtyStep)) || 0.1;
+                const stepDecimals = step.toString().includes('.') ? step.toString().split('.')[1]!.length : 0;
+                let q = parseFloat((Math.floor(rawQty / step) * step).toFixed(stepDecimals));
+                if (q > maxOrderQty) q = parseFloat((Math.floor(maxOrderQty / step) * step).toFixed(stepDecimals));
+                if (q >= minOrderQty) fixedQty = q;
+              }
+            } catch {
+              /* ignore */
+            }
+          }
           prepCandidates.push({
             symbol: topToken.symbol,
             nextFundingTime: topToken.nextFundingTime,
@@ -1249,6 +1469,7 @@ async function processUser(
             minOrderQty,
             maxOrderQty,
             tickSize,
+            ...(fixedQty != null && { fixedQty }),
           });
         } catch (err) {
           console.error('Prep Error:', err);
@@ -1258,7 +1479,7 @@ async function processUser(
           const countdownSecPrefetch = Math.floor(topToken.countdownMs / 1000);
           const inWindowPrefetch = countdownSecPrefetch <= entryOffsetSec && countdownSecPrefetch > Math.max(0, entryOffsetSec - 10);
           if (!inWindowPrefetch) return;
-        } else {
+        } else if (!subHedgingEnabled) {
           return;
         }
       }
@@ -1552,9 +1773,15 @@ async function processUser(
       }
     }));
 
-  if (inPrefetchWindow && prepCandidates.length > 0 && !settings.spotHedgingEnabled) {
+  if (inPrefetchWindow && prepCandidates.length > 0 && (!settings.spotHedgingEnabled || subHedgingEnabled)) {
     entryPrepCacheByUser.set(userId, {
-      settings: { orderBookDepth: settings.orderBookDepth, capitalPercent: settings.capitalPercent, maxTrades, entryOffsetMs },
+      settings: {
+        orderBookDepth: settings.orderBookDepth,
+        capitalPercent: settings.capitalPercent,
+        maxTrades,
+        entryOffsetMs,
+        ...(subHedgingEnabled && { subEntryOffsetMs: settings.subEntryOffsetMs ?? 10 }),
+      },
       apiKey,
       apiSecret,
       totalWalletBalance,
@@ -1563,6 +1790,11 @@ async function processUser(
       positionsCount: positions.length,
       maxTrades,
       candidates: prepCandidates,
+      ...(subHedgingEnabled && settings.subApiKey && settings.subApiSecret && {
+        subApiKey: settings.subApiKey,
+        subApiSecret: settings.subApiSecret,
+        subEntryOffsetMs: settings.subEntryOffsetMs ?? 10,
+      }),
     });
   }
 

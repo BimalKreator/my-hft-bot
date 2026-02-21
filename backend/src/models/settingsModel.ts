@@ -20,6 +20,12 @@ export interface BotSettings {
   hedgeTargetPct: number;
   hedgeStoplossPct: number;
   hedgePnlDepth: number;
+  /** Subaccount API key for hedging. */
+  subApiKey: string;
+  /** Subaccount API secret for hedging. */
+  subApiSecret: string;
+  /** Sub-account entry offset in milliseconds (default 10). */
+  subEntryOffsetMs: number;
 }
 
 interface SettingsRow {
@@ -42,6 +48,9 @@ interface SettingsRow {
   hedge_target_pct?: string;
   hedge_stoploss_pct?: string;
   hedge_pnl_depth?: string;
+  sub_api_key?: string | null;
+  sub_api_secret?: string | null;
+  sub_entry_offset_ms?: string | null;
 }
 
 function rowToSettings(row: SettingsRow): BotSettings {
@@ -71,6 +80,9 @@ function rowToSettings(row: SettingsRow): BotSettings {
     hedgeTargetPct: row.hedge_target_pct != null ? parseFloat(row.hedge_target_pct) : 2,
     hedgeStoplossPct: row.hedge_stoploss_pct != null ? parseFloat(row.hedge_stoploss_pct) : 5,
     hedgePnlDepth: row.hedge_pnl_depth != null ? parseInt(row.hedge_pnl_depth, 10) : 1,
+    subApiKey: row.sub_api_key ?? '',
+    subApiSecret: row.sub_api_secret ?? '',
+    subEntryOffsetMs: row.sub_entry_offset_ms != null && row.sub_entry_offset_ms !== '' ? parseInt(row.sub_entry_offset_ms, 10) : 10,
   };
 }
 
@@ -91,6 +103,9 @@ const DEFAULTS: Omit<BotSettings, 'userId'> = {
   hedgeTargetPct: 2,
   hedgeStoplossPct: 5,
   hedgePnlDepth: 1,
+  subApiKey: '',
+  subApiSecret: '',
+  subEntryOffsetMs: 10,
 };
 
 export async function getUsersWithAutoEntryEnabled(): Promise<number[]> {
@@ -104,7 +119,7 @@ export async function getSettings(userId: number): Promise<BotSettings> {
   const result = await query<SettingsRow>(
     `SELECT user_id, auto_entry_enabled, auto_exit_enabled, capital_percent, max_trades, entry_time_sec, entry_offset_ms, exit_time_sec, exit_time_ms, min_funding_rate, leverage,
             sl_pre_funding_enabled, sl_pre_multiplier, sl_post_funding_enabled, order_book_depth, spot_hedging_enabled,
-            hedge_target_pct, hedge_stoploss_pct, hedge_pnl_depth
+            hedge_target_pct, hedge_stoploss_pct, hedge_pnl_depth, sub_api_key, sub_api_secret, sub_entry_offset_ms
      FROM bot_settings WHERE user_id = $1`,
     [userId]
   );
@@ -132,6 +147,9 @@ export interface UpdateSettingsInput {
   hedgeTargetPct?: number;
   hedgeStoplossPct?: number;
   hedgePnlDepth?: number;
+  subApiKey?: string;
+  subApiSecret?: string;
+  subEntryOffsetMs?: number;
 }
 
 export async function updateSettings(
@@ -157,6 +175,9 @@ export async function updateSettings(
     hedgeTargetPct: input.hedgeTargetPct ?? current.hedgeTargetPct,
     hedgeStoplossPct: input.hedgeStoplossPct ?? current.hedgeStoplossPct,
     hedgePnlDepth: input.hedgePnlDepth ?? current.hedgePnlDepth,
+    subApiKey: input.subApiKey !== undefined ? input.subApiKey : current.subApiKey,
+    subApiSecret: input.subApiSecret !== undefined ? input.subApiSecret : current.subApiSecret,
+    subEntryOffsetMs: input.subEntryOffsetMs ?? current.subEntryOffsetMs,
   };
   const depthInt = Math.max(1, Math.min(50, Math.round(merged.orderBookDepth) || 2));
   const exitTimeMsInt = Math.max(0, Math.round(merged.exitTimeMs));
@@ -164,12 +185,10 @@ export async function updateSettings(
   const hedgeTargetNum = Math.max(0, merged.hedgeTargetPct);
   const hedgeStoplossNum = Math.max(0, merged.hedgeStoplossPct);
   const hedgePnlDepthInt = Math.max(1, Math.min(50, Math.round(merged.hedgePnlDepth) || 1));
-  // Schema: add entry_offset_ms if missing:
-  // ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS entry_offset_ms INTEGER;
-  // UPDATE bot_settings SET entry_offset_ms = entry_time_sec * 1000 WHERE entry_offset_ms IS NULL;
+  const subEntryOffsetMsInt = Math.max(0, Math.round(merged.subEntryOffsetMs ?? 10));
   await query(
-    `INSERT INTO bot_settings (user_id, auto_entry_enabled, auto_exit_enabled, capital_percent, max_trades, entry_time_sec, entry_offset_ms, exit_time_sec, exit_time_ms, min_funding_rate, leverage, sl_pre_funding_enabled, sl_pre_multiplier, sl_post_funding_enabled, order_book_depth, spot_hedging_enabled, hedge_target_pct, hedge_stoploss_pct, hedge_pnl_depth)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+    `INSERT INTO bot_settings (user_id, auto_entry_enabled, auto_exit_enabled, capital_percent, max_trades, entry_time_sec, entry_offset_ms, exit_time_sec, exit_time_ms, min_funding_rate, leverage, sl_pre_funding_enabled, sl_pre_multiplier, sl_post_funding_enabled, order_book_depth, spot_hedging_enabled, hedge_target_pct, hedge_stoploss_pct, hedge_pnl_depth, sub_api_key, sub_api_secret, sub_entry_offset_ms)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
      ON CONFLICT (user_id) DO UPDATE SET
        auto_entry_enabled = EXCLUDED.auto_entry_enabled,
        auto_exit_enabled = EXCLUDED.auto_exit_enabled,
@@ -188,7 +207,10 @@ export async function updateSettings(
        spot_hedging_enabled = EXCLUDED.spot_hedging_enabled,
        hedge_target_pct = EXCLUDED.hedge_target_pct,
        hedge_stoploss_pct = EXCLUDED.hedge_stoploss_pct,
-       hedge_pnl_depth = EXCLUDED.hedge_pnl_depth`,
+       hedge_pnl_depth = EXCLUDED.hedge_pnl_depth,
+       sub_api_key = EXCLUDED.sub_api_key,
+       sub_api_secret = EXCLUDED.sub_api_secret,
+       sub_entry_offset_ms = EXCLUDED.sub_entry_offset_ms`,
     [
       userId,
       merged.autoEntryEnabled,
@@ -209,6 +231,9 @@ export async function updateSettings(
       hedgeTargetNum,
       hedgeStoplossNum,
       hedgePnlDepthInt,
+      merged.subApiKey ?? null,
+      merged.subApiSecret ?? null,
+      subEntryOffsetMsInt,
     ]
   );
   return getSettings(userId);

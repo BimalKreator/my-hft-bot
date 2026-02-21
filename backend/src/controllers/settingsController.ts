@@ -13,7 +13,10 @@ export async function getSettingsHandler(
       res.status(401).json({ error: 'Authentication required' });
       return;
     }
-    const settings = await getSettings(userId);
+    let settings = await getSettings(userId);
+    if (settings.subApiSecret) {
+      settings = { ...settings, subApiSecret: '********' };
+    }
     res.json(settings);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to load settings';
@@ -106,7 +109,21 @@ export async function updateSettingsHandler(
       const v = parseInt(hedgePnlDepthRaw, 10);
       if (!Number.isNaN(v) && v >= 1 && v <= 50) input.hedgePnlDepth = v;
     }
-    const settings = await updateSettings(userId, input);
+    if (typeof body.subApiKey === 'string') input.subApiKey = body.subApiKey;
+    if (typeof body.subApiSecret === 'string' && body.subApiSecret !== '********') {
+      input.subApiSecret = body.subApiSecret;
+    }
+    const subEntryOffsetRaw = body.subEntryOffsetMs ?? body.sub_entry_offset_ms;
+    if (typeof subEntryOffsetRaw === 'number' && !Number.isNaN(subEntryOffsetRaw) && subEntryOffsetRaw >= 0) {
+      input.subEntryOffsetMs = Math.round(subEntryOffsetRaw);
+    } else if (typeof subEntryOffsetRaw === 'string') {
+      const parsed = parseInt(subEntryOffsetRaw, 10);
+      if (!Number.isNaN(parsed) && parsed >= 0) input.subEntryOffsetMs = parsed;
+    }
+    let settings = await updateSettings(userId, input);
+    if (settings.subApiSecret) {
+      settings = { ...settings, subApiSecret: '********' };
+    }
     res.json(settings);
   } catch (err) {
     const e = err as Error & { code?: string; detail?: string };
