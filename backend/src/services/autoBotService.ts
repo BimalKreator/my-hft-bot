@@ -981,6 +981,7 @@ async function executeEntry(
   prepData?: ExecuteEntryPrepData
 ): Promise<void> {
   console.log(`[DEBUG] executeEntry TRIGGERED for ${symbol} - Account: ${account ?? 'main'} at ${Date.now()}`);
+  console.log('[DEBUG] PrepData Check:', !!prepData);
   try {
     const cycleKey = entryCycleKey(userId, symbol, nextFundingTime);
     const procKey = processedKey(userId, symbol, nextFundingTime);
@@ -1001,7 +1002,10 @@ async function executeEntry(
     // When prepData is injected, use it only (no cache) so order uses correct qty, leverage, and keys.
     const prep = prepData ? prepData.prep : entryPrepCacheByUser.get(userId);
     const c = prepData ? prepData.candidate : prep?.candidates.find((x) => x.symbol === symbol && x.nextFundingTime === nextFundingTime);
-    if (prepData && (!prep || !c)) return; // strict: require full injected prep when provided
+    if (prepData && (!prep || !c)) {
+      console.log('[ABORT] executeEntry stopped at prepData provided but prep or candidate missing');
+      return;
+    }
     const isSubHedge = account === 'sub' && prep?.subApiKey && prep?.subApiSecret && c?.fixedQty != null;
     const isMainHedge = account !== 'sub' && prep?.subApiKey && prep?.subApiSecret;
 
@@ -1010,6 +1014,7 @@ async function executeEntry(
   if (account === 'sub' && pendingPayload?.sub) {
     const pl = pendingPayload.sub;
     try {
+      console.log('[DEBUG] Sending WS Order to Bybit for', account ?? 'sub');
       const response = await placeLimitOrder(pl.apiKey, pl.apiSecret, pl.symbol, pl.side, pl.qtyStr, pl.priceStr, 'IOC');
       console.log(`[DEBUG] Bybit Response for sub:`, response);
       const mainFilled = mainFilledForSubHedge.get(cycleKey);
@@ -1035,12 +1040,14 @@ async function executeEntry(
       console.error(`[autoBot] executeEntry sub (payload) ${pendingPayload.sub.symbol} failed:`, e);
     }
     pendingOrderPayloadByCycle.delete(cycleKey);
+    console.log('[ABORT] executeEntry stopped at sub payload path completed');
     return;
   }
 
   if (account !== 'sub' && pendingPayload?.main) {
     const pl = pendingPayload.main;
     try {
+      console.log('[DEBUG] Sending WS Order to Bybit for', account ?? 'main');
       const response = await placeLimitOrder(pl.apiKey, pl.apiSecret, pl.symbol, pl.side, pl.qtyStr, pl.priceStr, 'IOC');
       console.log(`[DEBUG] Bybit Response for main:`, response);
       const nextFundingMs = parseInt(nextFundingTime, 10) || 0;
@@ -1066,28 +1073,42 @@ async function executeEntry(
     } else {
       pendingOrderPayloadByCycle.delete(cycleKey);
     }
+    console.log('[ABORT] executeEntry stopped at main payload path completed');
     return;
   }
 
   if (isSubHedge && prep && c) {
-    if (processedTokens.has(procKey)) return;
+    if (processedTokens.has(procKey)) {
+      console.log('[ABORT] executeEntry stopped at sub hedge path already processed (procKey)');
+      return;
+    }
     const tickSize = c.tickSize ?? '0.01';
     const finalQty = c.fixedQty!;
     const qtyStr = formatQtyToStep(finalQty, String(c.qtyStep));
-    if (parseFloat(qtyStr) <= 0) return;
+    if (parseFloat(qtyStr) <= 0) {
+      console.log('[ABORT] executeEntry stopped at sub hedge qty zero or negative');
+      return;
+    }
     try {
       const orderbook = await getOrderbook(c.symbol, ORDERBOOK_SWEEP_LIMIT);
       const sweepPrice = getSweepPrice(orderbook, c.side, finalQty);
-      if (!Number.isFinite(sweepPrice) || sweepPrice <= 0) return;
+      if (!Number.isFinite(sweepPrice) || sweepPrice <= 0) {
+        console.log('[ABORT] executeEntry stopped at sub hedge invalid sweep price');
+        return;
+      }
       const priceStr = formatPriceToTick(sweepPrice, tickSize);
       const subApiKey = prep.subApiKey!;
       const subApiSecret = prep.subApiSecret!;
+      console.log('[DEBUG] Sending WS Order to Bybit for', account ?? 'sub');
       const response = await placeLimitOrder(subApiKey, subApiSecret, c.symbol, c.side, qtyStr, priceStr, 'IOC');
       console.log(`[DEBUG] Bybit Response for sub:`, response);
       await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
       const executions = await getExecutionList(subApiKey, subApiSecret, 'linear', response.orderId);
       const filledQty = executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
-      if (filledQty <= 0) return;
+      if (filledQty <= 0) {
+        console.log('[ABORT] executeEntry stopped at sub hedge no fill');
+        return;
+      }
       const mainFilled = mainFilledForSubHedge.get(cycleKey);
       if (mainFilled) {
         const posKey = positionKey(userId, c.symbol, c.side);
@@ -1109,23 +1130,34 @@ async function executeEntry(
     } catch (e) {
       console.error(`[autoBot] executeEntry sub ${c.symbol} failed:`, e);
     }
+    console.log('[ABORT] executeEntry stopped at sub hedge path completed');
     return;
   }
 
-  if (processedTokens.has(procKey) || enteredThisCycle.has(cycleKey)) return;
+  if (processedTokens.has(procKey) || enteredThisCycle.has(cycleKey)) {
+    console.log('[ABORT] executeEntry stopped at already processed or entered this cycle');
+    return;
+  }
 
   if (prep && c) {
     let entryPrice: number;
     try {
       const obDepth = await getOrderBookDepth(prep.apiKey, prep.apiSecret, c.symbol, prep.settings.orderBookDepth ?? 2);
       entryPrice = c.side === 'Buy' ? obDepth.askPrice : obDepth.bidPrice;
-      if (!Number.isFinite(entryPrice) || entryPrice <= 0) return;
+      if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+        console.log('[ABORT] executeEntry stopped at main prep invalid entry price');
+        return;
+      }
     } catch {
+      console.log('[ABORT] executeEntry stopped at main prep orderbook depth failed');
       return;
     }
     const finalMargin = Math.min(prep.tradeMargin, prep.cachedAvailableMargin);
     const rawQty = (finalMargin * c.safeLeverage) / entryPrice;
-    if (rawQty <= 0) return;
+    if (rawQty <= 0) {
+      console.log('[ABORT] executeEntry stopped at main prep raw qty <= 0');
+      return;
+    }
     const step = c.qtyStep;
     const minQty = c.minOrderQty;
     const maxQty = c.maxOrderQty;
@@ -1133,7 +1165,10 @@ async function executeEntry(
     const stepDecimals = stepStr.includes('.') ? stepStr.split('.')[1]!.length : 0;
     let finalQty = c.fixedQty ?? parseFloat((Math.floor(rawQty / step) * step).toFixed(stepDecimals));
     if (finalQty > maxQty) finalQty = parseFloat((Math.floor(maxQty / step) * step).toFixed(stepDecimals));
-    if (finalQty < minQty) return;
+    if (finalQty < minQty) {
+      console.log('[ABORT] executeEntry stopped at main prep final qty below min order qty');
+      return;
+    }
     if (!isMainHedge) {
       processedTokens.add(procKey);
       enteredThisCycle.add(cycleKey);
@@ -1150,6 +1185,7 @@ async function executeEntry(
           const priceStr = formatPriceToTick(sweepPrice, tickSize);
           const qtyStr = formatQtyToStep(remainingQty, String(c.qtyStep));
           if (parseFloat(qtyStr) <= 0) break;
+          console.log('[DEBUG] Sending WS Order to Bybit for', account ?? 'main');
           const response = await placeLimitOrder(prep.apiKey, prep.apiSecret, c.symbol, c.side, qtyStr, priceStr, 'IOC');
           console.log(`[DEBUG] Bybit Response for main:`, response);
           await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
@@ -1181,25 +1217,41 @@ async function executeEntry(
     } catch {
       /* ignore */
     }
+    console.log('[ABORT] executeEntry stopped at main prep path completed');
     return;
   }
 
   try {
     const settings = await getSettings(userId);
     const keys = await getExchangeKeys(userId, 'Bybit');
-    if (!keys || !settings.autoEntryEnabled) return;
+    if (!keys || !settings.autoEntryEnabled) {
+      console.log('[ABORT] executeEntry stopped at fallback no keys or auto entry disabled');
+      return;
+    }
     const apiKey = decrypt(keys.api_key);
     const apiSecret = decrypt(keys.api_secret);
     const positions = await getPositionList(apiKey, apiSecret, { category: 'linear', settleCoin: 'USDT' });
     const maxTrades = settings.maxTrades ?? 1;
-    if (positions.length >= maxTrades) return;
+    if (positions.length >= maxTrades) {
+      console.log('[ABORT] executeEntry stopped at fallback max trades reached');
+      return;
+    }
     const marketData = await fundingScanner.getFundingData();
     const token = marketData.find((m) => m.symbol === symbol);
-    if (!token || token.nextFundingTime !== nextFundingTime) return;
+    if (!token || token.nextFundingTime !== nextFundingTime) {
+      console.log('[ABORT] executeEntry stopped at fallback token not found or wrong funding time');
+      return;
+    }
     const bannedSet = new Set(await getBannedTokens(userId));
-    if (bannedSet.has(symbol)) return;
+    if (bannedSet.has(symbol)) {
+      console.log('[ABORT] executeEntry stopped at fallback symbol banned');
+      return;
+    }
     const cache = walletCacheByUser.get(userId);
-    if (!cache) return;
+    if (!cache) {
+      console.log('[ABORT] executeEntry stopped at fallback no wallet cache');
+      return;
+    }
     const tradeMargin = cache.totalEquity * ((settings.capitalPercent ?? 0) / 100);
     const cachedAvailableMargin = cache.totalAvailableBalance;
     const obDepth = await getOrderBookDepth(apiKey, apiSecret, symbol, settings.orderBookDepth ?? 2);
@@ -1218,6 +1270,7 @@ async function executeEntry(
     try {
       ls = await getInstrumentLotSize(apiKey, apiSecret, symbol);
     } catch {
+      console.log('[ABORT] executeEntry stopped at fallback getInstrumentLotSize failed');
       return;
     }
     const step = parseFloat(ls.qtyStep) || 0.1;
@@ -1226,7 +1279,10 @@ async function executeEntry(
     const stepDecimals = step.toString().includes('.') ? step.toString().split('.')[1]!.length : 0;
     let finalQty = parseFloat((Math.floor(rawQty / step) * step).toFixed(stepDecimals));
     if (finalQty > maxQty) finalQty = parseFloat((Math.floor(maxQty / step) * step).toFixed(stepDecimals));
-    if (finalQty < minQty) return;
+    if (finalQty < minQty) {
+      console.log('[ABORT] executeEntry stopped at fallback final qty below min');
+      return;
+    }
     processedTokens.add(procKey);
     enteredThisCycle.add(cycleKey);
     let remainingQty = finalQty;
@@ -1239,6 +1295,7 @@ async function executeEntry(
         const priceStr = formatPriceToTick(sweepPrice, ls.tickSize ?? '0.01');
         const qtyStr = formatQtyToStep(remainingQty, ls.qtyStep);
         if (parseFloat(qtyStr) <= 0) break;
+        console.log('[DEBUG] Sending WS Order to Bybit for', account ?? 'main');
         const response = await placeLimitOrder(apiKey, apiSecret, symbol, side, qtyStr, priceStr, 'IOC');
         console.log(`[DEBUG] Bybit Response for main:`, response);
         await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
