@@ -1264,7 +1264,6 @@ async function processUser(
       const spotTag = settings.spotHedgingEnabled ? ' [SPOT]' : '';
       console.log(`[autoBot] ${topToken.symbol}${spotTag} - Countdown: ${countdownSec}s | Base Capital: $${totalWalletBalance.toFixed(2)} | Target Margin: $${tradeMargin.toFixed(2)}`);
 
-      const cycleKey = entryCycleKey(userId, topToken.symbol, topToken.nextFundingTime);
       if (enteredThisCycle.has(cycleKey)) {
         if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: Already entered this cycle', 'symbol:', topToken.symbol);
         return;
@@ -1408,7 +1407,7 @@ async function processUser(
           const minQty = parseFloat(minOrderQty) || 0;
           const maxQty = parseFloat(maxMktOrderQty || maxOrderQty) || 999999;
           const stepStr = step.toString();
-          const stepDecimals = stepStr.includes('.') ? stepStr.split('.')[1].length : 0;
+          const stepDecimals = stepStr.includes('.') ? stepStr.split('.')[1]!.length : 0;
           finalQty = parseFloat((Math.floor(rawQty / step) * step).toFixed(stepDecimals));
           if (finalQty > maxQty) {
             finalQty = parseFloat((Math.floor(maxQty / step) * step).toFixed(stepDecimals));

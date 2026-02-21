@@ -1,3 +1,4 @@
+import https from 'https';
 import axios from 'axios';
 import CryptoJS from 'crypto-js';
 import { RestClientV5, WebsocketClient } from 'bybit-api';
@@ -8,13 +9,22 @@ const BASE_URL = process.env.BYBIT_TESTNET === 'true'
 const RECV_WINDOW = '5000';
 const testnet = process.env.BYBIT_TESTNET === 'true';
 
+/** Persistent HTTPS agent for connection reuse and lower latency to Bybit. */
+const keepAliveAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 10000 });
+
+/** Axios instance using the keep-alive agent for direct Bybit REST calls (e.g. wallet-balance). */
+const axiosBybit = axios.create({ httpsAgent: keepAliveAgent });
+
+/** Network options passed to RestClientV5 so all SDK requests use the same agent. */
+const restNetworkOptions = { httpsAgent: keepAliveAgent };
+
 function getClient(apiKey: string, apiSecret: string): RestClientV5 {
-  return new RestClientV5({ key: apiKey, secret: apiSecret, testnet });
+  return new RestClientV5({ key: apiKey, secret: apiSecret, testnet }, restNetworkOptions);
 }
 
 /** Public REST client for market data (no auth). */
 function getPublicClient(): RestClientV5 {
-  return new RestClientV5({ testnet });
+  return new RestClientV5({ testnet }, restNetworkOptions);
 }
 
 const INSTRUMENTS_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -93,7 +103,7 @@ export async function getWalletBalance(
   const paramStr = timestamp + apiKey + RECV_WINDOW + queryString;
   const signature = sign(apiSecret, paramStr);
 
-  const { data } = await axios.get(
+  const { data } = await axiosBybit.get(
     `${BASE_URL}/v5/account/wallet-balance?${queryString}`,
     {
       headers: {
@@ -148,7 +158,7 @@ export async function getUsdtWalletDetails(
     const paramStr = timestamp + apiKey + RECV_WINDOW + queryString;
     const signature = sign(apiSecret, paramStr);
 
-    const { data } = await axios.get(`${BASE_URL}/v5/account/wallet-balance?${queryString}`, {
+    const { data } = await axiosBybit.get(`${BASE_URL}/v5/account/wallet-balance?${queryString}`, {
       headers: {
         'X-BAPI-API-KEY': apiKey,
         'X-BAPI-TIMESTAMP': timestamp,
