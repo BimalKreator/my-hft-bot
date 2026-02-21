@@ -59,7 +59,13 @@ async function submitOrderWs(
   const ws = getWsClient(apiKey, apiSecret);
   await ws.connectWSAPI();
   const res = await ws.sendWSAPIRequest(WS_KEY_MAP.v5PrivateTrade, 'order.create', orderParams);
-  const data = res as { retCode: number; retMsg?: string; data?: { orderId: string; orderLinkId: string } };
+  const data = res as {
+    retCode: number;
+    retMsg?: string;
+    data?: { orderId: string; orderLinkId: string };
+    header?: { Timenow?: string };
+    time?: number;
+  };
   if (data.retCode !== 0) {
     throw new Error(data.retMsg ?? 'WebSocket order.create failed');
   }
@@ -67,6 +73,8 @@ async function submitOrderWs(
   if (!result?.orderId) {
     throw new Error('WebSocket order response missing orderId');
   }
+  const bybitTime = data.header?.Timenow ?? data.time ?? 'N/A';
+  console.log(`[DEBUG WS SUCCESS] Order ${orderParams.symbol} Placed. Local Time: ${Date.now()} | Bybit Time: ${bybitTime}`, res);
   return { orderId: result.orderId, orderLinkId: result.orderLinkId ?? '' };
 }
 
@@ -77,6 +85,15 @@ function getClient(apiKey: string, apiSecret: string): RestClientV5 {
 /** Public REST client for market data (no auth). */
 function getPublicClient(): RestClientV5 {
   return new RestClientV5({ testnet }, restNetworkOptions);
+}
+
+/**
+ * Warm up the WebSocket Private Trade connection for the given credentials so the first order
+ * does not pay connection/authentication latency. Call at bot startup for each user with auto entry.
+ */
+export async function warmupWsConnection(apiKey: string, apiSecret: string): Promise<void> {
+  const ws = getWsClient(apiKey, apiSecret);
+  await ws.connectWSAPI();
 }
 
 const INSTRUMENTS_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour

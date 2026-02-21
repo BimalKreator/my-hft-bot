@@ -25,6 +25,7 @@ import {
   startExecutionStream,
   getDepthPrice,
   calculateUnrealizedPnLByDepth,
+  warmupWsConnection,
 } from './bybitService.js';
 import type { OrderbookResult } from './bybitService.js';
 import { FundingScanner } from './scannerService.js';
@@ -428,6 +429,22 @@ export function startMonitoring(): void {
   syncExecutionStreams().then(() => {
     setInterval(syncExecutionStreams, 60_000);
   }).catch((e) => console.error('[autoBot] syncExecutionStreams failed:', e));
+  warmupWsConnections().catch((e) => console.error('[autoBot] warmupWsConnections failed:', e));
+}
+
+/** Warm up WebSocket Private Trade connections for all users with auto entry so first order has minimal latency. */
+async function warmupWsConnections(): Promise<void> {
+  const userIds = await getUsersWithAutoEntryEnabled();
+  for (const userId of userIds) {
+    try {
+      const keys = await getExchangeKeys(userId, 'Bybit');
+      if (!keys) continue;
+      await warmupWsConnection(decrypt(keys.api_key), decrypt(keys.api_secret));
+      console.log(`[autoBot] WS warmup done for user ${userId}`);
+    } catch (e) {
+      console.warn(`[autoBot] WS warmup failed for user ${userId}:`, e);
+    }
+  }
 }
 
 /** Run entry tick; when countdown <= 15s schedule next in 500ms, else 5s. */
