@@ -19,7 +19,7 @@ interface BotSettings {
   autoExitEnabled: boolean;
   capitalPercent: number;
   maxTrades: number;
-  entryTimeSec: number;
+  entryOffsetMs: number;
   exitTimeMs: number;
   leverage: number;
   orderBookDepth: number;
@@ -37,7 +37,7 @@ const defaultSettings: Omit<BotSettings, 'userId'> = {
   autoExitEnabled: false,
   capitalPercent: 10,
   maxTrades: 5,
-  entryTimeSec: 300,
+  entryOffsetMs: 300000,
   exitTimeMs: 3600000,
   leverage: 5,
   orderBookDepth: 2,
@@ -94,7 +94,7 @@ export default function Settings() {
         autoExitEnabled: data.autoExitEnabled ?? false,
         capitalPercent: Number(data.capitalPercent) ?? 10,
         maxTrades: Number(data.maxTrades) ?? 5,
-        entryTimeSec: Number(data.entryTimeSec) ?? 300,
+        entryOffsetMs: Number(data.entryOffsetMs ?? data.entry_offset_ms) ?? 300000,
         exitTimeMs: Number(data.exitTimeMs) ?? 3600000,
         leverage: Number(data.leverage) ?? 5,
         orderBookDepth: Math.max(1, Math.min(50, Number(data.orderBookDepth) || 2)),
@@ -145,7 +145,7 @@ export default function Settings() {
           autoExitEnabled: data.autoExitEnabled ?? settings.autoExitEnabled,
           capitalPercent: Number(data.capitalPercent) ?? settings.capitalPercent,
           maxTrades: Number(data.maxTrades) ?? settings.maxTrades,
-          entryTimeSec: Number(data.entryTimeSec) ?? settings.entryTimeSec,
+          entryOffsetMs: Number(data.entryOffsetMs ?? data.entry_offset_ms) ?? settings.entryOffsetMs,
           exitTimeMs: Number(data.exitTimeMs) ?? settings.exitTimeMs,
           leverage: Number(data.leverage) ?? settings.leverage,
           orderBookDepth: Number(data.orderBookDepth) ?? settings.orderBookDepth,
@@ -171,7 +171,7 @@ export default function Settings() {
       autoExitEnabled: Boolean(settings.autoExitEnabled),
       capitalPercent: Number(settings.capitalPercent),
       maxTrades: Number(settings.maxTrades),
-      entryTimeSec: Number(settings.entryTimeSec),
+      entryOffsetMs: Math.round(Number(settings.entryOffsetMs)),
       exitTimeMs: Number(settings.exitTimeMs),
       leverage: Number(settings.leverage),
       orderBookDepth: Math.max(1, Math.min(50, Number(settings.orderBookDepth) || 2)),
@@ -489,27 +489,28 @@ export default function Settings() {
             />
           </div>
 
-          {/* Entry Time (Seconds) */}
+          {/* Entry Time Offset (Milliseconds) — e.g. 500 = 0.5s before funding */}
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-2">
-              Entry Time (Seconds)
+              Entry Time Offset (Milliseconds)
             </label>
             <input
               type="number"
-              min={1}
+              min={0}
               step={1}
-              value={settings.entryTimeSec}
+              value={settings.entryOffsetMs}
               onChange={(e) => {
                 const v = parseInt(e.target.value, 10);
-                if (!Number.isNaN(v)) {
-                  setSettings((s) => s ? { ...s, entryTimeSec: v } : s);
-                  debouncedSave({ entryTimeSec: Number(v) });
+                if (!Number.isNaN(v) && v >= 0) {
+                  setSettings((s) => s ? { ...s, entryOffsetMs: v } : s);
+                  debouncedSave({ entryOffsetMs: v });
                 }
               }}
               className="w-full rounded-lg border bg-black/50 px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-[#007BFF]"
               style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
-              placeholder="e.g. 120"
+              placeholder="e.g. 500 for 0.5s before funding"
             />
+            <p className="text-xs text-gray-500 mt-1">How many ms before funding to place entry (e.g. 500 = 0.5s before)</p>
           </div>
 
           {/* Exit Time (Milliseconds) — delay after funding settlement before closing position */}

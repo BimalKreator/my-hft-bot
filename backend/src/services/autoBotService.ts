@@ -44,6 +44,9 @@ const EXIT_INTERVAL_MS = 2_000; // Fallback if WebSocket settlement event doesn'
 const WALLET_PREFETCH_MIN_SEC = 20;
 const WALLET_PREFETCH_MAX_SEC = 60;
 const CRITICAL_COUNTDOWN_SEC = 15; // below this: use cache only, no DB/heavy API except orderbook + place order
+/** Schedule precise entry timeout when we are this many ms before exact entry time (5–10s window). */
+const ENTRY_SCHEDULE_MIN_MS = 5_000;
+const ENTRY_SCHEDULE_MAX_MS = 10_000;
 
 /** Cached wallet when countdown was 20–60s; used in entry window so we never call getWalletBalance when countdown <= 15. */
 const walletCacheByUser = new Map<number, { totalEquity: number; totalAvailableBalance: number }>();
@@ -61,7 +64,7 @@ interface EntryPrepCandidate {
   tickSize: string;
 }
 interface EntryPrep {
-  settings: { orderBookDepth?: number; capitalPercent?: number; maxTrades: number; entryTimeSec: number };
+  settings: { orderBookDepth?: number; capitalPercent?: number; maxTrades: number; entryOffsetMs: number };
   apiKey: string;
   apiSecret: string;
   totalWalletBalance: number;
@@ -92,6 +95,8 @@ const lockedFundingRates: Record<string, number> = {};
 const enteredThisCycle = new Set<string>();
 /** Retry prevention: once we attempt order for this key, do not retry even if order fails. */
 const processedTokens = new Set<string>();
+/** Precise entry timeouts: key = entryCycleKey(userId, symbol, nextFundingTime). Cleared on mock cancel or cycle reset. */
+const entryTimeoutByCycle = new Map<string, ReturnType<typeof setTimeout>>();
 /** Track funding time per (userId, symbol, side) for auto exit: close at fundingTime + exitTimeMs. */
 const positionFundingTime = new Map<string, number>();
 
@@ -452,12 +457,14 @@ export function triggerManualMock(): void {
 }
 
 /**
- * Cancel manual mock: reset to normal sync. No settlement event will fire; any open mock position stays until next real settlement or manual exit.
+ * Cancel manual mock: reset to normal sync. Clear any scheduled entry timeouts to avoid double entries.
  */
 export function cancelManualMock(): void {
   isManualMockActive = false;
   manualMockFundingTimeMs = null;
   manualMockEndMs = null;
+  for (const [, t] of entryTimeoutByCycle) clearTimeout(t);
+  entryTimeoutByCycle.clear();
   console.log('[autoBot] Manual mock cancelled; returning to live sync.');
 }
 
@@ -548,6 +555,15 @@ async function runTick(): Promise<number> {
         }
       } catch (err) {
         console.error(`[autoBot] User ${userId} error:`, err);
+      }
+    }
+    for (const [key, t] of entryTimeoutByCycle.entries()) {
+      const parts = key.split('_');
+      const nextFundingTimeStr = parts.length >= 3 ? parts[parts.length - 1]! : '';
+      const nextMs = parseInt(nextFundingTimeStr, 10) || 0;
+      if (nextMs > 0 && now > nextMs + 60_000) {
+        clearTimeout(t);
+        entryTimeoutByCycle.delete(key);
       }
     }
     return minCountdownSec;
@@ -816,8 +832,151 @@ async function monitorExits(): Promise<void> {
 }
 
 /**
- * Critical path when countdown <= 15s: no DB, no getWalletBalance, no getInstrumentDetails, no getPositionList.
- * IOC limit orderbook sweep for entry. Uses entryPrepCacheByUser and walletCacheByUser.
+ * Run entry at exact timestamp (called from precise setTimeout). Uses prep cache when available; otherwise full flow.
+ */
+async function executeEntry(userId: number, symbol: string, nextFundingTime: string): Promise<void> {
+  const cycleKey = entryCycleKey(userId, symbol, nextFundingTime);
+  const procKey = processedKey(userId, symbol, nextFundingTime);
+  const existing = entryTimeoutByCycle.get(cycleKey);
+  if (existing) {
+    clearTimeout(existing);
+    entryTimeoutByCycle.delete(cycleKey);
+  }
+  if (processedTokens.has(procKey) || enteredThisCycle.has(cycleKey)) return;
+
+  const prep = entryPrepCacheByUser.get(userId);
+  const c = prep?.candidates.find((x) => x.symbol === symbol && x.nextFundingTime === nextFundingTime);
+  if (prep && c) {
+    if (prep.positionsCount >= prep.maxTrades) return;
+    let entryPrice: number;
+    try {
+      const obDepth = await getOrderBookDepth(prep.apiKey, prep.apiSecret, c.symbol, prep.settings.orderBookDepth ?? 2);
+      entryPrice = c.side === 'Buy' ? obDepth.askPrice : obDepth.bidPrice;
+      if (!Number.isFinite(entryPrice) || entryPrice <= 0) return;
+    } catch {
+      return;
+    }
+    const finalMargin = Math.min(prep.tradeMargin, prep.cachedAvailableMargin);
+    const rawQty = (finalMargin * c.safeLeverage) / entryPrice;
+    if (rawQty <= 0) return;
+    const step = c.qtyStep;
+    const minQty = c.minOrderQty;
+    const maxQty = c.maxOrderQty;
+    const stepStr = step.toString();
+    const stepDecimals = stepStr.includes('.') ? stepStr.split('.')[1]!.length : 0;
+    let finalQty = parseFloat((Math.floor(rawQty / step) * step).toFixed(stepDecimals));
+    if (finalQty > maxQty) finalQty = parseFloat((Math.floor(maxQty / step) * step).toFixed(stepDecimals));
+    if (finalQty < minQty) return;
+    processedTokens.add(procKey);
+    enteredThisCycle.add(cycleKey);
+    try {
+      let remainingQty = finalQty;
+      let retries = 0;
+      const tickSize = c.tickSize ?? '0.01';
+      while (remainingQty > 0 && retries < MAX_IOC_RETRIES) {
+        try {
+          const orderbook = await getOrderbook(c.symbol, ORDERBOOK_SWEEP_LIMIT);
+          const sweepPrice = getSweepPrice(orderbook, c.side, remainingQty);
+          if (!Number.isFinite(sweepPrice) || sweepPrice <= 0) break;
+          const priceStr = formatPriceToTick(sweepPrice, tickSize);
+          const qtyStr = formatQtyToStep(remainingQty, String(c.qtyStep));
+          if (parseFloat(qtyStr) <= 0) break;
+          const { orderId } = await placeLimitOrder(prep.apiKey, prep.apiSecret, c.symbol, c.side, qtyStr, priceStr, 'IOC');
+          await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
+          const executions = await getExecutionList(prep.apiKey, prep.apiSecret, 'linear', orderId);
+          const filledQty = executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
+          remainingQty -= filledQty;
+          if (remainingQty <= 0) break;
+        } catch (e) {
+          console.error(`[autoBot] executeEntry ${c.symbol} orderbook/order failed:`, e);
+        }
+        retries++;
+        await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
+      }
+      const nextFundingMs = parseInt(c.nextFundingTime, 10) || 0;
+      positionFundingTime.set(positionKey(userId, c.symbol, c.side), nextFundingMs);
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
+
+  try {
+    const settings = await getSettings(userId);
+    const keys = await getExchangeKeys(userId, 'Bybit');
+    if (!keys || !settings.autoEntryEnabled) return;
+    const apiKey = decrypt(keys.api_key);
+    const apiSecret = decrypt(keys.api_secret);
+    const positions = await getPositionList(apiKey, apiSecret, { category: 'linear', settleCoin: 'USDT' });
+    const maxTrades = settings.maxTrades ?? 1;
+    if (positions.length >= maxTrades) return;
+    const marketData = await fundingScanner.getFundingData();
+    const token = marketData.find((m) => m.symbol === symbol);
+    if (!token || token.nextFundingTime !== nextFundingTime) return;
+    const bannedSet = new Set(await getBannedTokens(userId));
+    if (bannedSet.has(symbol)) return;
+    const cache = walletCacheByUser.get(userId);
+    if (!cache) return;
+    const tradeMargin = cache.totalEquity * ((settings.capitalPercent ?? 0) / 100);
+    const cachedAvailableMargin = cache.totalAvailableBalance;
+    const obDepth = await getOrderBookDepth(apiKey, apiSecret, symbol, settings.orderBookDepth ?? 2);
+    const side: 'Buy' | 'Sell' = token.fundingRate < 0 ? 'Buy' : 'Sell';
+    const entryPrice = side === 'Buy' ? obDepth.askPrice : obDepth.bidPrice;
+    const finalMargin = Math.min(tradeMargin, cachedAvailableMargin);
+    let safeLeverage = settings.leverage ?? 5;
+    try {
+      const details = await getInstrumentDetails(symbol);
+      safeLeverage = Math.min(safeLeverage, parseFloat(details.maxLeverage) || safeLeverage);
+    } catch {
+      /* ignore */
+    }
+    const rawQty = (finalMargin * safeLeverage) / entryPrice;
+    let ls: { qtyStep: string; minOrderQty: string; maxOrderQty: string; maxMktOrderQty?: string; tickSize: string };
+    try {
+      ls = await getInstrumentLotSize(apiKey, apiSecret, symbol);
+    } catch {
+      return;
+    }
+    const step = parseFloat(ls.qtyStep) || 0.1;
+    const minQty = parseFloat(ls.minOrderQty) || 0;
+    const maxQty = parseFloat(ls.maxMktOrderQty || ls.maxOrderQty) || 999999;
+    const stepDecimals = step.toString().includes('.') ? step.toString().split('.')[1]!.length : 0;
+    let finalQty = parseFloat((Math.floor(rawQty / step) * step).toFixed(stepDecimals));
+    if (finalQty > maxQty) finalQty = parseFloat((Math.floor(maxQty / step) * step).toFixed(stepDecimals));
+    if (finalQty < minQty) return;
+    processedTokens.add(procKey);
+    enteredThisCycle.add(cycleKey);
+    let remainingQty = finalQty;
+    let retries = 0;
+    while (remainingQty > 0 && retries < MAX_IOC_RETRIES) {
+      try {
+        const orderbook = await getOrderbook(symbol, ORDERBOOK_SWEEP_LIMIT);
+        const sweepPrice = getSweepPrice(orderbook, side, remainingQty);
+        if (!Number.isFinite(sweepPrice) || sweepPrice <= 0) break;
+        const priceStr = formatPriceToTick(sweepPrice, ls.tickSize ?? '0.01');
+        const qtyStr = formatQtyToStep(remainingQty, ls.qtyStep);
+        if (parseFloat(qtyStr) <= 0) break;
+        const { orderId } = await placeLimitOrder(apiKey, apiSecret, symbol, side, qtyStr, priceStr, 'IOC');
+        await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
+        const executions = await getExecutionList(apiKey, apiSecret, 'linear', orderId);
+        const filledQty = executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
+        remainingQty -= filledQty;
+        if (remainingQty <= 0) break;
+      } catch (e) {
+        console.error(`[autoBot] executeEntry full ${symbol} failed:`, e);
+      }
+      retries++;
+      await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
+    }
+    const nextFundingMs = parseInt(nextFundingTime, 10) || 0;
+    positionFundingTime.set(positionKey(userId, symbol, side), nextFundingMs);
+  } catch (e) {
+    console.error(`[autoBot] executeEntry ${symbol} failed:`, e);
+  }
+}
+
+/**
+ * Critical path when countdown <= 15s: schedule precise entry timeout when 5–10s before exact entry time; no immediate order in loop.
  */
 async function processUserCritical(
   userId: number,
@@ -828,79 +987,30 @@ async function processUserCritical(
   if (!prep || prep.candidates.length === 0) return;
   if (prep.positionsCount >= prep.maxTrades) return;
 
-  const entryTimeSec = prep.settings.entryTimeSec ?? 300;
+  const entryOffsetMs = Math.max(0, prep.settings.entryOffsetMs ?? 300000);
   const marketBySymbol = new Map(marketData.map((m) => [m.symbol, m]));
 
   for (const c of prep.candidates) {
     const token = marketBySymbol.get(c.symbol);
     if (!token) continue;
 
-    const countdownSec = Math.floor(token.countdownMs / 1000);
-    const inWindow = countdownSec <= entryTimeSec && countdownSec > entryTimeSec - 10;
-    if (!inWindow) continue;
+    const fundingTimeMs = parseInt(c.nextFundingTime, 10) || now + token.countdownMs;
+    const exactEntryTimeMs = fundingTimeMs - entryOffsetMs;
+    const delayMs = exactEntryTimeMs - now;
+    if (delayMs < ENTRY_SCHEDULE_MIN_MS || delayMs > ENTRY_SCHEDULE_MAX_MS) continue;
 
-    const procKey = processedKey(userId, c.symbol, c.nextFundingTime);
-    if (processedTokens.has(procKey)) continue;
     const cycleKey = entryCycleKey(userId, c.symbol, c.nextFundingTime);
+    if (entryTimeoutByCycle.has(cycleKey)) continue;
+    if (processedTokens.has(processedKey(userId, c.symbol, c.nextFundingTime))) continue;
     if (enteredThisCycle.has(cycleKey)) continue;
 
-    let entryPrice: number;
-    try {
-      const obDepth = await getOrderBookDepth(prep.apiKey, prep.apiSecret, c.symbol, prep.settings.orderBookDepth ?? 2);
-      entryPrice = c.side === 'Buy' ? obDepth.askPrice : obDepth.bidPrice;
-      if (!Number.isFinite(entryPrice) || entryPrice <= 0) continue;
-    } catch {
-      continue;
-    }
-
-    const finalMargin = Math.min(prep.tradeMargin, prep.cachedAvailableMargin);
-    const rawQty = (finalMargin * c.safeLeverage) / entryPrice;
-    if (rawQty <= 0) continue;
-
-    const step = c.qtyStep;
-    const minQty = c.minOrderQty;
-    const maxQty = c.maxOrderQty;
-    const stepStr = step.toString();
-    const stepDecimals = stepStr.includes('.') ? stepStr.split('.')[1]!.length : 0;
-    let finalQty = parseFloat((Math.floor(rawQty / step) * step).toFixed(stepDecimals));
-    if (finalQty > maxQty) finalQty = parseFloat((Math.floor(maxQty / step) * step).toFixed(stepDecimals));
-    if (finalQty < minQty) continue;
-
-    processedTokens.add(procKey);
-    enteredThisCycle.add(cycleKey);
-
-    try {
-      let remainingQty = finalQty;
-      let retries = 0;
-      const tickSize = c.tickSize ?? '0.01';
-
-      while (remainingQty > 0 && retries < MAX_IOC_RETRIES) {
-        try {
-          const orderbook = await getOrderbook(c.symbol, ORDERBOOK_SWEEP_LIMIT);
-          const sweepPrice = getSweepPrice(orderbook, c.side, remainingQty);
-          if (!Number.isFinite(sweepPrice) || sweepPrice <= 0) break;
-          const priceStr = formatPriceToTick(sweepPrice, tickSize);
-          const qtyStr = formatQtyToStep(remainingQty, String(c.qtyStep));
-          if (parseFloat(qtyStr) <= 0) break;
-
-          const { orderId } = await placeLimitOrder(prep.apiKey, prep.apiSecret, c.symbol, c.side, qtyStr, priceStr, 'IOC');
-          await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
-          const executions = await getExecutionList(prep.apiKey, prep.apiSecret, 'linear', orderId);
-          const filledQty = executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
-          remainingQty -= filledQty;
-          if (remainingQty <= 0) break;
-        } catch (e) {
-          console.error(`[autoBot] processUserCritical ${c.symbol} orderbook/order/execution failed:`, e);
-        }
-        retries++;
-        await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
-      }
-
-      const nextFundingMs = parseInt(c.nextFundingTime, 10) || 0;
-      positionFundingTime.set(positionKey(userId, c.symbol, c.side), nextFundingMs);
-    } catch {
-      /* ignore */
-    }
+    const t = setTimeout(() => {
+      executeEntry(userId, c.symbol, c.nextFundingTime).catch((e) =>
+        console.error('[autoBot] executeEntry failed', e)
+      );
+    }, delayMs);
+    entryTimeoutByCycle.set(cycleKey, t);
+    console.log(`[autoBot] Entry scheduled exactly at ${exactEntryTimeMs} (in ${delayMs}ms).`);
   }
 }
 
@@ -1007,10 +1117,16 @@ async function processUser(
     return;
   }
 
-  const entryTimeSec = settings.entryTimeSec ?? 300;
+  const entryOffsetMs = Math.max(0, settings.entryOffsetMs ?? 300000);
   const minCountdownSec =
     Math.min(...candidates.map((c) => Math.floor(c.countdownMs / 1000))) ?? 9999;
-  const inEntryWindow = minCountdownSec <= entryTimeSec && minCountdownSec > entryTimeSec - 10;
+  const minDelayToEntry = Math.min(
+    ...candidates.map((c) => {
+      const fundingTimeMs = parseInt(c.nextFundingTime, 10) || 0;
+      return fundingTimeMs - entryOffsetMs - now;
+    })
+  );
+  const inEntryWindow = minDelayToEntry > 0 && minDelayToEntry <= ENTRY_SCHEDULE_MAX_MS + 5000;
   const inPrefetchWindow = minCountdownSec >= WALLET_PREFETCH_MIN_SEC && minCountdownSec <= WALLET_PREFETCH_MAX_SEC;
 
   // Pre-fetch wallet when countdown 20–60s; never call getWalletBalance when countdown <= 15 (critical path uses cache only)
@@ -1057,6 +1173,22 @@ async function processUser(
   const prepCandidates: EntryPrepCandidate[] = [];
   await Promise.all(
     candidates.map(async (topToken) => {
+      const fundingTimeMs = parseInt(topToken.nextFundingTime, 10) || 0;
+      const exactEntryTimeMs = fundingTimeMs - entryOffsetMs;
+      const delayMs = exactEntryTimeMs - now;
+      const cycleKey = entryCycleKey(userId, topToken.symbol, topToken.nextFundingTime);
+      if (!settings.spotHedgingEnabled && delayMs >= ENTRY_SCHEDULE_MIN_MS && delayMs <= ENTRY_SCHEDULE_MAX_MS && !entryTimeoutByCycle.has(cycleKey)) {
+        if (processedTokens.has(processedKey(userId, topToken.symbol, topToken.nextFundingTime)) return;
+        if (enteredThisCycle.has(cycleKey)) return;
+        const t = setTimeout(() => {
+          executeEntry(userId, topToken.symbol, topToken.nextFundingTime).catch((e) =>
+            console.error('[autoBot] executeEntry failed', e)
+          );
+        }, delayMs);
+        entryTimeoutByCycle.set(cycleKey, t);
+        console.log(`[autoBot] Entry scheduled exactly at ${exactEntryTimeMs} (in ${delayMs}ms).`);
+        return;
+      }
       if (inPrefetchWindow) {
         try {
           const userLeverage = settings.leverage ?? 5;
@@ -1105,8 +1237,9 @@ async function processUser(
           console.error('Prep Error:', err);
         }
         if (settings.spotHedgingEnabled) {
+          const entryOffsetSec = Math.floor(entryOffsetMs / 1000);
           const countdownSecPrefetch = Math.floor(topToken.countdownMs / 1000);
-          const inWindowPrefetch = countdownSecPrefetch <= entryTimeSec && countdownSecPrefetch > entryTimeSec - 10;
+          const inWindowPrefetch = countdownSecPrefetch <= entryOffsetSec && countdownSecPrefetch > Math.max(0, entryOffsetSec - 10);
           if (!inWindowPrefetch) return;
         } else {
           return;
@@ -1137,9 +1270,10 @@ async function processUser(
         return;
       }
 
-      const inWindow = countdownSec <= entryTimeSec && countdownSec > entryTimeSec - 10;
+      const entryOffsetSec = Math.floor(entryOffsetMs / 1000);
+      const inWindow = countdownSec <= entryOffsetSec && countdownSec > Math.max(0, entryOffsetSec - 10);
       if (!inWindow) {
-        if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: Countdown not in entry window', 'symbol:', topToken.symbol, 'countdown:', countdownSec, 'window:', entryTimeSec - 10, '-', entryTimeSec);
+        if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: Countdown not in entry window', 'symbol:', topToken.symbol, 'countdown:', countdownSec, 'window:', Math.max(0, entryOffsetSec - 10), '-', entryOffsetSec);
         return;
       }
 
@@ -1404,7 +1538,7 @@ async function processUser(
 
   if (inPrefetchWindow && prepCandidates.length > 0 && !settings.spotHedgingEnabled) {
     entryPrepCacheByUser.set(userId, {
-      settings: { orderBookDepth: settings.orderBookDepth, capitalPercent: settings.capitalPercent, maxTrades, entryTimeSec },
+      settings: { orderBookDepth: settings.orderBookDepth, capitalPercent: settings.capitalPercent, maxTrades, entryOffsetMs },
       apiKey,
       apiSecret,
       totalWalletBalance,

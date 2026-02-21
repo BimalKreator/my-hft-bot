@@ -42,8 +42,12 @@ export async function updateSettingsHandler(
     if (typeof body.maxTrades === 'number' && !Number.isNaN(body.maxTrades)) {
       input.maxTrades = body.maxTrades;
     }
-    if (typeof body.entryTimeSec === 'number' && !Number.isNaN(body.entryTimeSec)) {
-      input.entryTimeSec = body.entryTimeSec;
+    const entryOffsetRaw = body.entryOffsetMs ?? body.entry_offset_ms;
+    if (typeof entryOffsetRaw === 'number' && !Number.isNaN(entryOffsetRaw) && entryOffsetRaw >= 0) {
+      input.entryOffsetMs = Math.round(entryOffsetRaw);
+    } else if (typeof entryOffsetRaw === 'string') {
+      const parsed = parseInt(entryOffsetRaw, 10);
+      if (!Number.isNaN(parsed) && parsed >= 0) input.entryOffsetMs = parsed;
     }
     const exitTimeMsRaw = body.exitTimeMs ?? body.exit_time_ms;
     if (typeof exitTimeMsRaw === 'number' && !Number.isNaN(exitTimeMsRaw) && exitTimeMsRaw >= 0) {

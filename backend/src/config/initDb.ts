@@ -105,6 +105,16 @@ async function initDb() {
     const e = err as { code?: string };
     if (e.code !== '42701') console.error('Error adding hedge_pnl_depth:', err);
   }
+  try {
+    await client.query('ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS entry_offset_ms INTEGER');
+    await client.query(
+      `UPDATE bot_settings SET entry_offset_ms = entry_time_sec * 1000 WHERE entry_offset_ms IS NULL`
+    );
+    console.log('Added entry_offset_ms column to database.');
+  } catch (err: unknown) {
+    const e = err as { code?: string };
+    if (e.code !== '42701') console.error('Error adding entry_offset_ms:', err);
+  }
 
   await client.query(`
     CREATE TABLE IF NOT EXISTS daily_snapshots (

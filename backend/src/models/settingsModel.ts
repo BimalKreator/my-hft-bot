@@ -6,7 +6,8 @@ export interface BotSettings {
   autoExitEnabled: boolean;
   capitalPercent: number;
   maxTrades: number;
-  entryTimeSec: number;
+  /** Entry time offset in milliseconds before funding (e.g. 500 = 0.5s before). */
+  entryOffsetMs: number;
   /** Exit delay after funding settlement, in milliseconds. */
   exitTimeMs: number;
   minFundingRate: number;
@@ -28,6 +29,7 @@ interface SettingsRow {
   capital_percent: string;
   max_trades: string;
   entry_time_sec: string;
+  entry_offset_ms?: string | null;
   exit_time_sec: string;
   exit_time_ms?: string | null;
   min_funding_rate?: string;
@@ -47,13 +49,17 @@ function rowToSettings(row: SettingsRow): BotSettings {
     row.exit_time_ms != null && row.exit_time_ms !== ''
       ? parseFloat(row.exit_time_ms) || 3600000
       : (parseFloat(row.exit_time_sec) || 3600) * 1000;
+  const entryOffsetMs =
+    row.entry_offset_ms != null && row.entry_offset_ms !== ''
+      ? parseInt(row.entry_offset_ms, 10) || 300000
+      : (parseFloat(row.entry_time_sec) || 300) * 1000;
   return {
     userId: row.user_id,
     autoEntryEnabled: row.auto_entry_enabled,
     autoExitEnabled: row.auto_exit_enabled,
     capitalPercent: parseFloat(row.capital_percent) || 10,
     maxTrades: parseFloat(row.max_trades) || 5,
-    entryTimeSec: parseFloat(row.entry_time_sec) || 300,
+    entryOffsetMs,
     exitTimeMs,
     minFundingRate: row.min_funding_rate != null ? parseFloat(row.min_funding_rate) : 0,
     leverage: row.leverage != null ? parseFloat(row.leverage) : 5,
@@ -73,7 +79,7 @@ const DEFAULTS: Omit<BotSettings, 'userId'> = {
   autoExitEnabled: false,
   capitalPercent: 10,
   maxTrades: 5,
-  entryTimeSec: 300,
+  entryOffsetMs: 300000,
   exitTimeMs: 3600000,
   minFundingRate: 0,
   leverage: 5,
@@ -96,7 +102,7 @@ export async function getUsersWithAutoEntryEnabled(): Promise<number[]> {
 
 export async function getSettings(userId: number): Promise<BotSettings> {
   const result = await query<SettingsRow>(
-    `SELECT user_id, auto_entry_enabled, auto_exit_enabled, capital_percent, max_trades, entry_time_sec, exit_time_sec, exit_time_ms, min_funding_rate, leverage,
+    `SELECT user_id, auto_entry_enabled, auto_exit_enabled, capital_percent, max_trades, entry_time_sec, entry_offset_ms, exit_time_sec, exit_time_ms, min_funding_rate, leverage,
             sl_pre_funding_enabled, sl_pre_multiplier, sl_post_funding_enabled, order_book_depth, spot_hedging_enabled,
             hedge_target_pct, hedge_stoploss_pct, hedge_pnl_depth
      FROM bot_settings WHERE user_id = $1`,
@@ -114,7 +120,7 @@ export interface UpdateSettingsInput {
   autoExitEnabled?: boolean;
   capitalPercent?: number;
   maxTrades?: number;
-  entryTimeSec?: number;
+  entryOffsetMs?: number;
   exitTimeMs?: number;
   minFundingRate?: number;
   leverage?: number;
@@ -139,7 +145,7 @@ export async function updateSettings(
     autoExitEnabled: input.autoExitEnabled ?? current.autoExitEnabled,
     capitalPercent: input.capitalPercent ?? current.capitalPercent,
     maxTrades: input.maxTrades ?? current.maxTrades,
-    entryTimeSec: input.entryTimeSec ?? current.entryTimeSec,
+    entryOffsetMs: input.entryOffsetMs ?? current.entryOffsetMs,
     exitTimeMs: input.exitTimeMs ?? current.exitTimeMs,
     minFundingRate: input.minFundingRate ?? current.minFundingRate,
     leverage: input.leverage ?? current.leverage,
@@ -154,19 +160,23 @@ export async function updateSettings(
   };
   const depthInt = Math.max(1, Math.min(50, Math.round(merged.orderBookDepth) || 2));
   const exitTimeMsInt = Math.max(0, Math.round(merged.exitTimeMs));
+  const entryOffsetMsInt = Math.max(0, Math.round(merged.entryOffsetMs));
   const hedgeTargetNum = Math.max(0, merged.hedgeTargetPct);
   const hedgeStoplossNum = Math.max(0, merged.hedgeStoplossPct);
   const hedgePnlDepthInt = Math.max(1, Math.min(50, Math.round(merged.hedgePnlDepth) || 1));
-  // Requires spot_hedging_enabled (and hedge_*) columns. Run: npx tsx update-settings-table.ts
+  // Schema: add entry_offset_ms if missing:
+  // ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS entry_offset_ms INTEGER;
+  // UPDATE bot_settings SET entry_offset_ms = entry_time_sec * 1000 WHERE entry_offset_ms IS NULL;
   await query(
-    `INSERT INTO bot_settings (user_id, auto_entry_enabled, auto_exit_enabled, capital_percent, max_trades, entry_time_sec, exit_time_sec, exit_time_ms, min_funding_rate, leverage, sl_pre_funding_enabled, sl_pre_multiplier, sl_post_funding_enabled, order_book_depth, spot_hedging_enabled, hedge_target_pct, hedge_stoploss_pct, hedge_pnl_depth)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+    `INSERT INTO bot_settings (user_id, auto_entry_enabled, auto_exit_enabled, capital_percent, max_trades, entry_time_sec, entry_offset_ms, exit_time_sec, exit_time_ms, min_funding_rate, leverage, sl_pre_funding_enabled, sl_pre_multiplier, sl_post_funding_enabled, order_book_depth, spot_hedging_enabled, hedge_target_pct, hedge_stoploss_pct, hedge_pnl_depth)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
      ON CONFLICT (user_id) DO UPDATE SET
        auto_entry_enabled = EXCLUDED.auto_entry_enabled,
        auto_exit_enabled = EXCLUDED.auto_exit_enabled,
        capital_percent = EXCLUDED.capital_percent,
        max_trades = EXCLUDED.max_trades,
        entry_time_sec = EXCLUDED.entry_time_sec,
+       entry_offset_ms = EXCLUDED.entry_offset_ms,
        exit_time_sec = EXCLUDED.exit_time_sec,
        exit_time_ms = EXCLUDED.exit_time_ms,
        min_funding_rate = EXCLUDED.min_funding_rate,
@@ -185,7 +195,8 @@ export async function updateSettings(
       merged.autoExitEnabled,
       merged.capitalPercent,
       merged.maxTrades,
-      merged.entryTimeSec,
+      Math.floor(merged.entryOffsetMs / 1000),
+      entryOffsetMsInt,
       Math.floor(merged.exitTimeMs / 1000),
       exitTimeMsInt,
       merged.minFundingRate,
