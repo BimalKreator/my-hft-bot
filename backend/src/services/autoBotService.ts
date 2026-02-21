@@ -523,7 +523,9 @@ export function cancelManualMock(): void {
 
 /** Returns minimum countdown in seconds across market data, or -1 if none. */
 async function runTick(): Promise<number> {
-  console.log('[autoBot] Tick Check - ' + new Date().toISOString());
+  if (entryTimeoutByCycle.size === 0) {
+    console.log('[autoBot] Tick Check - ' + new Date().toISOString());
+  }
   try {
     const now = Date.now();
     let marketData: Array<{ symbol: string; fundingRate: number; nextFundingTime: string; countdownMs: number; markPrice?: string; lastPrice?: string; fundingIntervalHours?: number }>;
@@ -641,6 +643,10 @@ async function runTick(): Promise<number> {
       if (nextMs > 0 && now > nextMs + 60_000) {
         pendingOrderPayloadByCycle.delete(cycleKey);
       }
+    }
+    // Clear prep cache only after funding time + 1s so sub-account entry still has prep data
+    for (const prep of entryPrepCacheByUser.values()) {
+      prep.candidates = prep.candidates.filter((c) => now <= parseInt(c.nextFundingTime, 10) + 1000);
     }
     return minCountdownSec;
   } catch (error) {
@@ -1339,7 +1345,7 @@ async function processUser(
     meetsMinFunding = marketData.filter((token) => {
       const absRatePct = Math.abs(token.fundingRate * 100);
       const passes = absRatePct >= minPct;
-      if (debugSkip && !passes && marketData.indexOf(token) < 5) {
+      if (debugSkip && !passes && marketData.indexOf(token) < 5 && entryTimeoutByCycle.size === 0) {
         console.log(`[DEBUG] Checking ${token.symbol}: Abs Rate ${absRatePct.toFixed(4)}% vs Min ${minPct}%`);
       }
       return passes;
@@ -1956,6 +1962,20 @@ async function processUser(
     }));
 
   if (inPrefetchWindow && prepCandidates.length > 0 && (!settings.spotHedgingEnabled || subHedgingEnabled)) {
+    const existingPrep = entryPrepCacheByUser.get(userId);
+    const inFlightCandidates = (existingPrep?.candidates ?? []).filter((c) =>
+      entryTimeoutByCycle.has(entryCycleKey(userId, c.symbol, c.nextFundingTime))
+    );
+    const seen = new Set<string>();
+    for (const p of prepCandidates) {
+      seen.add(`${p.symbol}_${p.nextFundingTime}`);
+    }
+    for (const c of inFlightCandidates) {
+      if (!seen.has(`${c.symbol}_${c.nextFundingTime}`)) {
+        prepCandidates.push(c);
+        seen.add(`${c.symbol}_${c.nextFundingTime}`);
+      }
+    }
     entryPrepCacheByUser.set(userId, {
       settings: {
         orderBookDepth: settings.orderBookDepth,
