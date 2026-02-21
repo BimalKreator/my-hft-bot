@@ -357,7 +357,7 @@ function mapBybitClosedPnlToHistoryRow(
   r: { symbol?: string; side?: string; closedSize?: string; qty?: string; avgEntryPrice?: string; avgExitPrice?: string; closedPnl: string; openFee: string; closeFee: string; updatedTime: string },
   accountType: 'Main' | 'Sub',
   index: number
-): { id: string; symbol: string; side: string; qty: string; entry_price: string; exit_price: string; closed_at: string; fees: string; funding_received: string; gross_pnl: string; net_pnl: string; exit_reason: string | null; accountType: 'Main' | 'Sub' } {
+): { id: string; symbol: string; side: string; qty: string; entry_price: string; exit_price: string; closed_at: string; fees: string; funding_received: string; gross_pnl: string; net_pnl: string; exit_reason: string | null; exitReason: string | null; accountType: 'Main' | 'Sub' } {
   const symbol = r.symbol ?? '';
   const side = r.side ?? '';
   const qty = r.closedSize ?? r.qty ?? '0';
@@ -383,6 +383,7 @@ function mapBybitClosedPnlToHistoryRow(
     gross_pnl: String(closedPnl),
     net_pnl: String(netPnl),
     exit_reason: null,
+    exitReason: null,
     accountType,
   };
 }
@@ -471,6 +472,7 @@ export async function getTradeHistory(
       qty: r.quantity,
       closed_at: r.exit_time,
       accountType: 'Main' as const,
+      exitReason: r.exit_reason,
     }));
     res.status(200).json(mapped);
   } catch (err) {

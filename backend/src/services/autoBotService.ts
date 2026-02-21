@@ -300,7 +300,7 @@ async function saveClosedTradeAfterExit(
   entryPrice: number,
   qty: number,
   orderIds: string | string[],
-  exitReason: 'Time Exit' | 'Stoploss Hit' | 'Pre-Funding Stoploss' | 'Post-Funding Stoploss' | 'Post-Funding Stoploss (L2 - 50% Funding)',
+  exitReason: 'Time Exit' | 'Stoploss Hit' | 'Pre-Funding Stoploss' | 'Post-Funding Stoploss' | 'Post-Funding Stoploss (L2 - 50% Funding)' | 'PnL Positive Exit',
   fundingReceived: number = 0,
   estimatedExitPrice?: number,
   estimatedFeesWhenZero?: number
@@ -758,7 +758,7 @@ async function monitorExits(): Promise<void> {
             const mainNetPnl = pnl - estimatedTakerFees;
             if (mainNetPnl > 0) {
               try {
-                await Promise.all([
+                const [mainOrderRes, subOrderRes] = await Promise.all([
                   placeMarketOrderReduceOnly(apiKey, apiSecret, pos.symbol, pos.side, String(qty)),
                   placeMarketOrderReduceOnly(subHedge.subApiKey, subHedge.subApiSecret, pos.symbol, subHedge.side, String(subHedge.qty)),
                 ]);
@@ -771,6 +771,13 @@ async function monitorExits(): Promise<void> {
                   }
                 }
                 delete lockedFundingRates[pos.symbol];
+                const pnlExitReason: 'PnL Positive Exit' = 'PnL Positive Exit';
+                saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, mainOrderRes.orderId, pnlExitReason, 0, exitPrice).catch((e) =>
+                  console.error(`[autoBot] saveClosedTradeAfterExit (main) failed ${pos.symbol}:`, e)
+                );
+                saveClosedTradeAfterExit(userId, subHedge.subApiKey, subHedge.subApiSecret, pos.symbol, subHedge.side, entry, subHedge.qty, subOrderRes.orderId, pnlExitReason, 0, exitPrice).catch((e) =>
+                  console.error(`[autoBot] saveClosedTradeAfterExit (sub) failed ${pos.symbol}:`, e)
+                );
                 console.log(`[autoBot] Sub-hedge PnL exit: Main net PnL=${mainNetPnl.toFixed(4)} > 0 | ${pos.symbol}`);
               } catch (e) {
                 console.error(`[autoBot] Sub-hedge parallel close failed ${pos.symbol}:`, e);
