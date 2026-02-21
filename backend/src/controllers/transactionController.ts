@@ -29,19 +29,27 @@ export async function addTransaction(
       res.status(400).json({ error: 'amount must be a number' });
       return;
     }
+    if (amountNum <= 0) {
+      res.status(400).json({ error: 'amount must be greater than 0' });
+      return;
+    }
 
     const date = txDate && /^\d{4}-\d{2}-\d{2}$/.test(String(txDate))
       ? String(txDate)
       : todayIST();
 
-    const result = await query<{ id: number }>(
+    const result = await query<{ id: number; date: string; type: string; amount: string; note: string | null }>(
       `INSERT INTO deposits_withdrawals (user_id, date, type, amount, note)
        VALUES ($1, $2, $3, $4, $5)
-       RETURNING id`,
+       RETURNING id, date, type, amount, note`,
       [userId, date, type, amountNum, note ?? null]
     );
     const row = result.rows[0];
-    res.status(201).json({ id: row?.id ?? 0 });
+    if (!row) {
+      res.status(500).json({ error: 'Failed to create transaction' });
+      return;
+    }
+    res.status(201).json({ id: row.id, date: row.date, type: row.type, amount: row.amount, note: row.note });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to add transaction';
     res.status(500).json({ error: msg });
