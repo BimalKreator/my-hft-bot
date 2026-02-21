@@ -1,7 +1,7 @@
 import https from 'https';
 import axios from 'axios';
 import CryptoJS from 'crypto-js';
-import { RestClientV5, WebsocketClient } from 'bybit-api';
+import { RestClientV5, WebsocketClient, WS_KEY_MAP } from 'bybit-api';
 
 const BASE_URL = process.env.BYBIT_TESTNET === 'true'
   ? 'https://api-testnet.bybit.com'
@@ -17,6 +17,58 @@ const axiosBybit = axios.create({ httpsAgent: keepAliveAgent });
 
 /** Network options passed to RestClientV5 so all SDK requests use the same agent. */
 const restNetworkOptions = { httpsAgent: keepAliveAgent };
+
+/** Per-credential V5 Private Trade WebSocket client cache (for low-latency order placement). */
+const wsClientByKey = new Map<string, WebsocketClient>();
+
+function getWsClient(apiKey: string, apiSecret: string): WebsocketClient {
+  let client = wsClientByKey.get(apiKey);
+  if (!client) {
+    client = new WebsocketClient({
+      key: apiKey,
+      secret: apiSecret,
+      testnet,
+      market: 'v5',
+      recvWindow: Number(RECV_WINDOW) || 5000,
+    });
+    wsClientByKey.set(apiKey, client);
+  }
+  return client;
+}
+
+/**
+ * Submit an order via V5 Private WebSocket (order.create). Use for HFT-style execution.
+ * Throws on WS failure or retCode !== 0 so caller can fallback to REST.
+ */
+async function submitOrderWs(
+  apiKey: string,
+  apiSecret: string,
+  orderParams: {
+    category: 'linear' | 'spot';
+    symbol: string;
+    side: 'Buy' | 'Sell';
+    orderType: 'Limit' | 'Market';
+    qty: string;
+    price?: string;
+    timeInForce?: string;
+    reduceOnly?: boolean;
+    orderFilter?: string;
+    isLeverage?: 0 | 1;
+  }
+): Promise<{ orderId: string; orderLinkId: string }> {
+  const ws = getWsClient(apiKey, apiSecret);
+  await ws.connectWSAPI();
+  const res = await ws.sendWSAPIRequest(WS_KEY_MAP.v5PrivateTrade, 'order.create', orderParams);
+  const data = res as { retCode: number; retMsg?: string; data?: { orderId: string; orderLinkId: string } };
+  if (data.retCode !== 0) {
+    throw new Error(data.retMsg ?? 'WebSocket order.create failed');
+  }
+  const result = data.data;
+  if (!result?.orderId) {
+    throw new Error('WebSocket order response missing orderId');
+  }
+  return { orderId: result.orderId, orderLinkId: result.orderLinkId ?? '' };
+}
 
 function getClient(apiKey: string, apiSecret: string): RestClientV5 {
   return new RestClientV5({ key: apiKey, secret: apiSecret, testnet }, restNetworkOptions);
@@ -207,7 +259,7 @@ export async function setLeverage(
 }
 
 /**
- * Place a market order on linear perpetual. Returns orderId and orderLinkId.
+ * Place a market order on linear perpetual. Uses WebSocket first, REST fallback.
  */
 export async function placeMarketOrder(
   apiKey: string,
@@ -216,6 +268,17 @@ export async function placeMarketOrder(
   side: 'Buy' | 'Sell',
   qty: string
 ): Promise<{ orderId: string; orderLinkId: string }> {
+  try {
+    return await submitOrderWs(apiKey, apiSecret, {
+      category: 'linear',
+      symbol,
+      side,
+      orderType: 'Market',
+      qty,
+    });
+  } catch (wsErr) {
+    console.warn('[bybit] WS market order failed, falling back to REST:', (wsErr as Error)?.message ?? wsErr);
+  }
   const client = getClient(apiKey, apiSecret);
   const res = await client.submitOrder({
     category: 'linear',
@@ -232,8 +295,7 @@ export async function placeMarketOrder(
 }
 
 /**
- * Place a limit order on linear perpetual. Returns orderId and orderLinkId.
- * @param timeInForce - 'GTC' (Good Till Cancelled), 'IOC' (Immediate Or Cancel; fill up to limit, cancel rest), or 'PostOnly'.
+ * Place a limit order on linear perpetual. Uses WebSocket first for low latency, falls back to REST if WS is down.
  */
 export async function placeLimitOrder(
   apiKey: string,
@@ -244,9 +306,8 @@ export async function placeLimitOrder(
   price: string,
   timeInForce: 'GTC' | 'PostOnly' | 'IOC' = 'GTC'
 ): Promise<{ orderId: string; orderLinkId: string }> {
-  const client = getClient(apiKey, apiSecret);
   try {
-    const res = await client.submitOrder({
+    return await submitOrderWs(apiKey, apiSecret, {
       category: 'linear',
       symbol,
       side,
@@ -255,21 +316,28 @@ export async function placeLimitOrder(
       price,
       timeInForce,
     });
-    console.log('[DEBUG SUCCESS] Order Placed:', res);
-    if (res.retCode !== 0) {
-      throw new Error(res.retMsg ?? 'Bybit place limit order failed');
-    }
-    const result = res.result as { orderId: string; orderLinkId: string };
-    return { orderId: result.orderId, orderLinkId: result.orderLinkId };
-  } catch (error: unknown) {
-    const err = error as { message?: string; response?: unknown };
-    console.error('[DEBUG ERROR] Order Failed:', err?.message ?? error, err?.response ?? '');
-    throw error;
+  } catch (wsErr) {
+    console.warn('[bybit] WS order failed, falling back to REST:', (wsErr as Error)?.message ?? wsErr);
   }
+  const client = getClient(apiKey, apiSecret);
+  const res = await client.submitOrder({
+    category: 'linear',
+    symbol,
+    side,
+    orderType: 'Limit',
+    qty,
+    price,
+    timeInForce,
+  });
+  if (res.retCode !== 0) {
+    throw new Error(res.retMsg ?? 'Bybit place limit order failed');
+  }
+  const result = res.result as { orderId: string; orderLinkId: string };
+  return { orderId: result.orderId, orderLinkId: result.orderLinkId };
 }
 
 /**
- * Place a market reduce-only order to close a position. Opposite side of position.
+ * Place a market reduce-only order to close a position. Uses WebSocket first, REST fallback.
  */
 export async function placeMarketOrderReduceOnly(
   apiKey: string,
@@ -278,8 +346,20 @@ export async function placeMarketOrderReduceOnly(
   positionSide: 'Buy' | 'Sell',
   qty: string
 ): Promise<{ orderId: string; orderLinkId: string }> {
-  const client = getClient(apiKey, apiSecret);
   const closeSide = positionSide === 'Buy' ? 'Sell' : 'Buy';
+  try {
+    return await submitOrderWs(apiKey, apiSecret, {
+      category: 'linear',
+      symbol,
+      side: closeSide,
+      orderType: 'Market',
+      qty,
+      reduceOnly: true,
+    });
+  } catch (wsErr) {
+    console.warn('[bybit] WS reduce-only order failed, falling back to REST:', (wsErr as Error)?.message ?? wsErr);
+  }
+  const client = getClient(apiKey, apiSecret);
   const res = await client.submitOrder({
     category: 'linear',
     symbol,
@@ -318,8 +398,7 @@ export async function getSpotMarginSupport(symbol: string): Promise<boolean> {
 }
 
 /**
- * Place a spot order WITHOUT margin/leverage (pure spot, no borrowing).
- * Use when symbol does not support margin or spotLeverage === 1.
+ * Place a spot order WITHOUT margin/leverage. Uses WebSocket first, REST fallback.
  */
 export async function placeSpotOrder(
   apiKey: string,
@@ -331,21 +410,22 @@ export async function placeSpotOrder(
   price?: string,
   timeInForce: 'GTC' | 'IOC' | 'FOK' | 'PostOnly' = 'GTC'
 ): Promise<{ orderId: string; orderLinkId: string }> {
-  const client = getClient(apiKey, apiSecret);
-  const params: Record<string, unknown> = {
-    category: 'spot',
+  const params = {
+    category: 'spot' as const,
     symbol,
     side,
     orderType,
     qty,
-    orderFilter: 'Order',
+    orderFilter: 'Order' as const,
+    timeInForce: orderType === 'Limit' ? timeInForce : 'IOC',
+    ...(orderType === 'Limit' && price != null && { price }),
   };
-  if (orderType === 'Limit') {
-    if (price != null) params.price = price;
-    params.timeInForce = timeInForce;
-  } else {
-    params.timeInForce = 'IOC';
+  try {
+    return await submitOrderWs(apiKey, apiSecret, params);
+  } catch (wsErr) {
+    console.warn('[bybit] WS spot order failed, falling back to REST:', (wsErr as Error)?.message ?? wsErr);
   }
+  const client = getClient(apiKey, apiSecret);
   const res = await client.submitOrder(params as Parameters<RestClientV5['submitOrder']>[0]);
   if (res.retCode !== 0) {
     throw new Error(res.retMsg ?? 'Bybit place spot order failed');
@@ -355,9 +435,7 @@ export async function placeSpotOrder(
 }
 
 /**
- * Place an order in the Spot market with margin enabled (isLeverage: 1).
- * Allows the bot to borrow and short in the spot market.
- * Use when spotLeverage > 1 (symbol supports margin).
+ * Place a spot margin order (isLeverage: 1). Uses WebSocket first, REST fallback.
  */
 export async function placeSpotMarginOrder(
   apiKey: string,
@@ -369,22 +447,23 @@ export async function placeSpotMarginOrder(
   price?: string,
   timeInForce: 'GTC' | 'IOC' | 'FOK' | 'PostOnly' = 'GTC'
 ): Promise<{ orderId: string; orderLinkId: string }> {
-  const client = getClient(apiKey, apiSecret);
-  const params: Record<string, unknown> = {
-    category: 'spot',
+  const params = {
+    category: 'spot' as const,
     symbol,
     side,
     orderType,
     qty,
-    isLeverage: 1,
-    orderFilter: 'Order',
+    isLeverage: 1 as const,
+    orderFilter: 'Order' as const,
+    timeInForce: orderType === 'Limit' ? timeInForce : 'IOC',
+    ...(orderType === 'Limit' && price != null && { price }),
   };
-  if (orderType === 'Limit') {
-    if (price != null) params.price = price;
-    params.timeInForce = timeInForce;
-  } else {
-    params.timeInForce = 'IOC';
+  try {
+    return await submitOrderWs(apiKey, apiSecret, params);
+  } catch (wsErr) {
+    console.warn('[bybit] WS spot margin order failed, falling back to REST:', (wsErr as Error)?.message ?? wsErr);
   }
+  const client = getClient(apiKey, apiSecret);
   const res = await client.submitOrder(params as Parameters<RestClientV5['submitOrder']>[0]);
   if (res.retCode !== 0) {
     throw new Error(res.retMsg ?? 'Bybit place spot margin order failed');
@@ -394,8 +473,7 @@ export async function placeSpotMarginOrder(
 }
 
 /**
- * Place a limit reduce-only order to close a position at the given price.
- * @param timeInForce - 'GTC' (default) or 'IOC' for orderbook sweep exits.
+ * Place a limit reduce-only order to close a position. Uses WebSocket first, REST fallback.
  */
 export async function placeLimitOrderReduceOnly(
   apiKey: string,
@@ -406,8 +484,22 @@ export async function placeLimitOrderReduceOnly(
   price: string,
   timeInForce: 'GTC' | 'IOC' = 'GTC'
 ): Promise<{ orderId: string; orderLinkId: string }> {
-  const client = getClient(apiKey, apiSecret);
   const closeSide = positionSide === 'Buy' ? 'Sell' : 'Buy';
+  try {
+    return await submitOrderWs(apiKey, apiSecret, {
+      category: 'linear',
+      symbol,
+      side: closeSide,
+      orderType: 'Limit',
+      qty,
+      price,
+      timeInForce,
+      reduceOnly: true,
+    });
+  } catch (wsErr) {
+    console.warn('[bybit] WS limit reduce-only failed, falling back to REST:', (wsErr as Error)?.message ?? wsErr);
+  }
+  const client = getClient(apiKey, apiSecret);
   const res = await client.submitOrder({
     category: 'linear',
     symbol,
