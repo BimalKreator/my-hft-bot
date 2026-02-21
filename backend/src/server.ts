@@ -1,6 +1,9 @@
+import dns from 'dns';
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+
+dns.setDefaultResultOrder('ipv4first');
 
 import './config/db.js';
 import { startMonitoring } from './services/autoBotService.js';
