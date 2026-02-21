@@ -1713,6 +1713,23 @@ async function processUser(
             };
             passedData = { prep: prepBuilt, candidate: candidateBuilt };
           }
+          const leverageForEntry = passedData.candidate.safeLeverage ?? settings.leverage ?? 10;
+          let subKey = settings.subApiKey;
+          let subSecret = settings.subApiSecret;
+          try {
+            const dKey = decrypt(settings.subApiKey);
+            const dSecret = decrypt(settings.subApiSecret);
+            if (dKey && dSecret) {
+              subKey = dKey;
+              subSecret = dSecret;
+            }
+          } catch {
+            /* use plain */
+          }
+          Promise.all([
+            setLeverage(apiKey, apiSecret, topToken.symbol, leverageForEntry),
+            setLeverage(subKey, subSecret, topToken.symbol, leverageForEntry),
+          ]).catch(() => {});
           const tMain = setTimeout(() => {
             executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'main', passedData).catch((e) =>
               console.error('[autoBot] executeEntry main failed', e)
@@ -1766,8 +1783,20 @@ async function processUser(
             /* ignore */
           }
           if (subHedgingEnabled && settings.subApiKey && settings.subApiSecret) {
+            let subKey = settings.subApiKey;
+            let subSecret = settings.subApiSecret;
             try {
-              await setLeverage(settings.subApiKey, settings.subApiSecret, topToken.symbol, futuresLeverage);
+              const dKey = decrypt(settings.subApiKey);
+              const dSecret = decrypt(settings.subApiSecret);
+              if (dKey && dSecret) {
+                subKey = dKey;
+                subSecret = dSecret;
+              }
+            } catch {
+              /* use plain */
+            }
+            try {
+              await setLeverage(subKey, subSecret, topToken.symbol, futuresLeverage);
             } catch {
               /* ignore */
             }

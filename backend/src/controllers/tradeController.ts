@@ -352,8 +352,44 @@ export async function getDashboardPositions(
   }
 }
 
+/** Map Bybit closed PnL row to frontend history shape; accountType is injected by caller. */
+function mapBybitClosedPnlToHistoryRow(
+  r: { symbol?: string; side?: string; closedSize?: string; qty?: string; avgEntryPrice?: string; avgExitPrice?: string; closedPnl: string; openFee: string; closeFee: string; updatedTime: string },
+  accountType: 'Main' | 'Sub',
+  index: number
+): { id: string; symbol: string; side: string; qty: string; entry_price: string; exit_price: string; closed_at: string; fees: string; funding_received: string; gross_pnl: string; net_pnl: string; exit_reason: string | null; accountType: 'Main' | 'Sub' } {
+  const symbol = r.symbol ?? '';
+  const side = r.side ?? '';
+  const qty = r.closedSize ?? r.qty ?? '0';
+  const entryPrice = r.avgEntryPrice ?? '0';
+  const exitPrice = r.avgExitPrice ?? '0';
+  const openFee = parseFloat(r.openFee) || 0;
+  const closeFee = parseFloat(r.closeFee) || 0;
+  const fees = openFee + closeFee;
+  const closedPnl = parseFloat(r.closedPnl) || 0;
+  const netPnl = closedPnl - fees;
+  const updatedTime = r.updatedTime;
+  const closedAt = /^\d+$/.test(updatedTime) ? new Date(parseInt(updatedTime, 10)).toISOString() : updatedTime;
+  return {
+    id: `bybit-${accountType}-${index}-${r.updatedTime}`,
+    symbol,
+    side,
+    qty,
+    entry_price: entryPrice,
+    exit_price: exitPrice,
+    closed_at: closedAt,
+    fees: String(fees),
+    funding_received: '0',
+    gross_pnl: String(closedPnl),
+    net_pnl: String(netPnl),
+    exit_reason: null,
+    accountType,
+  };
+}
+
 /**
  * GET /api/trade/history — closed trades with optional filters: from, to (date), token (symbol), profit, loss.
+ * When subaccount hedging is active, fetches closed PnL from both Main and Sub via Bybit, tags accountType, merges and sorts by updatedTime desc.
  */
 export async function getTradeHistory(
   req: AuthRequest,
@@ -372,14 +408,69 @@ export async function getTradeHistory(
     const profit = req.query.profit === 'true' || req.query.profit === '1';
     const loss = req.query.loss === 'true' || req.query.loss === '1';
 
+    const settings = await getSettings(userId);
+    const subHedgingActive = !!(settings.subApiKey && settings.subApiSecret);
+
+    if (subHedgingActive && settings.subApiKey && settings.subApiSecret) {
+      const keys = await getExchangeKeys(userId, 'Bybit');
+      if (!keys) {
+        res.status(400).json({ error: 'Exchange keys not found' });
+        return;
+      }
+      let mainKey = decrypt(keys.api_key);
+      let mainSecret = decrypt(keys.api_secret);
+      let subKey = settings.subApiKey;
+      let subSecret = settings.subApiSecret;
+      try {
+        const dKey = decrypt(settings.subApiKey);
+        const dSecret = decrypt(settings.subApiSecret);
+        if (dKey && dSecret) {
+          subKey = dKey;
+          subSecret = dSecret;
+        }
+      } catch {
+        /* use plain */
+      }
+      const limit = 100;
+      const [mainList, subList] = await Promise.all([
+        getClosedPnl(mainKey, mainSecret, 'linear', undefined, limit),
+        getClosedPnl(subKey, subSecret, 'linear', undefined, limit),
+      ]);
+      const mainRows = mainList.map((r, i) => mapBybitClosedPnlToHistoryRow(r, 'Main', i));
+      const subRows = subList.map((r, i) => mapBybitClosedPnlToHistoryRow(r, 'Sub', i));
+      const merged = [...mainRows, ...subRows].sort((a, b) => {
+        const ta = new Date(a.closed_at).getTime();
+        const tb = new Date(b.closed_at).getTime();
+        return tb - ta;
+      });
+      let filtered = merged;
+      if (from) {
+        const fromTime = new Date(from).getTime();
+        filtered = filtered.filter((r) => new Date(r.closed_at).getTime() >= fromTime);
+      }
+      if (to) {
+        const toEnd = new Date(to).getTime() + 86400000;
+        filtered = filtered.filter((r) => new Date(r.closed_at).getTime() < toEnd);
+      }
+      if (token) {
+        const t = token.toUpperCase();
+        const match = t.endsWith('USDT') ? t : `${t}USDT`;
+        filtered = filtered.filter((r) => r.symbol === match || r.symbol === t);
+      }
+      if (profit) filtered = filtered.filter((r) => parseFloat(r.net_pnl) > 0);
+      if (loss) filtered = filtered.filter((r) => parseFloat(r.net_pnl) < 0);
+      res.status(200).json(filtered);
+      return;
+    }
+
     const rows = await getClosedTrades(userId, { from, to, token, profit, loss });
-    // Map DB columns (token, direction, quantity, exit_time) to frontend shape (symbol, side, qty, closed_at)
     const mapped = rows.map((r) => ({
       ...r,
       symbol: r.token,
       side: r.direction,
       qty: r.quantity,
       closed_at: r.exit_time,
+      accountType: 'Main' as const,
     }));
     res.status(200).json(mapped);
   } catch (err) {

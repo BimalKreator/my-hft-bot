@@ -570,6 +570,10 @@ export async function getExecutionList(
 }
 
 export interface ClosedPnlRow {
+  symbol?: string;
+  side?: string;
+  qty?: string;
+  closedSize?: string;
   closedPnl: string;
   openFee: string;
   closeFee: string;
@@ -579,17 +583,19 @@ export interface ClosedPnlRow {
 }
 
 /**
- * Get closed PnL records for a linear symbol (for exact net PnL and fees after a close).
+ * Get closed PnL records for linear. Pass symbol to limit to one symbol, or omit for all (e.g. for combined history).
  */
 export async function getClosedPnl(
   apiKey: string,
   apiSecret: string,
   category: 'linear',
-  symbol: string,
+  symbol?: string,
   limit: number = 20
 ): Promise<ClosedPnlRow[]> {
   const client = getClient(apiKey, apiSecret);
-  const res = await client.getClosedPnL({ category, symbol, limit });
+  const params: { category: 'linear'; symbol?: string; limit: number } = { category, limit };
+  if (symbol) params.symbol = symbol;
+  const res = await client.getClosedPnL(params);
   if (res.retCode !== 0) {
     throw new Error(res.retMsg ?? 'Bybit get closed PnL failed');
   }
