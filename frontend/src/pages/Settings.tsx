@@ -174,7 +174,7 @@ export default function Settings() {
       hedgeTargetPct: Number(settings.hedgeTargetPct) ?? 2,
       hedgeStoplossPct: Number(settings.hedgeStoplossPct) ?? 5,
       hedgePnlDepth: Math.max(1, Math.min(50, Number(settings.hedgePnlDepth) || 1)),
-      subEntryOffsetMs: Math.max(0, Math.round(Number(settings.subEntryOffsetMs) ?? 10)),
+      subEntryOffsetMs: Math.round(Number(settings.subEntryOffsetMs) ?? 10),
       universalStoplossPercent: Math.max(0, Number(settings.universalStoplossPercent) ?? 3),
     });
   }, [settings, saveSettings]);
@@ -478,28 +478,27 @@ export default function Settings() {
             />
           </div>
 
-          {/* Entry Time Offset (Milliseconds) — e.g. 500 = 0.5s before funding */}
+          {/* Entry Time Offset (Milliseconds) — positive = before funding, negative = after */}
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-2">
               Entry Time Offset (Milliseconds)
             </label>
             <input
               type="number"
-              min={0}
               step={1}
               value={settings.entryOffsetMs}
               onChange={(e) => {
                 const v = parseInt(e.target.value, 10);
-                if (!Number.isNaN(v) && v >= 0) {
+                if (!Number.isNaN(v)) {
                   setSettings((s) => s ? { ...s, entryOffsetMs: v } : s);
                   debouncedSave({ entryOffsetMs: v });
                 }
               }}
               className="w-full rounded-lg border bg-black/50 px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-[#007BFF]"
               style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
-              placeholder="e.g. 500 for 0.5s before funding"
+              placeholder="e.g. 500 = 0.5s before funding, -50 = 50ms after"
             />
-            <p className="text-xs text-gray-500 mt-1">How many ms before funding to place entry (e.g. 500 = 0.5s before)</p>
+            <p className="text-xs text-gray-500 mt-1">Ms before funding to place entry (positive = before, negative = after, e.g. -50)</p>
           </div>
 
           {/* Subaccount Hedging */}
@@ -510,21 +509,20 @@ export default function Settings() {
               <label className="block text-sm font-medium text-gray-300 mb-2">Sub-Account Entry Offset (ms)</label>
               <input
                 type="number"
-                min={0}
                 step={1}
                 value={settings.subEntryOffsetMs}
                 onChange={(e) => {
                   const v = parseInt(e.target.value, 10);
-                  if (!Number.isNaN(v) && v >= 0) {
+                  if (!Number.isNaN(v)) {
                     setSettings((s) => (s ? { ...s, subEntryOffsetMs: v } : s));
                     debouncedSave({ subEntryOffsetMs: v });
                   }
                 }}
                 className="w-full rounded-lg border bg-black/50 px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-[#007BFF]"
                 style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
-                placeholder="10"
+                placeholder="e.g. 10 or -50"
               />
-              <p className="text-xs text-gray-500 mt-1">Default: 10 ms</p>
+              <p className="text-xs text-gray-500 mt-1">Ms before funding (positive = before, negative = after). Default: 10</p>
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-2">Universal Stoploss (%)</label>

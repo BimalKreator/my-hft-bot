@@ -46,11 +46,11 @@ export async function updateSettingsHandler(
       input.maxTrades = body.maxTrades;
     }
     const entryOffsetRaw = body.entryOffsetMs ?? body.entry_offset_ms;
-    if (typeof entryOffsetRaw === 'number' && !Number.isNaN(entryOffsetRaw) && entryOffsetRaw >= 0) {
+    if (typeof entryOffsetRaw === 'number' && !Number.isNaN(entryOffsetRaw)) {
       input.entryOffsetMs = Math.round(entryOffsetRaw);
     } else if (typeof entryOffsetRaw === 'string') {
       const parsed = parseInt(entryOffsetRaw, 10);
-      if (!Number.isNaN(parsed) && parsed >= 0) input.entryOffsetMs = parsed;
+      if (!Number.isNaN(parsed)) input.entryOffsetMs = parsed;
     }
     const exitTimeMsRaw = body.exitTimeMs ?? body.exit_time_ms;
     if (typeof exitTimeMsRaw === 'number' && !Number.isNaN(exitTimeMsRaw) && exitTimeMsRaw >= 0) {
@@ -114,11 +114,11 @@ export async function updateSettingsHandler(
       input.subApiSecret = body.subApiSecret;
     }
     const subEntryOffsetRaw = body.subEntryOffsetMs ?? body.sub_entry_offset_ms;
-    if (typeof subEntryOffsetRaw === 'number' && !Number.isNaN(subEntryOffsetRaw) && subEntryOffsetRaw >= 0) {
+    if (typeof subEntryOffsetRaw === 'number' && !Number.isNaN(subEntryOffsetRaw)) {
       input.subEntryOffsetMs = Math.round(subEntryOffsetRaw);
     } else if (typeof subEntryOffsetRaw === 'string') {
       const parsed = parseInt(subEntryOffsetRaw, 10);
-      if (!Number.isNaN(parsed) && parsed >= 0) input.subEntryOffsetMs = parsed;
+      if (!Number.isNaN(parsed)) input.subEntryOffsetMs = parsed;
     }
     const universalStoplossRaw = body.universalStoplossPercent ?? body.universal_stoploss_percent;
     if (typeof universalStoplossRaw === 'number' && !Number.isNaN(universalStoplossRaw) && universalStoplossRaw >= 0) {

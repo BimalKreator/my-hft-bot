@@ -188,11 +188,11 @@ export async function updateSettings(
   };
   const depthInt = Math.max(1, Math.min(50, Math.round(merged.orderBookDepth) || 2));
   const exitTimeMsInt = Math.max(0, Math.round(merged.exitTimeMs));
-  const entryOffsetMsInt = Math.max(0, Math.round(merged.entryOffsetMs));
+  const entryOffsetMsInt = Math.round(merged.entryOffsetMs);
   const hedgeTargetNum = Math.max(0, merged.hedgeTargetPct);
   const hedgeStoplossNum = Math.max(0, merged.hedgeStoplossPct);
   const hedgePnlDepthInt = Math.max(1, Math.min(50, Math.round(merged.hedgePnlDepth) || 1));
-  const subEntryOffsetMsInt = Math.max(0, Math.round(merged.subEntryOffsetMs ?? 10));
+  const subEntryOffsetMsInt = Math.round(merged.subEntryOffsetMs ?? 10);
   const universalStoplossNum = Math.max(0, merged.universalStoplossPercent ?? 3);
   await query(
     `INSERT INTO bot_settings (user_id, auto_entry_enabled, auto_exit_enabled, capital_percent, max_trades, entry_time_sec, entry_offset_ms, exit_time_sec, exit_time_ms, min_funding_rate, leverage, sl_pre_funding_enabled, sl_pre_multiplier, sl_post_funding_enabled, order_book_depth, spot_hedging_enabled, hedge_target_pct, hedge_stoploss_pct, hedge_pnl_depth, sub_api_key, sub_api_secret, sub_entry_offset_ms, universal_stoploss_percent)

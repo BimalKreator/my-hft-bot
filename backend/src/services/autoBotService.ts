@@ -1428,7 +1428,7 @@ async function processUserCritical(
   if (!prep || prep.candidates.length === 0) return;
   if (prep.positionsCount >= prep.maxTrades) return;
 
-  const entryOffsetMs = Math.max(0, prep.settings.entryOffsetMs ?? 300000);
+  const entryOffsetMs = prep.settings.entryOffsetMs ?? 300000;
   const marketBySymbol = new Map(marketData.map((m) => [m.symbol, m]));
 
   const scheduleNow = Date.now();
@@ -1562,7 +1562,7 @@ async function processUser(
     return;
   }
 
-  const entryOffsetMs = Math.max(0, settings.entryOffsetMs ?? 300000);
+  const entryOffsetMs = settings.entryOffsetMs ?? 300000;
   const minCountdownSec =
     Math.min(...candidates.map((c) => Math.floor(c.countdownMs / 1000))) ?? 9999;
   const minDelayToEntry = Math.min(
@@ -1695,7 +1695,7 @@ async function processUser(
       const fundingTimeMs = parseInt(topToken.nextFundingTime, 10) || 0;
       const exactEntryTimeMs = fundingTimeMs - entryOffsetMs;
       const delayMs = exactEntryTimeMs - now;
-      const subEntryOffsetMs = Math.max(0, settings.subEntryOffsetMs ?? 10);
+      const subEntryOffsetMs = settings.subEntryOffsetMs ?? 10;
       const exactSubEntryTimeMs = fundingTimeMs - subEntryOffsetMs;
       const delaySubMs = exactSubEntryTimeMs - now;
       const cycleKey = entryCycleKey(userId, topToken.symbol, topToken.nextFundingTime);
