@@ -88,6 +88,10 @@ let entryUserIdsCache: number[] = [];
 /** When TEST_MODE=true, mock funding time 30s ahead so countdown decrements each tick. */
 let mockFundingTimeMs: number | null = null;
 
+/** When true, runTick returns immediately to give 100% priority to scheduled executeEntry timeouts. Reset after funding time + 2s or when manual mock is cancelled. */
+let isExecutionImminent = false;
+let executionImminentUntilMs = 0;
+
 /** Manual mock: when true, force 30s countdown for one cycle; reset when cycle end time has passed (mock settlement + exit window). */
 let isManualMockActive = false;
 let manualMockFundingTimeMs: number | null = null;
@@ -523,6 +527,9 @@ export function cancelManualMock(): void {
 
 /** Returns minimum countdown in seconds across market data, or -1 if none. */
 async function runTick(): Promise<number> {
+  if (isExecutionImminent && Date.now() < executionImminentUntilMs) {
+    return -1;
+  }
   if (entryTimeoutByCycle.size === 0) {
     console.log('[autoBot] Tick Check - ' + new Date().toISOString());
   }
@@ -556,6 +563,8 @@ async function runTick(): Promise<number> {
         isManualMockActive = false;
         manualMockFundingTimeMs = null;
         manualMockEndMs = null;
+        isExecutionImminent = false;
+        executionImminentUntilMs = 0;
         if (wasEndOfCycle) {
           console.log('[autoBot] Manual mock cycle finished; resuming real-time sync.');
         } else if (wasMissingTimes) {
@@ -613,6 +622,10 @@ async function runTick(): Promise<number> {
       } catch (err) {
         console.error(`[autoBot] User ${userId} error:`, err);
       }
+    }
+    if (isExecutionImminent && now >= executionImminentUntilMs) {
+      isExecutionImminent = false;
+      executionImminentUntilMs = 0;
     }
     for (const [key, t] of entryTimeoutByCycle.entries()) {
       const parts = key.split('_');
@@ -953,11 +966,20 @@ async function monitorExits(): Promise<void> {
   }
 }
 
+/** Prep data passed into executeEntry so it never gets lost (no cache lookup). */
+type ExecuteEntryPrepData = { prep: EntryPrep; candidate: EntryPrepCandidate };
+
 /**
- * Run entry at exact timestamp (called from precise setTimeout). Uses prep cache when available; otherwise full flow.
+ * Run entry at exact timestamp (called from precise setTimeout). Uses prepData when provided; otherwise falls back to cache.
  * For subaccount hedging: account 'main' fires at funding - entry_offset_ms, 'sub' at funding - sub_entry_offset_ms; both use same Q from min(balances).
  */
-async function executeEntry(userId: number, symbol: string, nextFundingTime: string, account?: 'main' | 'sub'): Promise<void> {
+async function executeEntry(
+  userId: number,
+  symbol: string,
+  nextFundingTime: string,
+  account?: 'main' | 'sub',
+  prepData?: ExecuteEntryPrepData
+): Promise<void> {
   console.log(`[DEBUG] executeEntry TRIGGERED for ${symbol} - Account: ${account ?? 'main'} at ${Date.now()}`);
   try {
     const cycleKey = entryCycleKey(userId, symbol, nextFundingTime);
@@ -976,22 +998,20 @@ async function executeEntry(userId: number, symbol: string, nextFundingTime: str
         entryTimeoutByCycle.delete(cycleKey);
       }
     }
-    const prep = entryPrepCacheByUser.get(userId);
-    const c = prep?.candidates.find((x) => x.symbol === symbol && x.nextFundingTime === nextFundingTime);
+    // When prepData is injected, use it only (no cache) so order uses correct qty, leverage, and keys.
+    const prep = prepData ? prepData.prep : entryPrepCacheByUser.get(userId);
+    const c = prepData ? prepData.candidate : prep?.candidates.find((x) => x.symbol === symbol && x.nextFundingTime === nextFundingTime);
+    if (prepData && (!prep || !c)) return; // strict: require full injected prep when provided
     const isSubHedge = account === 'sub' && prep?.subApiKey && prep?.subApiSecret && c?.fixedQty != null;
     const isMainHedge = account !== 'sub' && prep?.subApiKey && prep?.subApiSecret;
 
     const pendingPayload = pendingOrderPayloadByCycle.get(cycleKey);
 
-    if (account === 'sub' && !pendingPayload?.sub && (!prep || !c || c.fixedQty == null || c.fixedQty === 0)) {
-      console.error(`[ERROR] executeEntry aborted: Missing prep data for ${symbol}`);
-      return;
-    }
-
   if (account === 'sub' && pendingPayload?.sub) {
     const pl = pendingPayload.sub;
     try {
-      await placeLimitOrder(pl.apiKey, pl.apiSecret, pl.symbol, pl.side, pl.qtyStr, pl.priceStr, 'IOC');
+      const response = await placeLimitOrder(pl.apiKey, pl.apiSecret, pl.symbol, pl.side, pl.qtyStr, pl.priceStr, 'IOC');
+      console.log(`[DEBUG] Bybit Response for sub:`, response);
       const mainFilled = mainFilledForSubHedge.get(cycleKey);
       if (mainFilled) {
         const posKey = positionKey(userId, pl.symbol, pl.side);
@@ -1021,7 +1041,8 @@ async function executeEntry(userId: number, symbol: string, nextFundingTime: str
   if (account !== 'sub' && pendingPayload?.main) {
     const pl = pendingPayload.main;
     try {
-      await placeLimitOrder(pl.apiKey, pl.apiSecret, pl.symbol, pl.side, pl.qtyStr, pl.priceStr, 'IOC');
+      const response = await placeLimitOrder(pl.apiKey, pl.apiSecret, pl.symbol, pl.side, pl.qtyStr, pl.priceStr, 'IOC');
+      console.log(`[DEBUG] Bybit Response for main:`, response);
       const nextFundingMs = parseInt(nextFundingTime, 10) || 0;
       positionFundingTime.set(positionKey(userId, pl.symbol, pl.side), nextFundingMs);
       if (prep?.subApiKey && prep?.subApiSecret) {
@@ -1059,9 +1080,12 @@ async function executeEntry(userId: number, symbol: string, nextFundingTime: str
       const sweepPrice = getSweepPrice(orderbook, c.side, finalQty);
       if (!Number.isFinite(sweepPrice) || sweepPrice <= 0) return;
       const priceStr = formatPriceToTick(sweepPrice, tickSize);
-      const { orderId } = await placeLimitOrder(prep.subApiKey!, prep.subApiSecret!, c.symbol, c.side, qtyStr, priceStr, 'IOC');
+      const subApiKey = prep.subApiKey!;
+      const subApiSecret = prep.subApiSecret!;
+      const response = await placeLimitOrder(subApiKey, subApiSecret, c.symbol, c.side, qtyStr, priceStr, 'IOC');
+      console.log(`[DEBUG] Bybit Response for sub:`, response);
       await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
-      const executions = await getExecutionList(prep.subApiKey!, prep.subApiSecret!, 'linear', orderId);
+      const executions = await getExecutionList(subApiKey, subApiSecret, 'linear', response.orderId);
       const filledQty = executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
       if (filledQty <= 0) return;
       const mainFilled = mainFilledForSubHedge.get(cycleKey);
@@ -1126,9 +1150,10 @@ async function executeEntry(userId: number, symbol: string, nextFundingTime: str
           const priceStr = formatPriceToTick(sweepPrice, tickSize);
           const qtyStr = formatQtyToStep(remainingQty, String(c.qtyStep));
           if (parseFloat(qtyStr) <= 0) break;
-          const { orderId } = await placeLimitOrder(prep.apiKey, prep.apiSecret, c.symbol, c.side, qtyStr, priceStr, 'IOC');
+          const response = await placeLimitOrder(prep.apiKey, prep.apiSecret, c.symbol, c.side, qtyStr, priceStr, 'IOC');
+          console.log(`[DEBUG] Bybit Response for main:`, response);
           await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
-          const executions = await getExecutionList(prep.apiKey, prep.apiSecret, 'linear', orderId);
+          const executions = await getExecutionList(prep.apiKey, prep.apiSecret, 'linear', response.orderId);
           const filledQty = executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
           remainingQty -= filledQty;
           if (remainingQty <= 0) break;
@@ -1214,9 +1239,10 @@ async function executeEntry(userId: number, symbol: string, nextFundingTime: str
         const priceStr = formatPriceToTick(sweepPrice, ls.tickSize ?? '0.01');
         const qtyStr = formatQtyToStep(remainingQty, ls.qtyStep);
         if (parseFloat(qtyStr) <= 0) break;
-        const { orderId } = await placeLimitOrder(apiKey, apiSecret, symbol, side, qtyStr, priceStr, 'IOC');
+        const response = await placeLimitOrder(apiKey, apiSecret, symbol, side, qtyStr, priceStr, 'IOC');
+        console.log(`[DEBUG] Bybit Response for main:`, response);
         await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
-        const executions = await getExecutionList(apiKey, apiSecret, 'linear', orderId);
+        const executions = await getExecutionList(apiKey, apiSecret, 'linear', response.orderId);
         const filledQty = executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
         remainingQty -= filledQty;
         if (remainingQty <= 0) break;
@@ -1265,8 +1291,11 @@ async function processUserCritical(
     if (processedTokens.has(processedKey(userId, c.symbol, c.nextFundingTime))) continue;
     if (enteredThisCycle.has(cycleKey)) continue;
 
+    isExecutionImminent = true;
+    executionImminentUntilMs = Math.max(executionImminentUntilMs, fundingTimeMs + 2000);
+    const prepData: ExecuteEntryPrepData = { prep, candidate: c };
     const t = setTimeout(() => {
-      executeEntry(userId, c.symbol, c.nextFundingTime).catch((e) =>
+      executeEntry(userId, c.symbol, c.nextFundingTime, undefined, prepData).catch((e) =>
         console.error('[autoBot] executeEntry failed', e)
       );
     }, delayMs);
@@ -1548,13 +1577,22 @@ async function processUser(
               console.warn('[autoBot] Pre-compute payload failed, executeEntry will compute:', e);
             }
           }
+          isExecutionImminent = true;
+          executionImminentUntilMs = Math.max(executionImminentUntilMs, fundingTimeMs + 2000);
+          const prepDataMain: ExecuteEntryPrepData | undefined = prepForPayload && cForPayload
+            ? { prep: prepForPayload, candidate: cForPayload }
+            : (() => {
+                const p = entryPrepCacheByUser.get(userId);
+                const cand = p?.candidates.find((x) => x.symbol === topToken.symbol && x.nextFundingTime === topToken.nextFundingTime);
+                return p && cand ? { prep: p, candidate: cand } : undefined;
+              })();
           const tMain = setTimeout(() => {
-            executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'main').catch((e) =>
+            executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'main', prepDataMain).catch((e) =>
               console.error('[autoBot] executeEntry main failed', e)
             );
           }, Math.max(0, delayMs));
           const tSub = setTimeout(() => {
-            executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'sub').catch((e) =>
+            executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'sub', prepDataMain).catch((e) =>
               console.error('[autoBot] executeEntry sub failed', e)
             );
           }, Math.max(0, delaySubMs));
@@ -1567,8 +1605,13 @@ async function processUser(
       if (!settings.spotHedgingEnabled && !subHedgingEnabled && delayMs >= ENTRY_SCHEDULE_MIN_MS && delayMs <= ENTRY_SCHEDULE_MAX_MS && !entryTimeoutByCycle.has(cycleKey)) {
         if (processedTokens.has(processedKey(userId, topToken.symbol, topToken.nextFundingTime))) return;
         if (enteredThisCycle.has(cycleKey)) return;
+        isExecutionImminent = true;
+        executionImminentUntilMs = Math.max(executionImminentUntilMs, fundingTimeMs + 2000);
+        const p = entryPrepCacheByUser.get(userId);
+        const cand = p?.candidates.find((x) => x.symbol === topToken.symbol && x.nextFundingTime === topToken.nextFundingTime);
+        const prepDataSingle: ExecuteEntryPrepData | undefined = p && cand ? { prep: p, candidate: cand } : undefined;
         const t = setTimeout(() => {
-          executeEntry(userId, topToken.symbol, topToken.nextFundingTime).catch((e) =>
+          executeEntry(userId, topToken.symbol, topToken.nextFundingTime, undefined, prepDataSingle).catch((e) =>
             console.error('[autoBot] executeEntry failed', e)
           );
         }, delayMs);
