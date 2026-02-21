@@ -451,7 +451,7 @@ export function startMonitoring(): void {
   syncExecutionStreams().then(() => {
     setInterval(syncExecutionStreams, 60_000);
   }).catch((e) => console.error('[autoBot] syncExecutionStreams failed:', e));
-  warmupWsConnections().catch((e) => console.error('[autoBot] warmupWsConnections failed:', e));
+  void warmupWsConnections().catch((e) => console.error('[autoBot] warmupWsConnections failed:', e));
 }
 
 /** Warm up WebSocket Private Trade connections for all users with auto entry (main + sub when subaccount hedging) so first order has minimal latency. */
@@ -523,6 +523,7 @@ export function cancelManualMock(): void {
 
 /** Returns minimum countdown in seconds across market data, or -1 if none. */
 async function runTick(): Promise<number> {
+  console.log('[autoBot] Tick Check - ' + new Date().toISOString());
   try {
     const now = Date.now();
     let marketData: Array<{ symbol: string; fundingRate: number; nextFundingTime: string; countdownMs: number; markPrice?: string; lastPrice?: string; fundingIntervalHours?: number }>;
@@ -644,6 +645,12 @@ async function runTick(): Promise<number> {
     return minCountdownSec;
   } catch (error) {
     console.error('[autoBot] CRITICAL LOOP ERROR:', error);
+    if (isManualMockActive) {
+      isManualMockActive = false;
+      manualMockFundingTimeMs = null;
+      manualMockEndMs = null;
+      console.log('[autoBot] Mock state reset after tick error so button is clickable again.');
+    }
     return -1;
   }
 }
@@ -945,28 +952,35 @@ async function monitorExits(): Promise<void> {
  * For subaccount hedging: account 'main' fires at funding - entry_offset_ms, 'sub' at funding - sub_entry_offset_ms; both use same Q from min(balances).
  */
 async function executeEntry(userId: number, symbol: string, nextFundingTime: string, account?: 'main' | 'sub'): Promise<void> {
-  const cycleKey = entryCycleKey(userId, symbol, nextFundingTime);
-  const procKey = processedKey(userId, symbol, nextFundingTime);
-  const existing = entryTimeoutByCycle.get(cycleKey);
-  if (existing) {
-    if (typeof existing === 'object' && existing != null && 'main' in existing) {
-      if (account === 'main') {
-        clearTimeout(existing.main);
-      } else if (account === 'sub') {
-        clearTimeout(existing.sub);
+  console.log(`[DEBUG] executeEntry TRIGGERED for ${symbol} - Account: ${account ?? 'main'} at ${Date.now()}`);
+  try {
+    const cycleKey = entryCycleKey(userId, symbol, nextFundingTime);
+    const procKey = processedKey(userId, symbol, nextFundingTime);
+    const existing = entryTimeoutByCycle.get(cycleKey);
+    if (existing) {
+      if (typeof existing === 'object' && existing != null && 'main' in existing) {
+        if (account === 'main') {
+          clearTimeout(existing.main);
+        } else if (account === 'sub') {
+          clearTimeout(existing.sub);
+          entryTimeoutByCycle.delete(cycleKey);
+        }
+      } else {
+        clearTimeout(existing as ReturnType<typeof setTimeout>);
         entryTimeoutByCycle.delete(cycleKey);
       }
-    } else {
-      clearTimeout(existing as ReturnType<typeof setTimeout>);
-      entryTimeoutByCycle.delete(cycleKey);
     }
-  }
-  const prep = entryPrepCacheByUser.get(userId);
-  const c = prep?.candidates.find((x) => x.symbol === symbol && x.nextFundingTime === nextFundingTime);
-  const isSubHedge = account === 'sub' && prep?.subApiKey && prep?.subApiSecret && c?.fixedQty != null;
-  const isMainHedge = account !== 'sub' && prep?.subApiKey && prep?.subApiSecret;
+    const prep = entryPrepCacheByUser.get(userId);
+    const c = prep?.candidates.find((x) => x.symbol === symbol && x.nextFundingTime === nextFundingTime);
+    const isSubHedge = account === 'sub' && prep?.subApiKey && prep?.subApiSecret && c?.fixedQty != null;
+    const isMainHedge = account !== 'sub' && prep?.subApiKey && prep?.subApiSecret;
 
-  const pendingPayload = pendingOrderPayloadByCycle.get(cycleKey);
+    const pendingPayload = pendingOrderPayloadByCycle.get(cycleKey);
+
+    if (account === 'sub' && !pendingPayload?.sub && (!prep || !c || c.fixedQty == null || c.fixedQty === 0)) {
+      console.error(`[ERROR] executeEntry aborted: Missing prep data for ${symbol}`);
+      return;
+    }
 
   if (account === 'sub' && pendingPayload?.sub) {
     const pl = pendingPayload.sub;
@@ -1071,7 +1085,6 @@ async function executeEntry(userId: number, symbol: string, nextFundingTime: str
   if (processedTokens.has(procKey) || enteredThisCycle.has(cycleKey)) return;
 
   if (prep && c) {
-    if (account !== 'sub' && prep.positionsCount >= prep.maxTrades) return;
     let entryPrice: number;
     try {
       const obDepth = await getOrderBookDepth(prep.apiKey, prep.apiSecret, c.symbol, prep.settings.orderBookDepth ?? 2);
@@ -1211,6 +1224,9 @@ async function executeEntry(userId: number, symbol: string, nextFundingTime: str
     positionFundingTime.set(positionKey(userId, symbol, side), nextFundingMs);
   } catch (e) {
     console.error(`[autoBot] executeEntry ${symbol} failed:`, e);
+  }
+  } catch (e) {
+    console.error('[CRITICAL EXECUTION ERROR]', e);
   }
 }
 
@@ -1500,6 +1516,7 @@ async function processUser(
       if (subHedgingEnabled && settings.subApiKey && settings.subApiSecret && !entryTimeoutByCycle.has(cycleKey)) {
         if (processedTokens.has(processedKey(userId, topToken.symbol, topToken.nextFundingTime))) return;
         if (enteredThisCycle.has(cycleKey)) return;
+        if (Number.isNaN(delayMs) || delayMs < 0 || Number.isNaN(delaySubMs) || delaySubMs < 0) return;
         const inRangeMain = delayMs >= ENTRY_SCHEDULE_MIN_MS && delayMs <= ENTRY_SCHEDULE_MAX_MS;
         const inRangeSub = delaySubMs > 0 && delaySubMs <= ENTRY_SCHEDULE_MAX_MS + 5000;
         if (inRangeMain || inRangeSub) {
