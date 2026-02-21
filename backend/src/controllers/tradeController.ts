@@ -444,6 +444,20 @@ export async function getTradeHistory(
         const tb = new Date(b.closed_at).getTime();
         return tb - ta;
       });
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+      const dbRows = await getClosedTrades(userId, { from: thirtyDaysAgo.toISOString().slice(0, 10) });
+      const MATCH_MS = 60000;
+      for (const row of merged) {
+        const closedAtMs = new Date(row.closed_at).getTime();
+        const dbMatch = dbRows.find(
+          (d) => d.token === row.symbol && Math.abs(new Date(d.exit_time).getTime() - closedAtMs) <= MATCH_MS
+        );
+        if (dbMatch?.exit_reason) {
+          row.exit_reason = dbMatch.exit_reason;
+          row.exitReason = dbMatch.exit_reason;
+        }
+      }
       let filtered = merged;
       if (from) {
         const fromTime = new Date(from).getTime();
