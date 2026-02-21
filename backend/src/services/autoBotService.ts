@@ -749,7 +749,8 @@ async function monitorExits(): Promise<void> {
           // Exit price never 0: use depth price or fallback (markPrice / avgPrice)
           const exitPrice = pos.side === 'Buy' ? bidPriceSafe : askPriceSafe;
 
-          // Subaccount future-to-future hedge: exit when MainAccount_UnrealizedPnL > estimated taker fees (only exit path for hedges)
+          // Subaccount future-to-future hedge: exit when MainAccount_UnrealizedPnL > estimated taker fees (only exit path for hedges).
+          // ENFORCED: PnL-triggered closes use Market reduce-only only (no Limit orders).
           const subHedge = subHedgeActive.get(key);
           if (subHedge != null) {
             const notional = qty * entry;
