@@ -4,21 +4,25 @@ import * as XLSX from 'xlsx';
 const TOKEN_KEY = 'hft_token';
 
 export interface ClosedTradeRow {
-  id: number;
-  user_id: number;
+  id: number | string;
+  user_id?: number;
   symbol: string;
   side: string;
   entry_price: string;
   exit_price: string;
   qty: string;
   gross_pnl: string;
-  funding: string;
+  funding?: string;
   funding_received?: string;
   fees: string;
   net_pnl: string;
   closed_at: string;
-  source: string | null;
+  source?: string | null;
   exit_reason?: string | null;
+  /** CamelCase exit reason (e.g. 'PnL Positive Exit') for display in Reason column. */
+  exitReason?: string | null;
+  /** When subaccount hedging is active, backend returns Main/Sub per row. */
+  accountType?: 'Main' | 'Sub';
 }
 
 function tokenName(symbol: string): string {
@@ -153,7 +157,7 @@ export default function ClosedTradesTable() {
       parseFloat(r.exit_price) || 0,
       formatTime(r.closed_at),
       parseFloat(r.fees) || 0,
-      r.exit_reason ?? '',
+      r.exitReason ?? r.exit_reason ?? '',
       parseFloat(r.funding_received ?? r.funding ?? '0') || 0,
       parseFloat(r.net_pnl) || 0,
     ]);
@@ -250,14 +254,14 @@ export default function ClosedTradesTable() {
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-gray-400" style={{ backgroundColor: 'rgba(0, 0, 0, 0.2)' }}>
-                <th className="px-4 py-2.5 font-medium">Token</th>
+                <th className="px-4 py-2.5 font-medium">Token / Account</th>
                 <th className="px-4 py-2.5 font-medium">Direction</th>
                 <th className="px-4 py-2.5 font-medium">Quantity</th>
                 <th className="px-4 py-2.5 font-medium">Trade Amount</th>
                 <th className="px-4 py-2.5 font-medium">Entry / Exit Price</th>
                 <th className="px-4 py-2.5 font-medium">Time</th>
                 <th className="px-4 py-2.5 font-medium">Fees</th>
-                <th className="px-4 py-2.5 font-medium">Exit Reason</th>
+                <th className="px-4 py-2.5 font-medium">Reason</th>
                 <th className="px-4 py-2.5 font-medium">Funding Earned</th>
                 <th className="px-4 py-2.5 font-medium">Net PnL</th>
               </tr>
@@ -280,7 +284,23 @@ export default function ClosedTradesTable() {
                       className="border-b border-gray-800/80 hover:bg-white/5"
                       style={{ borderColor: 'rgba(255,255,255,0.06)' }}
                     >
-                      <td className="px-4 py-2.5 font-medium text-white">{tokenName(r.symbol)}</td>
+                      <td className="px-4 py-2.5 font-medium text-white">
+                        <span className="inline-flex items-center gap-1.5">
+                          {tokenName(r.symbol)}
+                          {r.accountType && (
+                            <span
+                              className="inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
+                              style={
+                                r.accountType === 'Main'
+                                  ? { backgroundColor: 'rgba(59, 130, 246, 0.25)', color: '#93c5fd' }
+                                  : { backgroundColor: 'rgba(168, 85, 247, 0.25)', color: '#c4b5fd' }
+                              }
+                            >
+                              {r.accountType}
+                            </span>
+                          )}
+                        </span>
+                      </td>
                       <td className="px-4 py-2.5">
                         <span
                           className="inline-block rounded px-2 py-0.5 text-xs font-semibold"
@@ -311,7 +331,7 @@ export default function ClosedTradesTable() {
                             border: '1px solid rgba(255, 255, 255, 0.12)',
                           }}
                         >
-                          {r.exit_reason ?? '—'}
+                          {r.exitReason ?? r.exit_reason ?? '—'}
                         </span>
                       </td>
                       <td className="px-4 py-2.5">

@@ -23,13 +23,11 @@ interface BotSettings {
   exitTimeMs: number;
   leverage: number;
   orderBookDepth: number;
-  slPreFundingEnabled: boolean;
-  slPreMultiplier: number;
-  slPostFundingEnabled: boolean;
-  spotHedgingEnabled: boolean;
   hedgeTargetPct: number;
   hedgeStoplossPct: number;
   hedgePnlDepth: number;
+  subEntryOffsetMs: number;
+  universalStoplossPercent: number;
 }
 
 const defaultSettings: Omit<BotSettings, 'userId'> = {
@@ -41,13 +39,11 @@ const defaultSettings: Omit<BotSettings, 'userId'> = {
   exitTimeMs: 3600000,
   leverage: 5,
   orderBookDepth: 2,
-  slPreFundingEnabled: false,
-  slPreMultiplier: 2,
-  slPostFundingEnabled: false,
-  spotHedgingEnabled: false,
   hedgeTargetPct: 2,
   hedgeStoplossPct: 5,
   hedgePnlDepth: 1,
+  subEntryOffsetMs: 10,
+  universalStoplossPercent: 3,
 };
 
 export default function Settings() {
@@ -98,13 +94,11 @@ export default function Settings() {
         exitTimeMs: Number(data.exitTimeMs) ?? 3600000,
         leverage: Number(data.leverage) ?? 5,
         orderBookDepth: Math.max(1, Math.min(50, Number(data.orderBookDepth) || 2)),
-        slPreFundingEnabled: data.slPreFundingEnabled ?? false,
-        slPreMultiplier: Number(data.slPreMultiplier) ?? 2,
-        slPostFundingEnabled: data.slPostFundingEnabled ?? false,
-        spotHedgingEnabled: data.spotHedgingEnabled ?? false,
         hedgeTargetPct: Number(data.hedgeTargetPct) ?? 2,
         hedgeStoplossPct: Number(data.hedgeStoplossPct) ?? 5,
         hedgePnlDepth: Math.max(1, Math.min(50, Number(data.hedgePnlDepth) || 1)),
+        subEntryOffsetMs: Number(data.subEntryOffsetMs ?? data.sub_entry_offset_ms) ?? 10,
+        universalStoplossPercent: Number(data.universalStoplossPercent ?? data.universal_stoploss_percent) ?? 3,
       });
     } catch {
       setError('Network error. Edit below and click Save to retry.');
@@ -149,9 +143,11 @@ export default function Settings() {
           exitTimeMs: Number(data.exitTimeMs) ?? settings.exitTimeMs,
           leverage: Number(data.leverage) ?? settings.leverage,
           orderBookDepth: Number(data.orderBookDepth) ?? settings.orderBookDepth,
-          slPreFundingEnabled: data.slPreFundingEnabled ?? settings.slPreFundingEnabled,
-          slPreMultiplier: Number(data.slPreMultiplier) ?? settings.slPreMultiplier,
-          slPostFundingEnabled: data.slPostFundingEnabled ?? settings.slPostFundingEnabled,
+          hedgeTargetPct: Number(data.hedgeTargetPct) ?? settings.hedgeTargetPct,
+          hedgeStoplossPct: Number(data.hedgeStoplossPct) ?? settings.hedgeStoplossPct,
+          hedgePnlDepth: Number(data.hedgePnlDepth) ?? settings.hedgePnlDepth,
+          subEntryOffsetMs: Number(data.subEntryOffsetMs ?? data.sub_entry_offset_ms) ?? settings.subEntryOffsetMs,
+          universalStoplossPercent: Number(data.universalStoplossPercent ?? data.universal_stoploss_percent) ?? settings.universalStoplossPercent,
         });
         setSuccessMessage('Success — bot updated.');
         setTimeout(() => setSuccessMessage(null), 3000);
@@ -175,13 +171,11 @@ export default function Settings() {
       exitTimeMs: Number(settings.exitTimeMs),
       leverage: Number(settings.leverage),
       orderBookDepth: Math.max(1, Math.min(50, Number(settings.orderBookDepth) || 2)),
-      slPreFundingEnabled: Boolean(settings.slPreFundingEnabled),
-      slPreMultiplier: Number(settings.slPreMultiplier) ?? 2,
-      slPostFundingEnabled: Boolean(settings.slPostFundingEnabled),
-      spotHedgingEnabled: Boolean(settings.spotHedgingEnabled),
       hedgeTargetPct: Number(settings.hedgeTargetPct) ?? 2,
       hedgeStoplossPct: Number(settings.hedgeStoplossPct) ?? 5,
       hedgePnlDepth: Math.max(1, Math.min(50, Number(settings.hedgePnlDepth) || 1)),
+      subEntryOffsetMs: Math.max(0, Math.round(Number(settings.subEntryOffsetMs) ?? 10)),
+      universalStoplossPercent: Math.max(0, Number(settings.universalStoplossPercent) ?? 3),
     });
   }, [settings, saveSettings]);
 
@@ -207,27 +201,6 @@ export default function Settings() {
     saveSettings({ autoExitEnabled: next });
   };
 
-  const toggleSlPreFunding = () => {
-    if (!settings) return;
-    const next = !settings.slPreFundingEnabled;
-    setSettings((s) => (s ? { ...s, slPreFundingEnabled: next } : s));
-    saveSettings({ slPreFundingEnabled: next });
-  };
-
-  const toggleSlPostFunding = () => {
-    if (!settings) return;
-    const next = !settings.slPostFundingEnabled;
-    setSettings((s) => (s ? { ...s, slPostFundingEnabled: next } : s));
-    saveSettings({ slPostFundingEnabled: next });
-  };
-
-  const toggleSpotHedging = () => {
-    if (!settings) return;
-    const next = !settings.spotHedgingEnabled;
-    setSettings((s) => (s ? { ...s, spotHedgingEnabled: next } : s));
-    saveSettings({ spotHedgingEnabled: next });
-  };
-
   const fetchTransactions = useCallback(async () => {
     const token = localStorage.getItem(TOKEN_KEY);
     if (!token) return;
@@ -237,7 +210,7 @@ export default function Settings() {
       const data = await res.json().catch(() => []);
       if (res.ok) setTransactions(Array.isArray(data) ? data : []);
     } catch {
-      setTransactions([]);
+      // Do not clear list on network error so optimistic updates after add are preserved
     } finally {
       setTxListLoading(false);
     }
@@ -248,10 +221,18 @@ export default function Settings() {
   }, [fetchTransactions]);
 
   const handleAddTransaction = useCallback(async () => {
+    setError(null);
     const token = localStorage.getItem(TOKEN_KEY);
-    if (!token) return;
-    const amountNum = parseFloat(txAmount);
-    if (Number.isNaN(amountNum) || amountNum <= 0) return;
+    if (!token) {
+      setError('Please log in again.');
+      return;
+    }
+    const trimmedAmount = String(txAmount).trim();
+    const amountNum = parseFloat(trimmedAmount);
+    if (trimmedAmount === '' || Number.isNaN(amountNum) || amountNum <= 0) {
+      setError('Please enter a valid amount greater than 0.');
+      return;
+    }
     setTxLoading(true);
     try {
       const res = await fetch('/api/transactions', {
@@ -271,10 +252,18 @@ export default function Settings() {
       if (!res.ok) throw new Error(data.error ?? 'Failed to add');
       setTxAmount('');
       setTxNote('');
-      await fetchTransactions();
+      const newRow: TransactionRow = {
+        id: data.id ?? 0,
+        date: data.date ?? txDate,
+        type: data.type ?? txType,
+        amount: String(data.amount ?? amountNum),
+        note: (data.note ?? txNote.trim()) || null,
+      };
+      setTransactions((prev) => [newRow, ...prev]);
       window.dispatchEvent(new CustomEvent(TRANSACTIONS_UPDATED_EVENT));
-      setSuccessMessage('Entry added. Today\'s profit will update on Dashboard.');
+      setSuccessMessage(txType === 'DEPOSIT' ? 'Deposit added. Balance impact reflected in today\'s profit.' : 'Withdrawal added. Balance impact reflected in today\'s profit.');
       setTimeout(() => setSuccessMessage(null), 4000);
+      fetchTransactions().catch(() => { /* keep optimistic list on refetch failure */ });
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to add entry');
     } finally {
@@ -513,28 +502,50 @@ export default function Settings() {
             <p className="text-xs text-gray-500 mt-1">How many ms before funding to place entry (e.g. 500 = 0.5s before)</p>
           </div>
 
-          {/* Exit Time (Milliseconds) — delay after funding settlement before closing position */}
-          <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">
-              Exit Time (ms)
-            </label>
-            <input
-              type="number"
-              min={0}
-              step={1000}
-              value={settings.exitTimeMs}
-              onChange={(e) => {
-                const v = parseInt(e.target.value, 10);
-                if (!Number.isNaN(v) && v >= 0) {
-                  setSettings((s) => s ? { ...s, exitTimeMs: v } : s);
-                  debouncedSave({ exitTimeMs: v });
-                }
-              }}
-              className="w-full rounded-lg border bg-black/50 px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-[#007BFF]"
-              style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
-              placeholder="e.g. 3600000 (1 hour)"
-            />
-            <p className="text-xs text-gray-500 mt-1">Delay after settlement before exit (e.g. 3600000 = 1 hour)</p>
+          {/* Subaccount Hedging */}
+          <div className="space-y-4">
+            <h3 className="text-base font-semibold text-white mt-6 mb-2">Subaccount Hedging</h3>
+            <p className="text-xs text-gray-500">Sub-account API keys are configured in Exchange Setup.</p>
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-2">Sub-Account Entry Offset (ms)</label>
+              <input
+                type="number"
+                min={0}
+                step={1}
+                value={settings.subEntryOffsetMs}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value, 10);
+                  if (!Number.isNaN(v) && v >= 0) {
+                    setSettings((s) => (s ? { ...s, subEntryOffsetMs: v } : s));
+                    debouncedSave({ subEntryOffsetMs: v });
+                  }
+                }}
+                className="w-full rounded-lg border bg-black/50 px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-[#007BFF]"
+                style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
+                placeholder="10"
+              />
+              <p className="text-xs text-gray-500 mt-1">Default: 10 ms</p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-2">Universal Stoploss (%)</label>
+              <input
+                type="number"
+                min={0}
+                step={0.1}
+                value={settings.universalStoplossPercent}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  if (!Number.isNaN(v) && v >= 0) {
+                    setSettings((s) => (s ? { ...s, universalStoplossPercent: v } : s));
+                    debouncedSave({ universalStoplossPercent: v });
+                  }
+                }}
+                className="w-full rounded-lg border bg-black/50 px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-[#007BFF]"
+                style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
+                placeholder="3"
+              />
+              <p className="text-xs text-gray-500 mt-1">Combined (main+sub) loss limit as % of total capital. Triggers immediate exit for both accounts even before funding. Default: 3</p>
+            </div>
           </div>
 
           {/* Auto Exit Toggle */}
@@ -562,174 +573,6 @@ export default function Settings() {
             </button>
           </div>
 
-          {/* Spot Hedging Toggle */}
-          <div>
-            <div className="flex items-center justify-between">
-              <label className="text-sm font-medium text-gray-300">Enable Spot Hedging (1:1)</label>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={settings.spotHedgingEnabled}
-                onClick={toggleSpotHedging}
-                className={`relative h-8 w-14 rounded-full transition-colors ${
-                  settings.spotHedgingEnabled ? 'bg-[#007BFF]' : 'bg-gray-600'
-                }`}
-                style={
-                  settings.spotHedgingEnabled
-                    ? { boxShadow: '0 0 16px rgba(0, 123, 255, 0.5)' }
-                    : undefined
-                }
-              >
-                <span
-                  className={`absolute top-1 h-6 w-6 rounded-full bg-white transition-transform ${
-                    settings.spotHedgingEnabled ? 'left-7' : 'left-1'
-                  }`}
-                />
-              </button>
-            </div>
-            <p className="text-xs text-gray-500 mt-1">
-              Splits capital between Spot and Futures to maintain exactly the same quantity on both sides, making the trade market-neutral.
-            </p>
-            {settings.spotHedgingEnabled && (
-              <div className="mt-4 space-y-4 rounded-lg p-4" style={{ backgroundColor: 'rgba(0, 0, 0, 0.2)' }}>
-                <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-1">Group Target Profit (%)</label>
-                  <input
-                    type="number"
-                    min={0}
-                    step={0.1}
-                    value={settings.hedgeTargetPct}
-                    onChange={(e) => {
-                      const v = parseFloat(e.target.value);
-                      if (!Number.isNaN(v) && v >= 0) {
-                        setSettings((s) => (s ? { ...s, hedgeTargetPct: v } : s));
-                        debouncedSave({ hedgeTargetPct: v });
-                      }
-                    }}
-                    className="w-full rounded-lg border bg-black/50 px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-[#007BFF]"
-                    style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
-                  />
-                  <p className="text-xs text-gray-500 mt-1">If set to 0, fallback to Funding Rate.</p>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-1">Group Stoploss (%)</label>
-                  <input
-                    type="number"
-                    min={0}
-                    step={0.1}
-                    value={settings.hedgeStoplossPct}
-                    onChange={(e) => {
-                      const v = parseFloat(e.target.value);
-                      if (!Number.isNaN(v) && v >= 0) {
-                        setSettings((s) => (s ? { ...s, hedgeStoplossPct: v } : s));
-                        debouncedSave({ hedgeStoplossPct: v });
-                      }
-                    }}
-                    className="w-full rounded-lg border bg-black/50 px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-[#007BFF]"
-                    style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
-                  />
-                  <p className="text-xs text-gray-500 mt-1">Max loss limit for the hedged group.</p>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-1">PnL Orderbook Depth Row</label>
-                  <input
-                    type="number"
-                    min={1}
-                    max={50}
-                    step={1}
-                    value={settings.hedgePnlDepth}
-                    onChange={(e) => {
-                      const v = parseInt(e.target.value, 10);
-                      if (!Number.isNaN(v) && v >= 1 && v <= 50) {
-                        setSettings((s) => (s ? { ...s, hedgePnlDepth: v } : s));
-                        debouncedSave({ hedgePnlDepth: v });
-                      }
-                    }}
-                    className="w-full rounded-lg border bg-black/50 px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-[#007BFF]"
-                    style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
-                  />
-                  <p className="text-xs text-gray-500 mt-1">1 = 1st row, 2 = 2nd row, etc.</p>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Stoploss Settings */}
-          <h3 className="text-base font-semibold text-white mt-8 mb-4 flex items-center gap-2">
-            <span aria-hidden>🛡️</span> Stoploss Settings
-          </h3>
-          <div className="space-y-5">
-            <div className="flex items-center justify-between">
-              <label className="text-sm font-medium text-gray-300">Pre-Funding Stoploss</label>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={settings.slPreFundingEnabled}
-                onClick={toggleSlPreFunding}
-                className={`relative h-8 w-14 rounded-full transition-colors ${
-                  settings.slPreFundingEnabled ? 'bg-[#007BFF]' : 'bg-gray-600'
-                }`}
-                style={
-                  settings.slPreFundingEnabled
-                    ? { boxShadow: '0 0 16px rgba(0, 123, 255, 0.5)' }
-                    : undefined
-                }
-              >
-                <span
-                  className={`absolute top-1 h-6 w-6 rounded-full bg-white transition-transform ${
-                    settings.slPreFundingEnabled ? 'left-7' : 'left-1'
-                  }`}
-                />
-              </button>
-            </div>
-            {settings.slPreFundingEnabled && (
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">
-                  Pre-Funding SL Multiplier (x)
-                </label>
-                <input
-                  type="number"
-                  min={0.1}
-                  max={20}
-                  step={0.5}
-                  value={settings.slPreMultiplier}
-                  onChange={(e) => {
-                    const v = parseFloat(e.target.value);
-                    if (!Number.isNaN(v)) {
-                      setSettings((s) => s ? { ...s, slPreMultiplier: v } : s);
-                      debouncedSave({ slPreMultiplier: v });
-                    }
-                  }}
-                  className="w-full rounded-lg border bg-black/50 px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-[#007BFF]"
-                  style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
-                  placeholder="2"
-                />
-              </div>
-            )}
-            <div className="flex items-center justify-between">
-              <label className="text-sm font-medium text-gray-300">Post-Funding Stoploss (1x Funding Rate)</label>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={settings.slPostFundingEnabled}
-                onClick={toggleSlPostFunding}
-                className={`relative h-8 w-14 rounded-full transition-colors ${
-                  settings.slPostFundingEnabled ? 'bg-[#007BFF]' : 'bg-gray-600'
-                }`}
-                style={
-                  settings.slPostFundingEnabled
-                    ? { boxShadow: '0 0 16px rgba(0, 123, 255, 0.5)' }
-                    : undefined
-                }
-              >
-                <span
-                  className={`absolute top-1 h-6 w-6 rounded-full bg-white transition-transform ${
-                    settings.slPostFundingEnabled ? 'left-7' : 'left-1'
-                  }`}
-                />
-              </button>
-            </div>
-          </div>
         </div>
 
         {saving && (

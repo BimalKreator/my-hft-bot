@@ -1,5 +1,5 @@
 import { Response } from 'express';
-import { getExchangeKeys } from '../models/exchangeModel.js';
+import { getExchangeKeys, getSubAccountKeys } from '../models/exchangeModel.js';
 import { decrypt } from '../utils/encryption.js';
 import {
   setLeverage,
@@ -143,9 +143,9 @@ export async function closePosition(
         res.status(400).json({ error: 'hedgeClose requires symbol (string).' });
         return;
       }
-      const settings = await getSettings(userId);
-      if (!settings.subApiKey || !settings.subApiSecret) {
-        res.status(400).json({ error: 'Subaccount hedging not configured. Cannot close hedge.' });
+      const subKeys = await getSubAccountKeys(userId);
+      if (!subKeys) {
+        res.status(400).json({ error: 'Subaccount hedging not configured. Add sub-account keys in Exchange Setup.' });
         return;
       }
       const keys = await getExchangeKeys(userId, 'Bybit');
@@ -155,18 +155,9 @@ export async function closePosition(
       }
       const mainKey = decrypt(keys.api_key);
       const mainSecret = decrypt(keys.api_secret);
-      let subKey: string;
-      let subSecret: string;
-      try {
-        subKey = decrypt(settings.subApiKey);
-        subSecret = decrypt(settings.subApiSecret);
-      } catch {
-        subKey = settings.subApiKey;
-        subSecret = settings.subApiSecret;
-      }
       const [mainPositions, subPositions] = await Promise.all([
         getPositionList(mainKey, mainSecret, { category: 'linear', settleCoin: 'USDT' }),
-        getPositionList(subKey, subSecret, { category: 'linear', settleCoin: 'USDT' }),
+        getPositionList(subKeys.subApiKey, subKeys.subApiSecret, { category: 'linear', settleCoin: 'USDT' }),
       ]);
       const mainPos = mainPositions.find((p) => p.symbol === symbol);
       const subPos = subPositions.find((p) => p.symbol === symbol);
@@ -175,7 +166,7 @@ export async function closePosition(
         closes.push(placeMarketOrderReduceOnly(mainKey, mainSecret, symbol, mainPos.side, mainPos.size));
       }
       if (subPos && parseFloat(subPos.size) > 0) {
-        closes.push(placeMarketOrderReduceOnly(subKey, subSecret, symbol, subPos.side, subPos.size));
+        closes.push(placeMarketOrderReduceOnly(subKeys.subApiKey, subKeys.subApiSecret, symbol, subPos.side, subPos.size));
       }
       if (closes.length === 0) {
         res.status(400).json({ error: `No open position for ${symbol} on main or sub.` });
@@ -203,18 +194,13 @@ export async function closePosition(
     let apiKey: string;
     let apiSecret: string;
     if (useSubAccount) {
-      const settings = await getSettings(userId);
-      if (!settings.subApiKey || !settings.subApiSecret) {
-        res.status(400).json({ error: 'Sub-account close requested but no sub-account keys in settings.' });
+      const subKeys = await getSubAccountKeys(userId);
+      if (!subKeys) {
+        res.status(400).json({ error: 'Sub-account close requested but no sub-account keys. Add them in Exchange Setup.' });
         return;
       }
-      try {
-        apiKey = decrypt(settings.subApiKey);
-        apiSecret = decrypt(settings.subApiSecret);
-      } catch {
-        apiKey = settings.subApiKey;
-        apiSecret = settings.subApiSecret;
-      }
+      apiKey = subKeys.subApiKey;
+      apiSecret = subKeys.subApiSecret;
     } else {
       const keys = await getExchangeKeys(userId, 'Bybit');
       if (!keys) {
@@ -409,33 +395,21 @@ export async function getTradeHistory(
     const profit = req.query.profit === 'true' || req.query.profit === '1';
     const loss = req.query.loss === 'true' || req.query.loss === '1';
 
-    const settings = await getSettings(userId);
-    const subHedgingActive = !!(settings.subApiKey && settings.subApiSecret);
+    const subKeys = await getSubAccountKeys(userId);
+    const subHedgingActive = !!subKeys;
 
-    if (subHedgingActive && settings.subApiKey && settings.subApiSecret) {
+    if (subHedgingActive && subKeys) {
       const keys = await getExchangeKeys(userId, 'Bybit');
       if (!keys) {
         res.status(400).json({ error: 'Exchange keys not found' });
         return;
       }
-      let mainKey = decrypt(keys.api_key);
-      let mainSecret = decrypt(keys.api_secret);
-      let subKey = settings.subApiKey;
-      let subSecret = settings.subApiSecret;
-      try {
-        const dKey = decrypt(settings.subApiKey);
-        const dSecret = decrypt(settings.subApiSecret);
-        if (dKey && dSecret) {
-          subKey = dKey;
-          subSecret = dSecret;
-        }
-      } catch {
-        /* use plain */
-      }
+      const mainKey = decrypt(keys.api_key);
+      const mainSecret = decrypt(keys.api_secret);
       const limit = 100;
       const [mainList, subList] = await Promise.all([
         getClosedPnl(mainKey, mainSecret, 'linear', undefined, limit),
-        getClosedPnl(subKey, subSecret, 'linear', undefined, limit),
+        getClosedPnl(subKeys.subApiKey, subKeys.subApiSecret, 'linear', undefined, limit),
       ]);
       const mainRows = mainList.map((r, i) => mapBybitClosedPnlToHistoryRow(r, 'Main', i));
       const subRows = subList.map((r, i) => mapBybitClosedPnlToHistoryRow(r, 'Sub', i));

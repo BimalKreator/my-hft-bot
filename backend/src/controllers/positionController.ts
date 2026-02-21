@@ -1,14 +1,13 @@
 import { Response } from 'express';
-import { getExchangeKeys } from '../models/exchangeModel.js';
+import { getExchangeKeys, getSubAccountKeys } from '../models/exchangeModel.js';
 import { decrypt } from '../utils/encryption.js';
 import { placeMarketOrderReduceOnly, getPositionList } from '../services/bybitService.js';
 import { AuthRequest } from '../middleware/authMiddleware.js';
-import { getSettings } from '../models/settingsModel.js';
 
 /**
  * POST /api/positions/close — Close hedge (main + sub) for a symbol.
  * Body: { symbol: string }.
- * Requires subaccount_hedging (settings.subApiKey + subApiSecret).
+ * Requires subaccount hedging (sub-account keys in Exchange Setup).
  * Calls placeMarketOrderReduceOnly twice (main, sub); one failure does not block the other.
  */
 export async function closePosition(
@@ -31,12 +30,10 @@ export async function closePosition(
 
     console.log('[API] Manual Close requested for', symbol);
 
-    const settings = await getSettings(userId);
-    const subaccountHedging = !!(settings.subApiKey && settings.subApiSecret);
-
-    if (!subaccountHedging) {
+    const subKeys = await getSubAccountKeys(userId);
+    if (!subKeys) {
       console.log('[API] Manual Close rejected: subaccount hedging not configured');
-      res.status(400).json({ error: 'Subaccount hedging not configured. Cannot close hedge.' });
+      res.status(400).json({ error: 'Subaccount hedging not configured. Add sub-account keys in Exchange Setup.' });
       return;
     }
 
@@ -49,23 +46,11 @@ export async function closePosition(
 
     const mainKey = decrypt(keys.api_key);
     const mainSecret = decrypt(keys.api_secret);
-    let subKey: string = settings.subApiKey;
-    let subSecret: string = settings.subApiSecret;
-    try {
-      const dKey = decrypt(settings.subApiKey);
-      const dSecret = decrypt(settings.subApiSecret);
-      if (dKey && dSecret) {
-        subKey = dKey;
-        subSecret = dSecret;
-      }
-    } catch {
-      /* use plain */
-    }
 
     console.log('[API] Fetching main and sub positions for', symbol);
     const [mainPositions, subPositions] = await Promise.all([
       getPositionList(mainKey, mainSecret, { category: 'linear', settleCoin: 'USDT' }),
-      getPositionList(subKey, subSecret, { category: 'linear', settleCoin: 'USDT' }),
+      getPositionList(subKeys.subApiKey, subKeys.subApiSecret, { category: 'linear', settleCoin: 'USDT' }),
     ]);
 
     const mainPos = mainPositions.find((p) => p.symbol === symbol && parseFloat(p.size) > 0);
@@ -92,7 +77,7 @@ export async function closePosition(
 
     const subClose =
       subPos
-        ? placeMarketOrderReduceOnly(subKey, subSecret, symbol, subPos.side, subPos.size)
+        ? placeMarketOrderReduceOnly(subKeys.subApiKey, subKeys.subApiSecret, symbol, subPos.side, subPos.size)
             .then((r) => {
               console.log('[API] Sub close ok for', symbol);
               return { account: 'sub' as const, ok: true, result: r };

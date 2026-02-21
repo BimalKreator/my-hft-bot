@@ -1,6 +1,5 @@
 import { query } from '../config/db.js';
-import { getExchangeKeys } from '../models/exchangeModel.js';
-import { getSettings } from '../models/settingsModel.js';
+import { getExchangeKeys, getSubAccountKeys } from '../models/exchangeModel.js';
 import { decrypt } from '../utils/encryption.js';
 import { getWalletBalance, getPositionList } from './bybitService.js';
 
@@ -47,24 +46,12 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
   const balance = await getWalletBalance(apiKey, apiSecret);
   mainEquity = parseFloat(balance.totalEquity ?? '0') || 0;
 
-  const settings = await getSettings(userId);
-  const subHedgingActive = !!(settings.subApiKey && settings.subApiSecret);
+  const subKeys = await getSubAccountKeys(userId);
+  const subHedgingActive = !!subKeys;
   let subEquity = 0;
-  if (subHedgingActive && settings.subApiKey && settings.subApiSecret) {
-    let subKey = settings.subApiKey;
-    let subSecret = settings.subApiSecret;
+  if (subHedgingActive && subKeys) {
     try {
-      const dKey = decrypt(settings.subApiKey);
-      const dSecret = decrypt(settings.subApiSecret);
-      if (dKey && dSecret) {
-        subKey = dKey;
-        subSecret = dSecret;
-      }
-    } catch {
-      /* use plain (subKey/subSecret already set from settings) */
-    }
-    try {
-      const subBalance = await getWalletBalance(subKey, subSecret);
+      const subBalance = await getWalletBalance(subKeys.subApiKey, subKeys.subApiSecret);
       subEquity = parseFloat(subBalance.totalEquity ?? '0') || 0;
     } catch (err) {
       console.warn('[statsService] Sub wallet balance fetch failed:', err instanceof Error ? err.message : String(err));
@@ -87,20 +74,8 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
       const avgPrice = parseFloat(pos.avgPrice) || 0;
       marginUsed += size * avgPrice;
     }
-    if (subHedgingActive && settings.subApiKey && settings.subApiSecret) {
-      let subKey = settings.subApiKey;
-      let subSecret = settings.subApiSecret;
-      try {
-        const dKey = decrypt(settings.subApiKey);
-        const dSecret = decrypt(settings.subApiSecret);
-        if (dKey && dSecret) {
-          subKey = dKey;
-          subSecret = dSecret;
-        }
-      } catch {
-        /* use plain */
-      }
-      const subPositions = await getPositionList(subKey, subSecret, { category: 'linear', settleCoin: 'USDT' });
+    if (subHedgingActive && subKeys) {
+      const subPositions = await getPositionList(subKeys.subApiKey, subKeys.subApiSecret, { category: 'linear', settleCoin: 'USDT' });
       for (const pos of subPositions) {
         const size = parseFloat(pos.size) || 0;
         const avgPrice = parseFloat(pos.avgPrice) || 0;

@@ -5,6 +5,8 @@ const TOKEN_KEY = 'hft_token';
 export default function ExchangeSetup() {
   const [apiKey, setApiKey] = useState('');
   const [apiSecret, setApiSecret] = useState('');
+  const [subApiKey, setSubApiKey] = useState('');
+  const [subApiSecret, setSubApiSecret] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
@@ -30,6 +32,7 @@ export default function ExchangeSetup() {
           exchange: 'Bybit',
           apiKey,
           apiSecret,
+          ...(subApiKey.trim() && subApiSecret.trim() ? { subApiKey: subApiKey.trim(), subApiSecret: subApiSecret.trim() } : {}),
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -40,6 +43,8 @@ export default function ExchangeSetup() {
       setSuccess(true);
       setApiKey('');
       setApiSecret('');
+      setSubApiKey('');
+      setSubApiSecret('');
     } catch {
       setError('Network error');
     } finally {
@@ -134,6 +139,45 @@ export default function ExchangeSetup() {
             required
             className="w-full rounded-lg border bg-black/40 px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-[#007BFF] border-[#007BFF]/30"
             placeholder="Your API secret"
+          />
+        </div>
+
+        <h3 className="text-base font-semibold text-white mt-6 mb-3 pt-2 border-t border-white/10">
+          Subaccount API Keys (optional)
+        </h3>
+        <p className="text-sm text-gray-500 mb-3">
+          For sub-account hedging: enter the sub-account API key and secret. Leave blank to only save main account keys.
+        </p>
+        <div>
+          <label
+            htmlFor="subApiKey"
+            className="block text-sm font-medium text-gray-300 mb-2"
+          >
+            Subaccount API Key
+          </label>
+          <input
+            id="subApiKey"
+            type="text"
+            value={subApiKey}
+            onChange={(e) => setSubApiKey(e.target.value)}
+            className="w-full rounded-lg border bg-black/40 px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-[#007BFF] border-[#007BFF]/30"
+            placeholder="Subaccount API key (optional)"
+          />
+        </div>
+        <div>
+          <label
+            htmlFor="subApiSecret"
+            className="block text-sm font-medium text-gray-300 mb-2"
+          >
+            Subaccount API Secret
+          </label>
+          <input
+            id="subApiSecret"
+            type="password"
+            value={subApiSecret}
+            onChange={(e) => setSubApiSecret(e.target.value)}
+            className="w-full rounded-lg border bg-black/40 px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-[#007BFF] border-[#007BFF]/30"
+            placeholder="Subaccount API secret (optional)"
           />
         </div>
 

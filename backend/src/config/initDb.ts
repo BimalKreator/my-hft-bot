@@ -30,6 +30,17 @@ async function initDb() {
       api_secret TEXT
     );
   `);
+  await client.query(`ALTER TABLE exchange_keys ADD COLUMN IF NOT EXISTS sub_api_key TEXT;`).catch(() => {});
+  await client.query(`ALTER TABLE exchange_keys ADD COLUMN IF NOT EXISTS sub_api_secret TEXT;`).catch(() => {});
+  // One-time: copy sub keys from bot_settings into latest exchange_keys row per user (so Exchange Setup becomes source of truth)
+  await client.query(`
+    UPDATE exchange_keys ek
+    SET sub_api_key = bs.sub_api_key, sub_api_secret = bs.sub_api_secret
+    FROM bot_settings bs
+    WHERE bs.user_id = ek.user_id AND bs.sub_api_key IS NOT NULL AND bs.sub_api_secret IS NOT NULL
+      AND ek.sub_api_key IS NULL
+      AND ek.id = (SELECT id FROM exchange_keys WHERE user_id = ek.user_id AND exchange_name = ek.exchange_name ORDER BY id DESC LIMIT 1)
+  `).catch(() => {});
 
   await client.query(`
     CREATE TABLE IF NOT EXISTS bot_settings (

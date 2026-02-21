@@ -1,5 +1,5 @@
 import { getUsersWithAutoEntryEnabled, getSettings } from '../models/settingsModel.js';
-import { getExchangeKeys } from '../models/exchangeModel.js';
+import { getExchangeKeys, getSubAccountKeys } from '../models/exchangeModel.js';
 import { getBannedTokens, addBannedToken } from '../models/bannedTokensModel.js';
 import { decrypt } from '../utils/encryption.js';
 import {
@@ -466,9 +466,9 @@ async function warmupWsConnections(): Promise<void> {
       const keys = await getExchangeKeys(userId, 'Bybit');
       if (!keys) continue;
       await warmupWsConnection(decrypt(keys.api_key), decrypt(keys.api_secret));
-      const settings = await getSettings(userId);
-      if (settings.subApiKey && settings.subApiSecret) {
-        await warmupWsConnection(settings.subApiKey, settings.subApiSecret);
+      const subKeys = await getSubAccountKeys(userId);
+      if (subKeys) {
+        await warmupWsConnection(subKeys.subApiKey, subKeys.subApiSecret);
         console.log(`[autoBot] WS warmup done for user ${userId} (main + sub)`);
       } else {
         console.log(`[autoBot] WS warmup done for user ${userId}`);
@@ -610,7 +610,8 @@ async function runTick(): Promise<number> {
       try {
         if (isCritical) {
           const settings = await getSettings(userId);
-          const subHedgingEnabled = !!(settings.subApiKey && settings.subApiSecret);
+          const subKeys = await getSubAccountKeys(userId);
+          const subHedgingEnabled = !!subKeys;
           if (settings.spotHedgingEnabled || subHedgingEnabled) {
             await processUser(userId, marketData, now);
           } else {
@@ -696,21 +697,10 @@ async function monitorExits(): Promise<void> {
         if (positions.length === 0) continue;
 
         let subPositions: Awaited<ReturnType<typeof getPositionList>> = [];
-        if (settings.subApiKey && settings.subApiSecret) {
-          let subKey = settings.subApiKey;
-          let subSecret = settings.subApiSecret;
+        const subKeys = await getSubAccountKeys(userId);
+        if (subKeys) {
           try {
-            const d = decrypt(settings.subApiKey);
-            const e = decrypt(settings.subApiSecret);
-            if (d && e) {
-              subKey = d;
-              subSecret = e;
-            }
-          } catch {
-            /* use plain */
-          }
-          try {
-            subPositions = await getPositionList(subKey, subSecret, { category: 'linear', settleCoin: 'USDT' });
+            subPositions = await getPositionList(subKeys.subApiKey, subKeys.subApiSecret, { category: 'linear', settleCoin: 'USDT' });
           } catch (e) {
             console.error('[autoBot] getPositionList (sub) failed for user', userId, e);
           }
@@ -1028,7 +1018,7 @@ async function monitorExits(): Promise<void> {
 
           if (subHedgeActive.has(key)) continue;
 
-          const userSubHedgingEnabled = !!(settings.subApiKey && settings.subApiSecret);
+          const userSubHedgingEnabled = !!subKeys;
           if (userSubHedgingEnabled) continue;
 
           // Time-based Auto Exit (after funding time) — disabled when subaccount hedging; only PnL-based exit applies for hedges
@@ -1584,15 +1574,16 @@ async function processUser(
   const inEntryWindow = minDelayToEntry > 0 && minDelayToEntry <= ENTRY_SCHEDULE_MAX_MS + 5000;
   const inPrefetchWindow = minCountdownSec >= WALLET_PREFETCH_MIN_SEC && minCountdownSec <= WALLET_PREFETCH_MAX_SEC;
 
-  const subHedgingEnabled = !!(settings.subApiKey && settings.subApiSecret);
+  const subKeys = await getSubAccountKeys(userId);
+  const subHedgingEnabled = !!subKeys;
 
   // Pre-fetch wallet when countdown 20–60s; never call getWalletBalance when countdown <= 15 (critical path uses cache only). Sub-hedge: also fetch sub balance.
   if (inPrefetchWindow) {
     try {
-      const [wallet, subWallet] = subHedgingEnabled && settings.subApiKey && settings.subApiSecret
+      const [wallet, subWallet] = subHedgingEnabled && subKeys
         ? await Promise.all([
             getWalletBalance(apiKey, apiSecret),
-            getWalletBalance(settings.subApiKey, settings.subApiSecret),
+            getWalletBalance(subKeys.subApiKey, subKeys.subApiSecret),
           ])
         : [await getWalletBalance(apiKey, apiSecret), null];
       const totalEquity = parseFloat(wallet.totalEquity) || 0;
@@ -1644,8 +1635,8 @@ async function processUser(
         mainAvailable = parseFloat(wallet.totalAvailableBalance) || 0;
         let subEquity: number | null = null;
         let subAvailable: number | null = null;
-        if (settings.subApiKey && settings.subApiSecret) {
-          const subWallet = await getWalletBalance(settings.subApiKey, settings.subApiSecret);
+        if (subKeys) {
+          const subWallet = await getWalletBalance(subKeys.subApiKey, subKeys.subApiSecret);
           subEquity = parseFloat(subWallet.totalEquity) || 0;
           subAvailable = parseFloat(subWallet.totalAvailableBalance) || 0;
         }
@@ -1677,8 +1668,8 @@ async function processUser(
       mainAvailable = parseFloat(wallet.totalAvailableBalance) || 0;
       let subEquity: number | null = null;
       let subAvailable: number | null = null;
-      if (subHedgingEnabled && settings.subApiKey && settings.subApiSecret) {
-        const subWallet = await getWalletBalance(settings.subApiKey, settings.subApiSecret);
+      if (subHedgingEnabled && subKeys) {
+        const subWallet = await getWalletBalance(subKeys.subApiKey, subKeys.subApiSecret);
         subEquity = parseFloat(subWallet.totalEquity) || 0;
         subAvailable = parseFloat(subWallet.totalAvailableBalance) || 0;
       }
@@ -1713,7 +1704,7 @@ async function processUser(
         return;
       }
 
-      if (subHedgingEnabled && settings.subApiKey && settings.subApiSecret && !entryTimeoutByCycle.has(cycleKey)) {
+      if (subHedgingEnabled && subKeys && !entryTimeoutByCycle.has(cycleKey)) {
         if (processedTokens.has(processedKey(userId, topToken.symbol, topToken.nextFundingTime))) return;
         if (enteredThisCycle.has(cycleKey)) return;
         if (Number.isNaN(delayMs) || delayMs < 0 || Number.isNaN(delaySubMs) || delaySubMs < 0) return;
@@ -1766,8 +1757,7 @@ async function processUser(
               positionsCount: positions.length,
               maxTrades,
               candidates: [],
-              subApiKey: settings.subApiKey,
-              subApiSecret: settings.subApiSecret,
+              ...(subKeys && { subApiKey: subKeys.subApiKey, subApiSecret: subKeys.subApiSecret }),
               subEntryOffsetMs: settings.subEntryOffsetMs ?? 10,
             };
             let qtyStep = 0.1;
@@ -1814,22 +1804,14 @@ async function processUser(
             passedData = { prep: prepBuilt, candidate: candidateBuilt };
           }
           const leverageForEntry = passedData.candidate.safeLeverage ?? settings.leverage ?? 10;
-          let subKey = settings.subApiKey;
-          let subSecret = settings.subApiSecret;
-          try {
-            const dKey = decrypt(settings.subApiKey);
-            const dSecret = decrypt(settings.subApiSecret);
-            if (dKey && dSecret) {
-              subKey = dKey;
-              subSecret = dSecret;
-            }
-          } catch {
-            /* use plain */
+          if (subKeys) {
+            Promise.all([
+              setLeverage(apiKey, apiSecret, topToken.symbol, leverageForEntry),
+              setLeverage(subKeys.subApiKey, subKeys.subApiSecret, topToken.symbol, leverageForEntry),
+            ]).catch(() => {});
+          } else {
+            setLeverage(apiKey, apiSecret, topToken.symbol, leverageForEntry).catch(() => {});
           }
-          Promise.all([
-            setLeverage(apiKey, apiSecret, topToken.symbol, leverageForEntry),
-            setLeverage(subKey, subSecret, topToken.symbol, leverageForEntry),
-          ]).catch(() => {});
           const scheduleNow = Date.now();
           const delayMain = fundingTimeMs - scheduleNow - entryOffsetMs;
           const delaySub = fundingTimeMs - scheduleNow - subEntryOffsetMs;
@@ -1887,21 +1869,9 @@ async function processUser(
           } catch {
             /* ignore */
           }
-          if (subHedgingEnabled && settings.subApiKey && settings.subApiSecret) {
-            let subKey = settings.subApiKey;
-            let subSecret = settings.subApiSecret;
+          if (subHedgingEnabled && subKeys) {
             try {
-              const dKey = decrypt(settings.subApiKey);
-              const dSecret = decrypt(settings.subApiSecret);
-              if (dKey && dSecret) {
-                subKey = dKey;
-                subSecret = dSecret;
-              }
-            } catch {
-              /* use plain */
-            }
-            try {
-              await setLeverage(subKey, subSecret, topToken.symbol, futuresLeverage);
+              await setLeverage(subKeys.subApiKey, subKeys.subApiSecret, topToken.symbol, futuresLeverage);
             } catch {
               /* ignore */
             }
@@ -2296,9 +2266,9 @@ async function processUser(
       positionsCount: positions.length,
       maxTrades,
       candidates: prepCandidates,
-      ...(subHedgingEnabled && settings.subApiKey && settings.subApiSecret && {
-        subApiKey: settings.subApiKey,
-        subApiSecret: settings.subApiSecret,
+      ...(subHedgingEnabled && subKeys && {
+        subApiKey: subKeys.subApiKey,
+        subApiSecret: subKeys.subApiSecret,
         subEntryOffsetMs: settings.subEntryOffsetMs ?? 10,
       }),
     });

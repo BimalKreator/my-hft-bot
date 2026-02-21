@@ -42,7 +42,7 @@ export async function addKeys(req: AuthRequest, res: Response): Promise<void> {
       return;
     }
 
-    const { exchange, apiKey, apiSecret } = req.body;
+    const { exchange, apiKey, apiSecret, subApiKey, subApiSecret } = req.body;
     if (!exchange || !apiKey || !apiSecret) {
       res.status(400).json({
         error: 'exchange, apiKey, and apiSecret are required',
@@ -50,7 +50,7 @@ export async function addKeys(req: AuthRequest, res: Response): Promise<void> {
       return;
     }
 
-    await addExchangeKeys(userId, exchange, apiKey, apiSecret);
+    await addExchangeKeys(userId, exchange, apiKey, apiSecret, subApiKey, subApiSecret);
     res.status(201).json({ message: 'Exchange keys saved successfully' });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to save keys';

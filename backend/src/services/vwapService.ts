@@ -1,7 +1,6 @@
 import { getOrderbook, getOrderBookDepth, ORDERBOOK_DEPTH_BEST } from './bybitService.js';
 import { getPositionList, type LinearPosition } from './bybitService.js';
-import { getExchangeKeys } from '../models/exchangeModel.js';
-import { getSettings } from '../models/settingsModel.js';
+import { getExchangeKeys, getSubAccountKeys } from '../models/exchangeModel.js';
 import { decrypt } from '../utils/encryption.js';
 import { FundingScanner } from './scannerService.js';
 import { getHedgeGroupByPosition } from '../models/hedgeGroupModel.js';
@@ -68,7 +67,7 @@ export interface EnrichedPosition extends LinearPosition {
 
 /**
  * Fetch active positions for the user and enrich each with VWAP exit price, PnL, SL price, and target price.
- * When subaccount hedging is enabled (settings.subApiKey + subApiSecret), fetches positions from BOTH
+ * When subaccount hedging is enabled (sub keys in Exchange Setup), fetches positions from BOTH
  * main and sub accounts and injects accountType ('main' | 'sub') into each position.
  */
 export async function getEnrichedPositions(userId: number): Promise<EnrichedPosition[]> {
@@ -78,23 +77,8 @@ export async function getEnrichedPositions(userId: number): Promise<EnrichedPosi
   const apiKey = decrypt(keys.api_key);
   const apiSecret = decrypt(keys.api_secret);
 
-  const settings = await getSettings(userId);
-  const subHedgingEnabled = !!(settings.subApiKey && settings.subApiSecret);
-  let subApiKey: string | null = null;
-  let subApiSecret: string | null = null;
-  if (subHedgingEnabled && settings.subApiKey && settings.subApiSecret) {
-    try {
-      subApiKey = decrypt(settings.subApiKey);
-      subApiSecret = decrypt(settings.subApiSecret);
-    } catch {
-      subApiKey = settings.subApiKey;
-      subApiSecret = settings.subApiSecret;
-    }
-    if (!subApiKey || !subApiSecret) {
-      subApiKey = settings.subApiKey;
-      subApiSecret = settings.subApiSecret;
-    }
-  }
+  const subKeys = await getSubAccountKeys(userId);
+  const subHedgingEnabled = !!subKeys;
 
   const [mainPositions, fundingData] = await Promise.all([
     getPositionList(apiKey, apiSecret, { category: 'linear', settleCoin: 'USDT' }),
@@ -102,9 +86,9 @@ export async function getEnrichedPositions(userId: number): Promise<EnrichedPosi
   ]);
 
   let subPositions: LinearPosition[] = [];
-  if (subHedgingEnabled && subApiKey && subApiSecret) {
+  if (subHedgingEnabled && subKeys) {
     try {
-      subPositions = await getPositionList(subApiKey, subApiSecret, { category: 'linear', settleCoin: 'USDT' });
+      subPositions = await getPositionList(subKeys.subApiKey, subKeys.subApiSecret, { category: 'linear', settleCoin: 'USDT' });
     } catch (e) {
       console.warn('[vwapService] Sub account positions fetch failed:', e);
     }
@@ -173,8 +157,8 @@ export async function getEnrichedPositions(userId: number): Promise<EnrichedPosi
   }
 
   await enrichList(mainPositions, 'main', { apiKey, apiSecret });
-  if (subHedgingEnabled && subApiKey && subApiSecret) {
-    await enrichList(subPositions, 'sub', { apiKey: subApiKey, apiSecret: subApiSecret });
+  if (subHedgingEnabled && subKeys) {
+    await enrichList(subPositions, 'sub', { apiKey: subKeys.subApiKey, apiSecret: subKeys.subApiSecret });
   }
 
   return enriched;
