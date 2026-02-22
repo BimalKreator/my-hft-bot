@@ -1722,9 +1722,11 @@ async function processUser(
       const subEntryOffsetMs = settings.subEntryOffsetMs ?? 10;
       const cycleKey = entryCycleKey(userId, topToken.symbol, topToken.nextFundingTime);
 
-      const targetTime = fundingTimeMs;
+      const globalManualMockTarget = isManualMockActive && manualMockFundingTimeMs != null ? manualMockFundingTimeMs : 0;
+      const isMock = globalManualMockTarget > 0;
+      const targetTime = isMock ? globalManualMockTarget : fundingTimeMs;
       const mainOffset = entryOffsetMs;
-      const maxDelayMs = ENTRY_SCHEDULE_MAX_MS;
+      const maxDelayMs = isMock ? MANUAL_MOCK_COUNTDOWN_MS : ENTRY_SCHEDULE_MAX_MS;
       const nowForRange = Date.now();
       const delayMainForRange = targetTime - nowForRange - mainOffset;
       const inRangeMain = delayMainForRange <= maxDelayMs && delayMainForRange > 0;
