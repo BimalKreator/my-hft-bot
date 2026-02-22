@@ -153,6 +153,13 @@ export async function updateSettingsHandler(
     } else if (autoEqualizeRaw === 'false' || autoEqualizeRaw === 0) {
       input.autoEqualizeFunds = false;
     }
+    const fallbackSlMultiplierRaw = body.fallbackSlMultiplier ?? body.fallback_sl_multiplier;
+    if (typeof fallbackSlMultiplierRaw === 'number' && !Number.isNaN(fallbackSlMultiplierRaw) && fallbackSlMultiplierRaw >= 0.1) {
+      input.fallbackSlMultiplier = fallbackSlMultiplierRaw;
+    } else if (typeof fallbackSlMultiplierRaw === 'string') {
+      const v = parseFloat(fallbackSlMultiplierRaw);
+      if (!Number.isNaN(v) && v >= 0.1) input.fallbackSlMultiplier = v;
+    }
     let settings = await updateSettings(userId, input);
     if (settings.subApiSecret) {
       settings = { ...settings, subApiSecret: '********' };

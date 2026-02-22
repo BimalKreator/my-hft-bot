@@ -267,9 +267,10 @@ function formatPriceToTick(price: number, tickSize: string): string {
 
 /**
  * When Sub account fails in hedge mode and Main has already filled: set a fallback stop loss on the Main position
- * equal to the funding rate. ONLY call when hedgeMode is true, Main executed, Sub failed. Never when both succeeded.
+ * using effectiveSlPct = |fundingRate| * fallbackSlMultiplier. ONLY call when hedgeMode is true, Main executed, Sub failed.
  */
 async function setMainFallbackStoploss(
+  userId: number,
   mainApiKey: string,
   mainApiSecret: string,
   symbol: string,
@@ -277,6 +278,10 @@ async function setMainFallbackStoploss(
   fundingRate: number
 ): Promise<void> {
   try {
+    const settings = await getSettings(userId);
+    const fallbackSlMultiplier = Math.max(0.1, Number(settings.fallbackSlMultiplier ?? 1));
+    const effectiveSlPct = Math.abs(fundingRate) * fallbackSlMultiplier;
+
     const positions = await getPositionList(mainApiKey, mainApiSecret, { category: 'linear', settleCoin: 'USDT' });
     const pos = positions.find((p) => p.symbol === symbol && p.side === mainSide);
     if (!pos) return;
@@ -284,15 +289,13 @@ async function setMainFallbackStoploss(
     if (mainEntryPrice <= 0) return;
     const ls = await getInstrumentLotSize(mainApiKey, mainApiSecret, symbol);
     const tickSize = ls.tickSize ?? '0.01';
-    const absRate = Math.abs(fundingRate);
     const slPrice =
       mainSide === 'Buy'
-        ? mainEntryPrice * (1 - absRate)
-        : mainEntryPrice * (1 + absRate);
+        ? mainEntryPrice * (1 - effectiveSlPct)
+        : mainEntryPrice * (1 + effectiveSlPct);
     const slPriceStr = formatPriceToTick(slPrice, tickSize);
     await setTradingStop(mainApiKey, mainApiSecret, symbol, slPriceStr, 0);
-    const ratePct = (absRate * 100).toFixed(4);
-    console.log(`[autoBot] Sub account failed. Fallback SL set for Main account at ${slPriceStr} (SL% = Funding Rate ${ratePct}%).`);
+    console.log(`[autoBot] Sub account failed. Fallback SL set for Main account at ${slPriceStr} (SL% = ${(effectiveSlPct * 100).toFixed(4)}% based on multiplier ${fallbackSlMultiplier}).`);
   } catch (e) {
     console.error(`[autoBot] setMainFallbackStoploss failed ${symbol}:`, e);
   }
@@ -1372,7 +1375,7 @@ async function executeEntry(
           const marketData = await fundingScanner.getFundingData();
           const symData = marketData.find((m) => m.symbol === mainFilled.symbol);
           const fundingRate = symData?.fundingRate ?? 0;
-          await setMainFallbackStoploss(mainFilled.mainApiKey, mainFilled.mainApiSecret, mainFilled.symbol, mainFilled.side, fundingRate);
+          await setMainFallbackStoploss(userId, mainFilled.mainApiKey, mainFilled.mainApiSecret, mainFilled.symbol, mainFilled.side, fundingRate);
           mainFilledForSubHedge.delete(cycleKey);
           mainOrphanFallbackKeys.add(positionKey(userId, mainFilled.symbol, mainFilled.side));
         }
@@ -1407,7 +1410,7 @@ async function executeEntry(
         const marketData = await fundingScanner.getFundingData();
         const symData = marketData.find((m) => m.symbol === mainFilled.symbol);
         const fundingRate = symData?.fundingRate ?? 0;
-        await setMainFallbackStoploss(mainFilled.mainApiKey, mainFilled.mainApiSecret, mainFilled.symbol, mainFilled.side, fundingRate);
+        await setMainFallbackStoploss(userId, mainFilled.mainApiKey, mainFilled.mainApiSecret, mainFilled.symbol, mainFilled.side, fundingRate);
         mainFilledForSubHedge.delete(cycleKey);
         mainOrphanFallbackKeys.add(positionKey(userId, mainFilled.symbol, mainFilled.side));
       }
@@ -1496,7 +1499,7 @@ async function executeEntry(
         const mainFilled = mainFilledForSubHedge.get(cycleKey);
         const settings = await getSettings(userId);
         if (settings.hedgeMode && mainFilled) {
-          await setMainFallbackStoploss(mainFilled.mainApiKey, mainFilled.mainApiSecret, c.symbol, c.side, c.fundingRate);
+          await setMainFallbackStoploss(userId, mainFilled.mainApiKey, mainFilled.mainApiSecret, c.symbol, c.side, c.fundingRate);
           mainFilledForSubHedge.delete(cycleKey);
           mainOrphanFallbackKeys.add(positionKey(userId, c.symbol, c.side));
         }
@@ -1527,7 +1530,7 @@ async function executeEntry(
       const mainFilled = mainFilledForSubHedge.get(cycleKey);
       const settings = await getSettings(userId);
       if (settings.hedgeMode && mainFilled) {
-        await setMainFallbackStoploss(mainFilled.mainApiKey, mainFilled.mainApiSecret, c.symbol, c.side, c.fundingRate);
+        await setMainFallbackStoploss(userId, mainFilled.mainApiKey, mainFilled.mainApiSecret, c.symbol, c.side, c.fundingRate);
         mainFilledForSubHedge.delete(cycleKey);
         mainOrphanFallbackKeys.add(positionKey(userId, c.symbol, c.side));
       }

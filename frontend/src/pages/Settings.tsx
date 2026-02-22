@@ -31,6 +31,7 @@ interface BotSettings {
   hedgeMode: boolean;
   slippageBufferPct: number;
   autoEqualizeFunds: boolean;
+  fallbackSlMultiplier: number;
 }
 
 const defaultSettings: Omit<BotSettings, 'userId'> = {
@@ -50,6 +51,7 @@ const defaultSettings: Omit<BotSettings, 'userId'> = {
   hedgeMode: true,
   slippageBufferPct: 2,
   autoEqualizeFunds: false,
+  fallbackSlMultiplier: 1,
 };
 
 export default function Settings() {
@@ -111,6 +113,7 @@ export default function Settings() {
         hedgeMode: data.hedgeMode ?? data.hedge_mode ?? true,
         slippageBufferPct: Number(data.slippageBufferPct ?? data.slippage_buffer_pct) ?? 2,
         autoEqualizeFunds: Boolean(data.autoEqualizeFunds ?? data.auto_equalize_funds ?? false),
+        fallbackSlMultiplier: Math.max(0.1, Number(data.fallbackSlMultiplier ?? data.fallback_sl_multiplier) || 1),
       });
     } catch {
       setError('Network error. Edit below and click Save to retry.');
@@ -163,6 +166,7 @@ export default function Settings() {
           hedgeMode: data.hedgeMode ?? data.hedge_mode ?? settings.hedgeMode,
           slippageBufferPct: Number(data.slippageBufferPct ?? data.slippage_buffer_pct) ?? settings.slippageBufferPct,
           autoEqualizeFunds: Boolean(data.autoEqualizeFunds ?? data.auto_equalize_funds ?? settings.autoEqualizeFunds),
+          fallbackSlMultiplier: Math.max(0.1, Number(data.fallbackSlMultiplier ?? data.fallback_sl_multiplier) || settings.fallbackSlMultiplier ?? 1),
         });
         setSuccessMessage('Success — bot updated.');
         setTimeout(() => setSuccessMessage(null), 3000);
@@ -194,6 +198,7 @@ export default function Settings() {
       hedgeMode: Boolean(settings.hedgeMode),
       slippageBufferPct: Math.max(0, Number(settings.slippageBufferPct) ?? 2),
       autoEqualizeFunds: Boolean(settings.hedgeMode && settings.autoEqualizeFunds),
+      fallbackSlMultiplier: Math.max(0.1, Number(settings.fallbackSlMultiplier) ?? 1),
     });
   }, [settings, saveSettings]);
 
@@ -703,6 +708,25 @@ export default function Settings() {
           {/* Capital Management */}
           <h3 className="text-base font-semibold text-white mt-6 mb-2">Capital Management</h3>
           <div className="space-y-3">
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-1">Fallback SL Multiplier</label>
+              <input
+                type="number"
+                step={0.1}
+                min={0.1}
+                value={settings.fallbackSlMultiplier ?? 1}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  if (!Number.isNaN(v) && v >= 0.1) {
+                    setSettings((s) => (s ? { ...s, fallbackSlMultiplier: v } : s));
+                    debouncedSave({ fallbackSlMultiplier: v });
+                  }
+                }}
+                className="w-full rounded-lg border bg-black/50 px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-[#007BFF]"
+                style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
+              />
+              <p className="text-xs text-gray-500 mt-1">Multiplier for Funding Rate to calculate Main Fallback Stoploss (e.g., 0.5 = Half of Funding Rate, 2.0 = Double)</p>
+            </div>
             {balanceStats != null && (
               <div className="flex flex-wrap gap-4 text-sm">
                 {/* TODO: Remove temporary +1500 offset later */}
