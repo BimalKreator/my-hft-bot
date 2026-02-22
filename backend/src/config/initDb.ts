@@ -132,6 +132,9 @@ async function initDb() {
     const e = err as { code?: string };
     if (e.code !== '42701') console.error('Error adding entry_offset_ms:', err);
   }
+  await client.query(`
+    ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS slippage_buffer_pct NUMERIC NOT NULL DEFAULT 2.0;
+  `).catch(() => {});
 
   await client.query(`
     CREATE TABLE IF NOT EXISTS daily_snapshots (

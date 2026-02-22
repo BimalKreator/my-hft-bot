@@ -29,6 +29,7 @@ interface BotSettings {
   subEntryOffsetMs: number;
   universalStoplossPercent: number;
   hedgeMode: boolean;
+  slippageBufferPct: number;
 }
 
 const defaultSettings: Omit<BotSettings, 'userId'> = {
@@ -46,6 +47,7 @@ const defaultSettings: Omit<BotSettings, 'userId'> = {
   subEntryOffsetMs: 10,
   universalStoplossPercent: 3,
   hedgeMode: true,
+  slippageBufferPct: 2,
 };
 
 export default function Settings() {
@@ -102,6 +104,7 @@ export default function Settings() {
         subEntryOffsetMs: Number(data.subEntryOffsetMs ?? data.sub_entry_offset_ms) ?? 10,
         universalStoplossPercent: Number(data.universalStoplossPercent ?? data.universal_stoploss_percent) ?? 3,
         hedgeMode: data.hedgeMode ?? data.hedge_mode ?? true,
+        slippageBufferPct: Number(data.slippageBufferPct ?? data.slippage_buffer_pct) ?? 2,
       });
     } catch {
       setError('Network error. Edit below and click Save to retry.');
@@ -152,6 +155,7 @@ export default function Settings() {
           subEntryOffsetMs: Number(data.subEntryOffsetMs ?? data.sub_entry_offset_ms) ?? settings.subEntryOffsetMs,
           universalStoplossPercent: Number(data.universalStoplossPercent ?? data.universal_stoploss_percent) ?? settings.universalStoplossPercent,
           hedgeMode: data.hedgeMode ?? data.hedge_mode ?? settings.hedgeMode,
+          slippageBufferPct: Number(data.slippageBufferPct ?? data.slippage_buffer_pct) ?? settings.slippageBufferPct,
         });
         setSuccessMessage('Success — bot updated.');
         setTimeout(() => setSuccessMessage(null), 3000);
@@ -181,6 +185,7 @@ export default function Settings() {
       subEntryOffsetMs: Math.round(Number(settings.subEntryOffsetMs) ?? 10),
       universalStoplossPercent: Math.max(0, Number(settings.universalStoplossPercent) ?? 3),
       hedgeMode: Boolean(settings.hedgeMode),
+      slippageBufferPct: Math.max(0, Number(settings.slippageBufferPct) ?? 2),
     });
   }, [settings, saveSettings]);
 
@@ -511,6 +516,27 @@ export default function Settings() {
               placeholder="e.g. 500 = 0.5s before funding, -50 = 50ms after"
             />
             <p className="text-xs text-gray-500 mt-1">Ms before funding to place entry (positive = before, negative = after, e.g. -50)</p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-2">Entry Slippage Buffer (%)</label>
+            <input
+              type="number"
+              step={0.1}
+              min={0}
+              value={settings.slippageBufferPct}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value);
+                if (!Number.isNaN(v) && v >= 0) {
+                  setSettings((s) => s ? { ...s, slippageBufferPct: v } : s);
+                  debouncedSave({ slippageBufferPct: v });
+                }
+              }}
+              className="w-full rounded-lg border bg-black/50 px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-[#007BFF]"
+              style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
+              placeholder="e.g. 2"
+            />
+            <p className="text-xs text-gray-500 mt-1">Slippage buffer for entry limit orders (Long: price × (1 + pct/100), Short: price × (1 − pct/100)). Default: 2</p>
           </div>
 
           {/* Subaccount Hedging */}

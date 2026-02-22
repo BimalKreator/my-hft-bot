@@ -67,7 +67,7 @@ interface EntryPrepCandidate {
   fixedQty?: number;
 }
 interface EntryPrep {
-  settings: { orderBookDepth?: number; capitalPercent?: number; maxTrades: number; entryOffsetMs: number; subEntryOffsetMs?: number };
+  settings: { orderBookDepth?: number; capitalPercent?: number; maxTrades: number; entryOffsetMs: number; subEntryOffsetMs?: number; slippageBufferPct?: number };
   apiKey: string;
   apiSecret: string;
   totalWalletBalance: number;
@@ -181,9 +181,22 @@ function formatPriceToTick(price: number, tickSize: string): string {
   const tick = parseFloat(tickSize) || 0.01;
   if (tick <= 0 || !Number.isFinite(price)) return String(price);
   const decimals = tick.toString().includes('.') ? tick.toString().split('.')[1]!.length : 0;
-  const mult = Math.pow(10, decimals);
   const rounded = Math.round(price / tick) * tick;
   return rounded.toFixed(decimals);
+}
+
+/** Apply entry slippage buffer to base price and format for limit order. Long (Buy): base * (1 + pct/100); Short (Sell): base * (1 - pct/100). */
+function applySlippageAndFormat(
+  basePrice: number,
+  side: 'Buy' | 'Sell',
+  slippageBufferPct: number,
+  tickSize: string
+): string {
+  const pct = Number.isFinite(slippageBufferPct) && slippageBufferPct >= 0 ? slippageBufferPct : 2;
+  const limitPrice = side === 'Buy' ? basePrice * (1 + pct / 100) : basePrice * (1 - pct / 100);
+  const priceStr = formatPriceToTick(limitPrice, tickSize);
+  console.log(`[autoBot] Applying ${pct}% slippage buffer. Base: ${basePrice}, Limit: ${limitPrice}.`);
+  return priceStr;
 }
 
 /** Format qty to Bybit lot step. */
@@ -1212,7 +1225,8 @@ async function executeEntry(
         console.log('[ABORT] executeEntry stopped at sub hedge invalid sweep price');
         return;
       }
-      const priceStr = formatPriceToTick(sweepPrice, tickSize);
+      const slippagePct = prep.settings.slippageBufferPct ?? 2;
+      const priceStr = applySlippageAndFormat(sweepPrice, orderSide, slippagePct, tickSize);
       const subApiKey = prep.subApiKey!;
       const subApiSecret = prep.subApiSecret!;
       console.log('[DEBUG] Sending WS Order to Bybit for', account ?? 'sub');
@@ -1298,7 +1312,8 @@ async function executeEntry(
           const orderbook = await getOrderbook(c.symbol, ORDERBOOK_SWEEP_LIMIT);
           const sweepPrice = getSweepPrice(orderbook, c.side, remainingQty);
           if (!Number.isFinite(sweepPrice) || sweepPrice <= 0) break;
-          const priceStr = formatPriceToTick(sweepPrice, tickSize);
+          const slippagePct = prep.settings.slippageBufferPct ?? 2;
+          const priceStr = applySlippageAndFormat(sweepPrice, c.side, slippagePct, tickSize);
           const qtyStr = formatQtyToStep(remainingQty, String(c.qtyStep));
           if (parseFloat(qtyStr) <= 0) break;
           console.log('[DEBUG] Sending WS Order to Bybit for', account ?? 'main');
@@ -1413,7 +1428,8 @@ async function executeEntry(
         const orderbook = await getOrderbook(symbol, ORDERBOOK_SWEEP_LIMIT);
         const sweepPrice = getSweepPrice(orderbook, side, remainingQty);
         if (!Number.isFinite(sweepPrice) || sweepPrice <= 0) break;
-        const priceStr = formatPriceToTick(sweepPrice, ls.tickSize ?? '0.01');
+        const slippagePct = settings.slippageBufferPct ?? 2;
+        const priceStr = applySlippageAndFormat(sweepPrice, side, slippagePct, ls.tickSize ?? '0.01');
         const qtyStr = formatQtyToStep(remainingQty, ls.qtyStep);
         if (parseFloat(qtyStr) <= 0) break;
         console.log('[DEBUG] Sending WS Order to Bybit for', account ?? 'main');
@@ -1749,7 +1765,8 @@ async function processUser(
             const sweepPrice = getSweepPrice(orderbook, side, cForPayload.fixedQty);
             if (Number.isFinite(sweepPrice) && sweepPrice > 0) {
               const tickSize = cForPayload.tickSize ?? '0.01';
-              const priceStr = formatPriceToTick(sweepPrice, tickSize);
+              const slippagePct = settings.slippageBufferPct ?? 2;
+              const priceStr = applySlippageAndFormat(sweepPrice, side, slippagePct, tickSize);
               const qtyStr = formatQtyToStep(cForPayload.fixedQty, String(cForPayload.qtyStep));
               if (parseFloat(qtyStr) > 0) {
                 pendingOrderPayloadByCycle.set(cycleKey, {
@@ -1777,7 +1794,7 @@ async function processUser(
             ? (hedgeMode && cache.subAvailableBalance != null ? Math.min(cache.totalAvailableBalance, cache.subAvailableBalance) : cache.totalAvailableBalance)
             : cachedAvailableMargin;
           const prepBuilt: EntryPrep = {
-            settings: { orderBookDepth: settings.orderBookDepth, capitalPercent: settings.capitalPercent, maxTrades, entryOffsetMs, subEntryOffsetMs: settings.subEntryOffsetMs ?? 10 },
+            settings: { orderBookDepth: settings.orderBookDepth, capitalPercent: settings.capitalPercent, maxTrades, entryOffsetMs, subEntryOffsetMs: settings.subEntryOffsetMs ?? 10, slippageBufferPct: settings.slippageBufferPct ?? 2 },
             apiKey,
             apiSecret,
             totalWalletBalance: totalW,
@@ -2153,8 +2170,9 @@ async function processUser(
               const sweepPriceLinear = getSweepPrice(orderbookLinear, futuresSide, remainingQty);
               const sweepPriceSpot = getSweepPrice(orderbookSpot, spotSide, remainingQty);
               if (!Number.isFinite(sweepPriceLinear) || sweepPriceLinear <= 0 || !Number.isFinite(sweepPriceSpot) || sweepPriceSpot <= 0) break;
-              const priceStrLinear = formatPriceToTick(sweepPriceLinear, tickSize);
-              const priceStrSpot = formatPriceToTick(sweepPriceSpot, tickSize);
+              const slippagePct = settings.slippageBufferPct ?? 2;
+              const priceStrLinear = applySlippageAndFormat(sweepPriceLinear, futuresSide, slippagePct, tickSize);
+              const priceStrSpot = applySlippageAndFormat(sweepPriceSpot, spotSide, slippagePct, tickSize);
               const qtyStr = formatQtyToStep(remainingQty, qtyStepStr);
               if (parseFloat(qtyStr) <= 0) break;
               const spotOrderPromise = spotLeverageUsed > 1
@@ -2197,7 +2215,8 @@ async function processUser(
               const orderbook = await getOrderbook(topToken.symbol, ORDERBOOK_SWEEP_LIMIT);
               const sweepPrice = getSweepPrice(orderbook, side, remainingQty);
               if (!Number.isFinite(sweepPrice) || sweepPrice <= 0) break;
-              const priceStr = formatPriceToTick(sweepPrice, tickSize);
+              const slippagePct = settings.slippageBufferPct ?? 2;
+              const priceStr = applySlippageAndFormat(sweepPrice, side, slippagePct, tickSize);
               const qtyStr = formatQtyToStep(remainingQty, qtyStepStr);
               if (parseFloat(qtyStr) <= 0) break;
               console.log('[DEBUG PAYLOAD]', { symbol: topToken.symbol, side, orderType: 'Limit', timeInForce: 'IOC', qty: qtyStr, price: priceStr });
@@ -2262,6 +2281,7 @@ async function processUser(
         capitalPercent: settings.capitalPercent,
         maxTrades,
         entryOffsetMs,
+        slippageBufferPct: settings.slippageBufferPct ?? 2,
         ...(subHedgingEnabled && { subEntryOffsetMs: settings.subEntryOffsetMs ?? 10 }),
       },
       apiKey,

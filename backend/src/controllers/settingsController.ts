@@ -135,6 +135,13 @@ export async function updateSettingsHandler(
     } else if (hedgeModeRaw === 'false' || hedgeModeRaw === 0) {
       input.hedgeMode = false;
     }
+    const slippageBufferRaw = body.slippageBufferPct ?? body.slippage_buffer_pct;
+    if (typeof slippageBufferRaw === 'number' && !Number.isNaN(slippageBufferRaw) && slippageBufferRaw >= 0) {
+      input.slippageBufferPct = slippageBufferRaw;
+    } else if (typeof slippageBufferRaw === 'string') {
+      const v = parseFloat(slippageBufferRaw);
+      if (!Number.isNaN(v) && v >= 0) input.slippageBufferPct = v;
+    }
     let settings = await updateSettings(userId, input);
     if (settings.subApiSecret) {
       settings = { ...settings, subApiSecret: '********' };
