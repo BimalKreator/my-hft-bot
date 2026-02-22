@@ -119,6 +119,9 @@ async function initDb() {
   await client.query(`
     ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS universal_stoploss_percent NUMERIC NOT NULL DEFAULT 3;
   `).catch(() => {});
+  await client.query(`
+    ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS hedge_mode BOOLEAN NOT NULL DEFAULT true;
+  `).catch(() => {});
   try {
     await client.query('ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS entry_offset_ms INTEGER');
     await client.query(

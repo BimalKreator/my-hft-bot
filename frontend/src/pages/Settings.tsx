@@ -28,6 +28,7 @@ interface BotSettings {
   hedgePnlDepth: number;
   subEntryOffsetMs: number;
   universalStoplossPercent: number;
+  hedgeMode: boolean;
 }
 
 const defaultSettings: Omit<BotSettings, 'userId'> = {
@@ -44,6 +45,7 @@ const defaultSettings: Omit<BotSettings, 'userId'> = {
   hedgePnlDepth: 1,
   subEntryOffsetMs: 10,
   universalStoplossPercent: 3,
+  hedgeMode: true,
 };
 
 export default function Settings() {
@@ -99,6 +101,7 @@ export default function Settings() {
         hedgePnlDepth: Math.max(1, Math.min(50, Number(data.hedgePnlDepth) || 1)),
         subEntryOffsetMs: Number(data.subEntryOffsetMs ?? data.sub_entry_offset_ms) ?? 10,
         universalStoplossPercent: Number(data.universalStoplossPercent ?? data.universal_stoploss_percent) ?? 3,
+        hedgeMode: data.hedgeMode ?? data.hedge_mode ?? true,
       });
     } catch {
       setError('Network error. Edit below and click Save to retry.');
@@ -148,6 +151,7 @@ export default function Settings() {
           hedgePnlDepth: Number(data.hedgePnlDepth) ?? settings.hedgePnlDepth,
           subEntryOffsetMs: Number(data.subEntryOffsetMs ?? data.sub_entry_offset_ms) ?? settings.subEntryOffsetMs,
           universalStoplossPercent: Number(data.universalStoplossPercent ?? data.universal_stoploss_percent) ?? settings.universalStoplossPercent,
+          hedgeMode: data.hedgeMode ?? data.hedge_mode ?? settings.hedgeMode,
         });
         setSuccessMessage('Success — bot updated.');
         setTimeout(() => setSuccessMessage(null), 3000);
@@ -176,6 +180,7 @@ export default function Settings() {
       hedgePnlDepth: Math.max(1, Math.min(50, Number(settings.hedgePnlDepth) || 1)),
       subEntryOffsetMs: Math.round(Number(settings.subEntryOffsetMs) ?? 10),
       universalStoplossPercent: Math.max(0, Number(settings.universalStoplossPercent) ?? 3),
+      hedgeMode: Boolean(settings.hedgeMode),
     });
   }, [settings, saveSettings]);
 
@@ -199,6 +204,13 @@ export default function Settings() {
     const next = !settings.autoExitEnabled;
     setSettings((s) => (s ? { ...s, autoExitEnabled: next } : s));
     saveSettings({ autoExitEnabled: next });
+  };
+
+  const toggleHedgeMode = () => {
+    if (!settings) return;
+    const next = !settings.hedgeMode;
+    setSettings((s) => (s ? { ...s, hedgeMode: next } : s));
+    saveSettings({ hedgeMode: next });
   };
 
   const fetchTransactions = useCallback(async () => {
@@ -570,6 +582,32 @@ export default function Settings() {
               />
             </button>
           </div>
+
+          {/* Hedge Mode (Main + Sub) Toggle */}
+          <div className="flex items-center justify-between">
+            <label className="text-sm font-medium text-gray-300">Hedge Mode (Main + Sub)</label>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={settings.hedgeMode}
+              onClick={toggleHedgeMode}
+              className={`relative h-8 w-14 rounded-full transition-colors ${
+                settings.hedgeMode ? 'bg-[#007BFF]' : 'bg-gray-600'
+              }`}
+              style={
+                settings.hedgeMode
+                  ? { boxShadow: '0 0 16px rgba(0, 123, 255, 0.5)' }
+                  : undefined
+              }
+            >
+              <span
+                className={`absolute top-1 h-6 w-6 rounded-full bg-white transition-transform ${
+                  settings.hedgeMode ? 'left-7' : 'left-1'
+                }`}
+              />
+            </button>
+          </div>
+          <p className="text-xs text-gray-500 -mt-1">On: Main + Sub accounts. Off: Naked (Main only).</p>
 
         </div>
 

@@ -300,7 +300,7 @@ async function saveClosedTradeAfterExit(
   entryPrice: number,
   qty: number,
   orderIds: string | string[],
-  exitReason: 'Time Exit' | 'Stoploss Hit' | 'Pre-Funding Stoploss' | 'Post-Funding Stoploss' | 'Post-Funding Stoploss (L2 - 50% Funding)' | 'PnL Positive Exit' | 'Universal Stoploss' | 'Break-even' | 'Next Trade Cleanup' | 'Post-Funding Profit',
+  exitReason: 'Time Exit' | 'Stoploss Hit' | 'Pre-Funding Stoploss' | 'Post-Funding Stoploss' | 'Post-Funding Stoploss (L2 - 50% Funding)' | 'PnL Positive Exit' | 'Universal Stoploss' | 'Break-even' | 'Next Trade Cleanup' | 'Post-Funding Profit' | 'Naked Mode Target Hit' | 'Naked Mode SL Hit',
   fundingReceived: number = 0,
   estimatedExitPrice?: number,
   estimatedFeesWhenZero?: number
@@ -611,7 +611,7 @@ async function runTick(): Promise<number> {
         if (isCritical) {
           const settings = await getSettings(userId);
           const subKeys = await getSubAccountKeys(userId);
-          const subHedgingEnabled = !!subKeys;
+          const subHedgingEnabled = !!settings.hedgeMode && !!subKeys;
           if (settings.spotHedgingEnabled || subHedgingEnabled) {
             await processUser(userId, marketData, now);
           } else {
@@ -1019,7 +1019,42 @@ async function monitorExits(): Promise<void> {
           if (subHedgeActive.has(key)) continue;
 
           const userSubHedgingEnabled = !!subKeys;
-          if (userSubHedgingEnabled) continue;
+          if (settings.hedgeMode && userSubHedgingEnabled) continue;
+
+          // Naked Mode: after funding, exit on target (Main ROE % >= funding rate %) or SL (Main ROE % <= -funding rate %)
+          if (!settings.hedgeMode && fundingTimeMs != null && now >= fundingTimeMs) {
+            const fundingRatePct = Math.abs(fundingRate) * 100;
+            if (pnlPct >= fundingRatePct) {
+              try {
+                const orderIds = await exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty);
+                positionFundingTime.delete(key);
+                if (orderIds.length > 0) {
+                  const fundingReceived = (qty * entry) * Math.abs(fundingRate);
+                  await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderIds, 'Naked Mode Target Hit', fundingReceived, exitPrice, estimatedMakerFee);
+                }
+                delete lockedFundingRates[pos.symbol];
+                console.log('[EXIT] Naked Mode Target Hit |', pos.symbol, 'ROE%=', pnlPct.toFixed(2) + '%');
+              } catch (e) {
+                console.error(`[autoBot] Naked target exit failed ${pos.symbol}:`, e);
+              }
+              continue;
+            }
+            if (pnlPct <= -fundingRatePct) {
+              try {
+                const orderIds = await exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty);
+                positionFundingTime.delete(key);
+                if (orderIds.length > 0) {
+                  const fundingReceived = (qty * entry) * Math.abs(fundingRate);
+                  await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderIds, 'Naked Mode SL Hit', fundingReceived, exitPrice, estimatedMakerFee);
+                }
+                delete lockedFundingRates[pos.symbol];
+                console.log('[EXIT] Naked Mode SL Hit |', pos.symbol, 'ROE%=', pnlPct.toFixed(2) + '%');
+              } catch (e) {
+                console.error(`[autoBot] Naked SL exit failed ${pos.symbol}:`, e);
+              }
+              continue;
+            }
+          }
 
           // Time-based Auto Exit (after funding time) — disabled when subaccount hedging; only PnL-based exit applies for hedges
           if (settings.autoExitEnabled && exitThresholdMs > 0 && fundingTimeMs != null && now >= fundingTimeMs + exitThresholdMs) {
@@ -1575,7 +1610,7 @@ async function processUser(
   const inPrefetchWindow = minCountdownSec >= WALLET_PREFETCH_MIN_SEC && minCountdownSec <= WALLET_PREFETCH_MAX_SEC;
 
   const subKeys = await getSubAccountKeys(userId);
-  const subHedgingEnabled = !!subKeys;
+  const subHedgingEnabled = !!settings.hedgeMode && !!subKeys;
 
   // Pre-fetch wallet when countdown 20–60s; never call getWalletBalance when countdown <= 15 (critical path uses cache only). Sub-hedge: also fetch sub balance.
   if (inPrefetchWindow) {

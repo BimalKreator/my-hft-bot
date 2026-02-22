@@ -127,6 +127,14 @@ export async function updateSettingsHandler(
       const v = parseFloat(universalStoplossRaw);
       if (!Number.isNaN(v) && v >= 0) input.universalStoplossPercent = v;
     }
+    const hedgeModeRaw = body.hedgeMode ?? body.hedge_mode;
+    if (typeof hedgeModeRaw === 'boolean') {
+      input.hedgeMode = hedgeModeRaw;
+    } else if (hedgeModeRaw === 'true' || hedgeModeRaw === 1) {
+      input.hedgeMode = true;
+    } else if (hedgeModeRaw === 'false' || hedgeModeRaw === 0) {
+      input.hedgeMode = false;
+    }
     let settings = await updateSettings(userId, input);
     if (settings.subApiSecret) {
       settings = { ...settings, subApiSecret: '********' };
