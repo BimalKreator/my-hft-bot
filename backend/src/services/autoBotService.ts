@@ -1720,20 +1720,21 @@ async function processUser(
       const exactEntryTimeMs = fundingTimeMs - entryOffsetMs;
       const delayMs = exactEntryTimeMs - now;
       const subEntryOffsetMs = settings.subEntryOffsetMs ?? 10;
-      const exactSubEntryTimeMs = fundingTimeMs - subEntryOffsetMs;
-      const delaySubMs = exactSubEntryTimeMs - now;
       const cycleKey = entryCycleKey(userId, topToken.symbol, topToken.nextFundingTime);
+
+      const targetTime = fundingTimeMs;
+      const mainOffset = entryOffsetMs;
+      const maxDelayMs = ENTRY_SCHEDULE_MAX_MS;
+      const nowForRange = Date.now();
+      const delayMainForRange = targetTime - nowForRange - mainOffset;
+      const inRangeMain = delayMainForRange <= maxDelayMs && delayMainForRange > 0;
 
       const hedgeMode = settings.hedgeMode !== false;
       if (subHedgingEnabled && entryTimeoutByCycle.has(cycleKey)) {
         return;
       }
 
-      const inRangeMain = delayMs >= ENTRY_SCHEDULE_MIN_MS && delayMs <= ENTRY_SCHEDULE_MAX_MS;
-      const inRangeSub = delaySubMs > 0 && delaySubMs <= ENTRY_SCHEDULE_MAX_MS + 5000;
-      const shouldScheduleEntry = !entryTimeoutByCycle.has(cycleKey) && (inRangeMain || (hedgeMode && subKeys && inRangeSub));
-
-      if (shouldScheduleEntry) {
+      if (inRangeMain && !entryTimeoutByCycle.has(cycleKey)) {
         if (processedTokens.has(processedKey(userId, topToken.symbol, topToken.nextFundingTime))) return;
         if (enteredThisCycle.has(cycleKey)) return;
         if (Number.isNaN(delayMs) || delayMs < 0) return;
@@ -1835,24 +1836,24 @@ async function processUser(
           setLeverage(subKeys.subApiKey, subKeys.subApiSecret, topToken.symbol, leverageForEntry).catch(() => {});
         }
         const scheduleNow = Date.now();
-        const delayMain = fundingTimeMs - scheduleNow - entryOffsetMs;
+        const delayMain = targetTime - scheduleNow - mainOffset;
         const tMain = setTimeout(() => {
           executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'main', passedData).catch((e) =>
             console.error('[autoBot] executeEntry main failed', e)
           );
         }, Math.max(0, delayMain));
         if (hedgeMode && subKeys) {
-          const delaySub = fundingTimeMs - scheduleNow - subEntryOffsetMs;
+          const delaySub = targetTime - scheduleNow - subEntryOffsetMs;
           const tSub = setTimeout(() => {
             executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'sub', passedData).catch((e) =>
               console.error('[autoBot] executeEntry sub failed', e)
             );
           }, Math.max(0, delaySub));
+          console.log(`[autoBot] Sub-hedge entry scheduled: main in ${delayMain}ms, sub in ${delaySub}ms.`);
           entryTimeoutByCycle.set(cycleKey, { main: tMain, sub: tSub });
-          console.log(`[autoBot] Sub-hedge entry scheduled: main at ${exactEntryTimeMs} (in ${delayMain}ms), sub at ${exactSubEntryTimeMs} (in ${delaySub}ms).`);
         } else {
+          console.log(`[autoBot] Entry scheduled for Main (hedge_mode: false) in ${delayMain}ms.`);
           entryTimeoutByCycle.set(cycleKey, tMain);
-          console.log(`[autoBot] Entry scheduled for Main (hedge_mode: false) at ${exactEntryTimeMs} (in ${delayMain}ms).`);
         }
         return;
       }
