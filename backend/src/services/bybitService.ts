@@ -1,4 +1,5 @@
 import https from 'https';
+import crypto from 'crypto';
 import axios from 'axios';
 import CryptoJS from 'crypto-js';
 import { RestClientV5, WebsocketClient, WS_KEY_MAP } from 'bybit-api';
@@ -260,6 +261,100 @@ export async function getUsdtWalletDetails(
   } catch {
     return await call('CONTRACT');
   }
+}
+
+/**
+ * Get the UID (member id) for the account that owns the given API key.
+ * Uses GET /v5/user/get-member-type. Required for universal transfer.
+ */
+export async function getMemberUid(apiKey: string, apiSecret: string): Promise<string> {
+  const timestamp = Date.now().toString();
+  const paramStr = timestamp + apiKey + RECV_WINDOW;
+  const signature = sign(apiSecret, paramStr);
+  const { data } = await axiosBybit.get(`${BASE_URL}/v5/user/get-member-type`, {
+    headers: {
+      'X-BAPI-API-KEY': apiKey,
+      'X-BAPI-TIMESTAMP': timestamp,
+      'X-BAPI-SIGN': signature,
+      'X-BAPI-RECV-WINDOW': RECV_WINDOW,
+    },
+  });
+  if (data.retCode !== 0) throw new Error(data.retMsg ?? 'Bybit get-member-type failed');
+  const accounts = data?.result?.accounts ?? [];
+  const first = accounts[0];
+  if (!first?.uid) throw new Error('Bybit get-member-type: no uid in response');
+  return String(first.uid);
+}
+
+/**
+ * Get sub-account UIDs. Call with master (main) API key. Returns list of sub UIDs.
+ */
+export async function getSubMemberIds(apiKey: string, apiSecret: string): Promise<string[]> {
+  const timestamp = Date.now().toString();
+  const queryString = 'pageSize=100';
+  const paramStr = timestamp + apiKey + RECV_WINDOW + queryString;
+  const signature = sign(apiSecret, paramStr);
+  const { data } = await axiosBybit.get(`${BASE_URL}/v5/user/submembers?${queryString}`, {
+    headers: {
+      'X-BAPI-API-KEY': apiKey,
+      'X-BAPI-TIMESTAMP': timestamp,
+      'X-BAPI-SIGN': signature,
+      'X-BAPI-RECV-WINDOW': RECV_WINDOW,
+    },
+  });
+  if (data.retCode !== 0) throw new Error(data.retMsg ?? 'Bybit submembers failed');
+  const list = data?.result?.subMembers ?? [];
+  return list.map((m: { uid?: string }) => String(m.uid ?? '')).filter(Boolean);
+}
+
+/**
+ * Transfer funds between main and sub (UNIFIED to UNIFIED) via Bybit universal transfer.
+ * fromAccount/toAccount: 'main' | 'sub'. Uses main API key for main->sub, sub API key for sub->main.
+ */
+export async function transferFunds(
+  mainApiKey: string,
+  mainApiSecret: string,
+  subApiKey: string,
+  subApiSecret: string,
+  fromAccount: 'main' | 'sub',
+  toAccount: 'main' | 'sub',
+  amount: string,
+  coin: string = 'USDT'
+): Promise<{ transferId: string; status: string }> {
+  const mainUid = await getMemberUid(mainApiKey, mainApiSecret);
+  const subUids = await getSubMemberIds(mainApiKey, mainApiSecret);
+  const subUid = subUids[0];
+  if (!subUid) throw new Error('No sub-account UID found');
+  const fromUid = fromAccount === 'main' ? mainUid : subUid;
+  const toUid = toAccount === 'main' ? mainUid : subUid;
+  const apiKey = fromAccount === 'main' ? mainApiKey : subApiKey;
+  const apiSecret = fromAccount === 'main' ? mainApiSecret : subApiSecret;
+  const transferId = crypto.randomUUID();
+  const body = {
+    transferId,
+    coin: coin.toUpperCase(),
+    amount: String(amount),
+    fromMemberId: parseInt(fromUid, 10),
+    toMemberId: parseInt(toUid, 10),
+    fromAccountType: 'UNIFIED',
+    toAccountType: 'UNIFIED',
+  };
+  const bodyStr = JSON.stringify(body);
+  const timestamp = Date.now().toString();
+  const paramStr = timestamp + apiKey + RECV_WINDOW + bodyStr;
+  const signature = sign(apiSecret, paramStr);
+  const { data } = await axiosBybit.post(`${BASE_URL}/v5/asset/transfer/universal-transfer`, body, {
+    headers: {
+      'Content-Type': 'application/json',
+      'X-BAPI-API-KEY': apiKey,
+      'X-BAPI-TIMESTAMP': timestamp,
+      'X-BAPI-SIGN': signature,
+      'X-BAPI-RECV-WINDOW': RECV_WINDOW,
+    },
+  });
+  if (data.retCode !== 0) throw new Error(data.retMsg ?? 'Bybit universal-transfer failed');
+  const result = data?.result ?? {};
+  return { transferId: result.transferId ?? transferId, status: result.status ?? 'UNKNOWN' };
 }
 
 /**

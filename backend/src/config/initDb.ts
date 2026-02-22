@@ -135,6 +135,9 @@ async function initDb() {
   await client.query(`
     ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS slippage_buffer_pct NUMERIC NOT NULL DEFAULT 2.0;
   `).catch(() => {});
+  await client.query(`
+    ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS auto_equalize_funds BOOLEAN NOT NULL DEFAULT false;
+  `).catch(() => {});
 
   await client.query(`
     CREATE TABLE IF NOT EXISTS daily_snapshots (

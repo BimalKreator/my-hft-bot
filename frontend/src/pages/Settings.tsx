@@ -30,6 +30,7 @@ interface BotSettings {
   universalStoplossPercent: number;
   hedgeMode: boolean;
   slippageBufferPct: number;
+  autoEqualizeFunds: boolean;
 }
 
 const defaultSettings: Omit<BotSettings, 'userId'> = {
@@ -48,6 +49,7 @@ const defaultSettings: Omit<BotSettings, 'userId'> = {
   universalStoplossPercent: 3,
   hedgeMode: true,
   slippageBufferPct: 2,
+  autoEqualizeFunds: false,
 };
 
 export default function Settings() {
@@ -69,6 +71,8 @@ export default function Settings() {
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [mockTriggerLoading, setMockTriggerLoading] = useState(false);
   const [mockCancelLoading, setMockCancelLoading] = useState(false);
+  const [transferAmount, setTransferAmount] = useState('');
+  const [transferLoading, setTransferLoading] = useState(false);
 
   const fetchSettings = useCallback(async () => {
     const token = localStorage.getItem(TOKEN_KEY);
@@ -105,6 +109,7 @@ export default function Settings() {
         universalStoplossPercent: Number(data.universalStoplossPercent ?? data.universal_stoploss_percent) ?? 3,
         hedgeMode: data.hedgeMode ?? data.hedge_mode ?? true,
         slippageBufferPct: Number(data.slippageBufferPct ?? data.slippage_buffer_pct) ?? 2,
+        autoEqualizeFunds: Boolean(data.autoEqualizeFunds ?? data.auto_equalize_funds ?? false),
       });
     } catch {
       setError('Network error. Edit below and click Save to retry.');
@@ -156,6 +161,7 @@ export default function Settings() {
           universalStoplossPercent: Number(data.universalStoplossPercent ?? data.universal_stoploss_percent) ?? settings.universalStoplossPercent,
           hedgeMode: data.hedgeMode ?? data.hedge_mode ?? settings.hedgeMode,
           slippageBufferPct: Number(data.slippageBufferPct ?? data.slippage_buffer_pct) ?? settings.slippageBufferPct,
+          autoEqualizeFunds: Boolean(data.autoEqualizeFunds ?? data.auto_equalize_funds ?? settings.autoEqualizeFunds),
         });
         setSuccessMessage('Success — bot updated.');
         setTimeout(() => setSuccessMessage(null), 3000);
@@ -186,6 +192,7 @@ export default function Settings() {
       universalStoplossPercent: Math.max(0, Number(settings.universalStoplossPercent) ?? 3),
       hedgeMode: Boolean(settings.hedgeMode),
       slippageBufferPct: Math.max(0, Number(settings.slippageBufferPct) ?? 2),
+      autoEqualizeFunds: Boolean(settings.hedgeMode && settings.autoEqualizeFunds),
     });
   }, [settings, saveSettings]);
 
@@ -214,8 +221,49 @@ export default function Settings() {
   const toggleHedgeMode = () => {
     if (!settings) return;
     const next = !settings.hedgeMode;
-    setSettings((s) => (s ? { ...s, hedgeMode: next } : s));
-    saveSettings({ hedgeMode: next });
+    setSettings((s) => (s ? { ...s, hedgeMode: next, ...(next ? {} : { autoEqualizeFunds: false }) } : s));
+    saveSettings({ hedgeMode: next, ...(next ? {} : { autoEqualizeFunds: false }) });
+  };
+
+  const handleTransfer = useCallback(
+    async (direction: 'main_to_sub' | 'sub_to_main') => {
+      const token = localStorage.getItem(TOKEN_KEY);
+      if (!token) return;
+      const amount = parseFloat(transferAmount);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        setError('Enter a valid positive amount (USDT).');
+        return;
+      }
+      setTransferLoading(true);
+      setError(null);
+      try {
+        const res = await fetch('/api/settings/transfer-funds', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ direction, amount }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setError(data.error ?? 'Transfer failed');
+          return;
+        }
+        setSuccessMessage(`Transferred ${amount} USDT ${direction === 'main_to_sub' ? 'Main → Sub' : 'Sub → Main'}.`);
+        setTimeout(() => setSuccessMessage(null), 3000);
+        setTransferAmount('');
+      } catch {
+        setError('Network error');
+      } finally {
+        setTransferLoading(false);
+      }
+    },
+    [transferAmount]
+  );
+
+  const toggleAutoEqualize = () => {
+    if (!settings || !settings.hedgeMode) return;
+    const next = !settings.autoEqualizeFunds;
+    setSettings((s) => (s ? { ...s, autoEqualizeFunds: next } : s));
+    debouncedSave({ autoEqualizeFunds: next });
   };
 
   const fetchTransactions = useCallback(async () => {
@@ -634,6 +682,67 @@ export default function Settings() {
             </button>
           </div>
           <p className="text-xs text-gray-500 -mt-1">On: Main + Sub accounts. Off: Naked (Main only).</p>
+
+          {/* Capital Management */}
+          <h3 className="text-base font-semibold text-white mt-6 mb-2">Capital Management</h3>
+          <div className="space-y-3">
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-2">Amount (USDT)</label>
+              <input
+                type="number"
+                step={0.01}
+                min={0}
+                value={transferAmount}
+                onChange={(e) => setTransferAmount(e.target.value)}
+                placeholder="e.g. 100"
+                className="w-full rounded-lg border bg-black/50 px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-[#007BFF]"
+                style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
+              />
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => handleTransfer('main_to_sub')}
+                disabled={transferLoading || !transferAmount}
+                className="rounded-lg px-4 py-2 text-sm font-medium text-white border border-[#007BFF] hover:opacity-90 disabled:opacity-50"
+                style={{ backgroundColor: '#007BFF' }}
+              >
+                Transfer Main ➔ Sub
+              </button>
+              <button
+                type="button"
+                onClick={() => handleTransfer('sub_to_main')}
+                disabled={transferLoading || !transferAmount}
+                className="rounded-lg px-4 py-2 text-sm font-medium text-white border border-gray-500 hover:opacity-90 disabled:opacity-50 bg-gray-700"
+              >
+                Transfer Sub ➔ Main
+              </button>
+            </div>
+            <div className="flex items-center justify-between pt-2">
+              <label className="text-sm font-medium text-gray-300">Auto Equalize Balances</label>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={settings.hedgeMode ? settings.autoEqualizeFunds : false}
+                disabled={!settings.hedgeMode}
+                onClick={toggleAutoEqualize}
+                className={`relative h-8 w-14 rounded-full transition-colors ${
+                  settings.hedgeMode && settings.autoEqualizeFunds ? 'bg-[#007BFF]' : 'bg-gray-600'
+                } ${!settings.hedgeMode ? 'opacity-50 cursor-not-allowed' : ''}`}
+              >
+                <span
+                  className={`absolute top-1 h-6 w-6 rounded-full bg-white transition-transform ${
+                    settings.hedgeMode && settings.autoEqualizeFunds ? 'left-7' : 'left-1'
+                  }`}
+                />
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 -mt-1">
+              {settings.hedgeMode
+                ? 'When no positions, transfer USDT between Main and Sub to equalize. Disabled when Hedge Mode is off.'
+                : 'Enable Hedge Mode (Main + Sub) to use Auto Equalize.'}
+            </p>
+          </div>
 
         </div>
 

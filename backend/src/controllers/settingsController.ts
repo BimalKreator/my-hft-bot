@@ -1,5 +1,8 @@
 import { Response } from 'express';
 import { getSettings, updateSettings, type UpdateSettingsInput } from '../models/settingsModel.js';
+import { getExchangeKeys } from '../models/exchangeModel.js';
+import { decrypt } from '../utils/encryption.js';
+import { transferFunds } from '../services/bybitService.js';
 import { triggerManualMock, cancelManualMock } from '../services/autoBotService.js';
 import { AuthRequest } from '../middleware/authMiddleware.js';
 
@@ -142,6 +145,14 @@ export async function updateSettingsHandler(
       const v = parseFloat(slippageBufferRaw);
       if (!Number.isNaN(v) && v >= 0) input.slippageBufferPct = v;
     }
+    const autoEqualizeRaw = body.autoEqualizeFunds ?? body.auto_equalize_funds;
+    if (typeof autoEqualizeRaw === 'boolean') {
+      input.autoEqualizeFunds = autoEqualizeRaw;
+    } else if (autoEqualizeRaw === 'true' || autoEqualizeRaw === 1) {
+      input.autoEqualizeFunds = true;
+    } else if (autoEqualizeRaw === 'false' || autoEqualizeRaw === 0) {
+      input.autoEqualizeFunds = false;
+    }
     let settings = await updateSettings(userId, input);
     if (settings.subApiSecret) {
       settings = { ...settings, subApiSecret: '********' };
@@ -151,6 +162,55 @@ export async function updateSettingsHandler(
     const e = err as Error & { code?: string; detail?: string };
     console.error('[settingsController] updateSettings failed:', e?.message ?? err, e?.code ?? '', e?.detail ?? '');
     const msg = err instanceof Error ? err.message : 'Failed to update settings';
+    res.status(500).json({ error: msg });
+  }
+}
+
+export async function transferFundsHandler(
+  req: AuthRequest,
+  res: Response
+): Promise<void> {
+  try {
+    const userId = req.user?.userId;
+    if (!userId) {
+      res.status(401).json({ error: 'Authentication required' });
+      return;
+    }
+    const body = req.body as Record<string, unknown>;
+    const direction = body.direction as string;
+    const amountRaw = body.amount;
+    if (direction !== 'main_to_sub' && direction !== 'sub_to_main') {
+      res.status(400).json({ error: 'direction must be main_to_sub or sub_to_main' });
+      return;
+    }
+    const amount = typeof amountRaw === 'number' && !Number.isNaN(amountRaw)
+      ? String(amountRaw)
+      : typeof amountRaw === 'string' ? amountRaw.trim() : '';
+    if (!amount || parseFloat(amount) <= 0) {
+      res.status(400).json({ error: 'amount must be a positive number' });
+      return;
+    }
+    const keys = await getExchangeKeys(userId, 'Bybit');
+    if (!keys) {
+      res.status(400).json({ error: 'Exchange keys not found' });
+      return;
+    }
+    const { getSubAccountKeys } = await import('../models/exchangeModel.js');
+    const subKeys = await getSubAccountKeys(userId);
+    if (!subKeys?.subApiKey || !subKeys?.subApiSecret) {
+      res.status(400).json({ error: 'Sub-account keys not found. Configure in Exchange Setup.' });
+      return;
+    }
+    const mainKey = decrypt(keys.api_key);
+    const mainSecret = decrypt(keys.api_secret);
+    const subKey = subKeys.subApiKey;
+    const subSecret = subKeys.subApiSecret;
+    const fromAccount = direction === 'main_to_sub' ? 'main' : 'sub';
+    const toAccount = direction === 'main_to_sub' ? 'sub' : 'main';
+    const result = await transferFunds(mainKey, mainSecret, subKey, subSecret, fromAccount, toAccount, amount, 'USDT');
+    res.status(200).json({ ok: true, transferId: result.transferId, status: result.status });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Transfer failed';
     res.status(500).json({ error: msg });
   }
 }

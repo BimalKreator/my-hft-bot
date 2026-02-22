@@ -26,6 +26,7 @@ import {
   getDepthPrice,
   calculateUnrealizedPnLByDepth,
   warmupWsConnection,
+  transferFunds,
 } from './bybitService.js';
 import type { OrderbookResult } from './bybitService.js';
 import { FundingScanner } from './scannerService.js';
@@ -41,6 +42,9 @@ import { insertTradeHistoryEntry } from '../models/tradeHistoryModel.js';
 const INTERVAL_MS = 5_000;
 const ENTRY_FAST_INTERVAL_MS = 500; // when countdown <= 15s (zero latency in final seconds)
 const EXIT_INTERVAL_MS = 2_000; // Fallback if WebSocket settlement event doesn't fire
+/** Cooldown between auto-equalize runs per user (no positions path). */
+const AUTO_EQUALIZE_COOLDOWN_MS = 5 * 60 * 1000;
+const lastAutoEqualizeByUser = new Map<number, number>();
 
 /** Prefetch window: fetch wallet when countdown 20–60s; never call getWalletBalance when countdown <= 15. */
 const WALLET_PREFETCH_MIN_SEC = 20;
@@ -749,6 +753,45 @@ async function runTick(): Promise<number> {
   }
 }
 
+/**
+ * When no positions and auto-equalize + hedge mode on: transfer half the balance difference
+ * from the higher account to the lower. Cooldown per user to avoid spamming.
+ */
+async function tryAutoEqualize(
+  userId: number,
+  settings: Awaited<ReturnType<typeof getSettings>>,
+  apiKey: string,
+  apiSecret: string,
+  subKeys: { subApiKey: string; subApiSecret: string } | null
+): Promise<void> {
+  if (!settings.hedgeMode || !settings.autoEqualizeFunds || !subKeys) return;
+  const last = lastAutoEqualizeByUser.get(userId);
+  if (last != null && Date.now() - last < AUTO_EQUALIZE_COOLDOWN_MS) return;
+
+  try {
+    const [mainWallet, subWallet] = await Promise.all([
+      getWalletBalance(apiKey, apiSecret),
+      getWalletBalance(subKeys.subApiKey, subKeys.subApiSecret),
+    ]);
+    const mainEquity = parseFloat(mainWallet.totalEquity) || 0;
+    const subEquity = parseFloat(subWallet.totalEquity) || 0;
+    const diff = mainEquity - subEquity;
+    if (Math.abs(diff) <= 1) return;
+
+    const transferAmount = Math.abs(diff) / 2;
+    const amountStr = transferAmount.toFixed(2);
+    const fromAccount = diff > 0 ? 'main' : 'sub';
+    const toAccount = diff > 0 ? 'sub' : 'main';
+    const direction = diff > 0 ? 'main_to_sub' : 'sub_to_main';
+
+    await transferFunds(apiKey, apiSecret, subKeys.subApiKey, subKeys.subApiSecret, fromAccount, toAccount, amountStr, 'USDT');
+    lastAutoEqualizeByUser.set(userId, Date.now());
+    console.log(`[autoBot] Auto-Equalized balances. Transferred ${amountStr} USDT from ${direction}.`);
+  } catch (e) {
+    console.error('[autoBot] Auto-equalize failed for user', userId, e);
+  }
+}
+
 async function monitorExits(): Promise<void> {
   try {
     const userIds = await getUsersWithAutoEntryEnabled();
@@ -768,7 +811,6 @@ async function monitorExits(): Promise<void> {
         const apiKey = decrypt(keys.api_key);
         const apiSecret = decrypt(keys.api_secret);
         const positions = await getPositionList(apiKey, apiSecret, { category: 'linear', settleCoin: 'USDT' });
-        if (positions.length === 0) continue;
 
         let subPositions: Awaited<ReturnType<typeof getPositionList>> = [];
         const subKeys = await getSubAccountKeys(userId);
@@ -778,6 +820,11 @@ async function monitorExits(): Promise<void> {
           } catch (e) {
             console.error('[autoBot] getPositionList (sub) failed for user', userId, e);
           }
+        }
+
+        if (positions.length === 0) {
+          if (subPositions.length === 0) await tryAutoEqualize(userId, settings, apiKey, apiSecret, subKeys);
+          continue;
         }
 
         const exitThresholdMs = settings.exitTimeMs ?? 0;
