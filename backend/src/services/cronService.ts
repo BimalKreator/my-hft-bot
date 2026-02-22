@@ -1,6 +1,6 @@
 import cron from 'node-cron';
 import { query } from '../config/db.js';
-import { getExchangeKeys } from '../models/exchangeModel.js';
+import { getExchangeKeys, getSubAccountKeys } from '../models/exchangeModel.js';
 import { decrypt } from '../utils/encryption.js';
 import { getWalletBalance } from './bybitService.js';
 
@@ -53,9 +53,26 @@ async function runDailySnapshot(): Promise<void> {
 
       const apiKey = decrypt(keys.api_key);
       const apiSecret = decrypt(keys.api_secret);
+      let mainEquity = 0;
       const balance = await getWalletBalance(apiKey, apiSecret);
-      const walletEquity = parseFloat(balance.totalEquity ?? '0') || 0;
+      mainEquity = parseFloat(balance.totalEquity ?? '0') || 0;
+
+      const subKeys = await getSubAccountKeys(userId);
+      let subEquity = 0;
+      if (subKeys) {
+        try {
+          const subBalance = await getWalletBalance(subKeys.subApiKey, subKeys.subApiSecret);
+          subEquity = parseFloat(subBalance.totalEquity ?? '0') || 0;
+        } catch (err) {
+          console.warn('[cron] Sub wallet balance fetch failed for user', userId, err instanceof Error ? err.message : String(err));
+        }
+      }
+
+      const walletEquity = mainEquity + subEquity;
       const closingBalance = BASE_CAPITAL + walletEquity;
+      if (subKeys && (mainEquity > 0 || subEquity > 0)) {
+        console.log(`[cron] Daily snapshot user ${userId} capital (main+sub): mainEquity=${mainEquity} subEquity=${subEquity} closing=${closingBalance}`);
+      }
 
       const openingRow = await query<{ closing_balance: string }>(
         `SELECT closing_balance FROM daily_snapshots
