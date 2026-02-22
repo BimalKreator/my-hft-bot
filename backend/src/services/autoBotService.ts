@@ -1735,126 +1735,125 @@ async function processUser(
       const delaySubMs = exactSubEntryTimeMs - now;
       const cycleKey = entryCycleKey(userId, topToken.symbol, topToken.nextFundingTime);
 
+      const hedgeMode = settings.hedgeMode !== false;
       if (subHedgingEnabled && entryTimeoutByCycle.has(cycleKey)) {
         return;
       }
 
-      if (subHedgingEnabled && subKeys && !entryTimeoutByCycle.has(cycleKey)) {
+      const inRangeMain = delayMs >= ENTRY_SCHEDULE_MIN_MS && delayMs <= ENTRY_SCHEDULE_MAX_MS;
+      const inRangeSub = delaySubMs > 0 && delaySubMs <= ENTRY_SCHEDULE_MAX_MS + 5000;
+      const shouldScheduleEntry = !entryTimeoutByCycle.has(cycleKey) && (inRangeMain || (hedgeMode && subKeys && inRangeSub));
+
+      if (shouldScheduleEntry) {
         if (processedTokens.has(processedKey(userId, topToken.symbol, topToken.nextFundingTime))) return;
         if (enteredThisCycle.has(cycleKey)) return;
-        if (Number.isNaN(delayMs) || delayMs < 0 || Number.isNaN(delaySubMs) || delaySubMs < 0) return;
-        const inRangeMain = delayMs >= ENTRY_SCHEDULE_MIN_MS && delayMs <= ENTRY_SCHEDULE_MAX_MS;
-        const inRangeSub = delaySubMs > 0 && delaySubMs <= ENTRY_SCHEDULE_MAX_MS + 5000;
-        if (inRangeMain || inRangeSub) {
-          const prepForPayload = entryPrepCacheByUser.get(userId);
-          const cForPayload = prepForPayload?.candidates.find((x) => x.symbol === topToken.symbol && x.nextFundingTime === topToken.nextFundingTime);
-          const side: 'Buy' | 'Sell' = topToken.fundingRate < 0 ? 'Buy' : 'Sell';
-          if (prepForPayload && cForPayload && cForPayload.fixedQty != null && prepForPayload.subApiKey && prepForPayload.subApiSecret) {
-            try {
-              const orderbook = await getOrderbook(topToken.symbol, ORDERBOOK_SWEEP_LIMIT);
-              const sweepPrice = getSweepPrice(orderbook, side, cForPayload.fixedQty);
-              if (Number.isFinite(sweepPrice) && sweepPrice > 0) {
-                const tickSize = cForPayload.tickSize ?? '0.01';
-                const priceStr = formatPriceToTick(sweepPrice, tickSize);
-                const qtyStr = formatQtyToStep(cForPayload.fixedQty, String(cForPayload.qtyStep));
-                if (parseFloat(qtyStr) > 0) {
-                  pendingOrderPayloadByCycle.set(cycleKey, {
-                    main: { apiKey: prepForPayload.apiKey, apiSecret: prepForPayload.apiSecret, symbol: topToken.symbol, side, qtyStr, priceStr },
-                    sub: { apiKey: prepForPayload.subApiKey, apiSecret: prepForPayload.subApiSecret, symbol: topToken.symbol, side, qtyStr, priceStr },
-                  });
-                }
+        if (Number.isNaN(delayMs) || delayMs < 0) return;
+        const prepForPayload = entryPrepCacheByUser.get(userId);
+        const cForPayload = prepForPayload?.candidates.find((x) => x.symbol === topToken.symbol && x.nextFundingTime === topToken.nextFundingTime);
+        const side: 'Buy' | 'Sell' = topToken.fundingRate < 0 ? 'Buy' : 'Sell';
+        if (hedgeMode && subKeys && prepForPayload && cForPayload && cForPayload.fixedQty != null && prepForPayload.subApiKey && prepForPayload.subApiSecret) {
+          try {
+            const orderbook = await getOrderbook(topToken.symbol, ORDERBOOK_SWEEP_LIMIT);
+            const sweepPrice = getSweepPrice(orderbook, side, cForPayload.fixedQty);
+            if (Number.isFinite(sweepPrice) && sweepPrice > 0) {
+              const tickSize = cForPayload.tickSize ?? '0.01';
+              const priceStr = formatPriceToTick(sweepPrice, tickSize);
+              const qtyStr = formatQtyToStep(cForPayload.fixedQty, String(cForPayload.qtyStep));
+              if (parseFloat(qtyStr) > 0) {
+                pendingOrderPayloadByCycle.set(cycleKey, {
+                  main: { apiKey: prepForPayload.apiKey, apiSecret: prepForPayload.apiSecret, symbol: topToken.symbol, side, qtyStr, priceStr },
+                  sub: { apiKey: prepForPayload.subApiKey, apiSecret: prepForPayload.subApiSecret, symbol: topToken.symbol, side, qtyStr, priceStr },
+                });
               }
-            } catch (e) {
-              console.warn('[autoBot] Pre-compute payload failed, executeEntry will compute:', e);
             }
+          } catch (e) {
+            console.warn('[autoBot] Pre-compute payload failed, executeEntry will compute:', e);
           }
-          isExecutionImminent = true;
-          executionImminentUntilMs = Math.max(executionImminentUntilMs, fundingTimeMs + 2000);
-          let passedData: ExecuteEntryPrepData;
-          if (prepForPayload && cForPayload && cForPayload.fixedQty != null) {
-            passedData = { prep: prepForPayload, candidate: cForPayload };
-          } else {
-            const cache = walletCacheByUser.get(userId);
-            const totalW = cache?.totalEquity ?? totalWalletBalance;
-            const tradeM = cache && cache.subEquity != null
-              ? Math.min(cache.totalEquity, cache.subEquity) * ((settings.capitalPercent ?? 0) / 100)
-              : totalWalletBalance * ((settings.capitalPercent ?? 0) / 100);
-            const cachedAvail = cache
-              ? (subHedgingEnabled && cache.subAvailableBalance != null ? Math.min(cache.totalAvailableBalance, cache.subAvailableBalance) : cache.totalAvailableBalance)
-              : cachedAvailableMargin;
-            const prepBuilt: EntryPrep = {
-              settings: { orderBookDepth: settings.orderBookDepth, capitalPercent: settings.capitalPercent, maxTrades, entryOffsetMs, subEntryOffsetMs: settings.subEntryOffsetMs ?? 10 },
-              apiKey,
-              apiSecret,
-              totalWalletBalance: totalW,
-              tradeMargin: tradeM,
-              cachedAvailableMargin: cachedAvail,
-              positionsCount: positions.length,
-              maxTrades,
-              candidates: [],
-              ...(subKeys && { subApiKey: subKeys.subApiKey, subApiSecret: subKeys.subApiSecret }),
-              subEntryOffsetMs: settings.subEntryOffsetMs ?? 10,
-            };
-            let qtyStep = 0.1;
-            let minOrderQty = 0;
-            let maxOrderQty = 999999;
-            let tickSize = '0.01';
-            let futuresLeverage = settings.leverage ?? 10;
-            try {
-              const ls = await getInstrumentLotSize(apiKey, apiSecret, topToken.symbol);
-              qtyStep = parseFloat(ls.qtyStep) || 0.1;
-              minOrderQty = parseFloat(ls.minOrderQty) || 0;
-              maxOrderQty = parseFloat(ls.maxMktOrderQty || ls.maxOrderQty) || 999999;
-              tickSize = ls.tickSize ?? '0.01';
-            } catch { /* ignore */ }
-            try {
-              const details = await getInstrumentDetails(topToken.symbol);
-              futuresLeverage = Math.min(settings.leverage ?? 10, parseFloat(details.maxLeverage) || futuresLeverage);
-            } catch { /* ignore */ }
-            let fixedQty: number | undefined;
-            try {
-              const ob = await getOrderBookDepth(apiKey, apiSecret, topToken.symbol, settings.orderBookDepth ?? 2);
-              const entryPrice = side === 'Buy' ? ob.askPrice : ob.bidPrice;
-              if (Number.isFinite(entryPrice) && entryPrice > 0) {
-                const rawQty = (tradeM * futuresLeverage) / entryPrice;
-                const step = qtyStep;
-                const stepDecimals = step.toString().includes('.') ? step.toString().split('.')[1]!.length : 0;
-                let q = parseFloat((Math.floor(rawQty / step) * step).toFixed(stepDecimals));
-                if (q > maxOrderQty) q = parseFloat((Math.floor(maxOrderQty / step) * step).toFixed(stepDecimals));
-                if (q >= minOrderQty) fixedQty = q;
-              }
-            } catch { /* ignore */ }
-            const candidateBuilt: EntryPrepCandidate = {
-              symbol: topToken.symbol,
-              nextFundingTime: topToken.nextFundingTime,
-              fundingRate: topToken.fundingRate,
-              side,
-              safeLeverage: futuresLeverage,
-              qtyStep,
-              minOrderQty,
-              maxOrderQty,
-              tickSize,
-              ...(fixedQty != null && { fixedQty }),
-            };
-            passedData = { prep: prepBuilt, candidate: candidateBuilt };
-          }
-          const leverageForEntry = passedData.candidate.safeLeverage ?? settings.leverage ?? 10;
-          if (subKeys) {
-            Promise.all([
-              setLeverage(apiKey, apiSecret, topToken.symbol, leverageForEntry),
-              setLeverage(subKeys.subApiKey, subKeys.subApiSecret, topToken.symbol, leverageForEntry),
-            ]).catch(() => {});
-          } else {
-            setLeverage(apiKey, apiSecret, topToken.symbol, leverageForEntry).catch(() => {});
-          }
-          const scheduleNow = Date.now();
-          const delayMain = fundingTimeMs - scheduleNow - entryOffsetMs;
+        }
+        isExecutionImminent = true;
+        executionImminentUntilMs = Math.max(executionImminentUntilMs, fundingTimeMs + 2000);
+        let passedData: ExecuteEntryPrepData;
+        if (prepForPayload && cForPayload && cForPayload.fixedQty != null) {
+          passedData = { prep: prepForPayload, candidate: cForPayload };
+        } else {
+          const cache = walletCacheByUser.get(userId);
+          const totalW = cache?.totalEquity ?? totalWalletBalance;
+          const tradeM = cache && cache.subEquity != null && hedgeMode
+            ? Math.min(cache.totalEquity, cache.subEquity) * ((settings.capitalPercent ?? 0) / 100)
+            : totalWalletBalance * ((settings.capitalPercent ?? 0) / 100);
+          const cachedAvail = cache
+            ? (hedgeMode && cache.subAvailableBalance != null ? Math.min(cache.totalAvailableBalance, cache.subAvailableBalance) : cache.totalAvailableBalance)
+            : cachedAvailableMargin;
+          const prepBuilt: EntryPrep = {
+            settings: { orderBookDepth: settings.orderBookDepth, capitalPercent: settings.capitalPercent, maxTrades, entryOffsetMs, subEntryOffsetMs: settings.subEntryOffsetMs ?? 10 },
+            apiKey,
+            apiSecret,
+            totalWalletBalance: totalW,
+            tradeMargin: tradeM,
+            cachedAvailableMargin: cachedAvail,
+            positionsCount: positions.length,
+            maxTrades,
+            candidates: [],
+            ...(hedgeMode && subKeys && { subApiKey: subKeys.subApiKey, subApiSecret: subKeys.subApiSecret }),
+            subEntryOffsetMs: settings.subEntryOffsetMs ?? 10,
+          };
+          let qtyStep = 0.1;
+          let minOrderQty = 0;
+          let maxOrderQty = 999999;
+          let tickSize = '0.01';
+          let futuresLeverage = settings.leverage ?? 10;
+          try {
+            const ls = await getInstrumentLotSize(apiKey, apiSecret, topToken.symbol);
+            qtyStep = parseFloat(ls.qtyStep) || 0.1;
+            minOrderQty = parseFloat(ls.minOrderQty) || 0;
+            maxOrderQty = parseFloat(ls.maxMktOrderQty || ls.maxOrderQty) || 999999;
+            tickSize = ls.tickSize ?? '0.01';
+          } catch { /* ignore */ }
+          try {
+            const details = await getInstrumentDetails(topToken.symbol);
+            futuresLeverage = Math.min(settings.leverage ?? 10, parseFloat(details.maxLeverage) || futuresLeverage);
+          } catch { /* ignore */ }
+          let fixedQty: number | undefined;
+          try {
+            const ob = await getOrderBookDepth(apiKey, apiSecret, topToken.symbol, settings.orderBookDepth ?? 2);
+            const entryPrice = side === 'Buy' ? ob.askPrice : ob.bidPrice;
+            if (Number.isFinite(entryPrice) && entryPrice > 0) {
+              const rawQty = (tradeM * futuresLeverage) / entryPrice;
+              const step = qtyStep;
+              const stepDecimals = step.toString().includes('.') ? step.toString().split('.')[1]!.length : 0;
+              let q = parseFloat((Math.floor(rawQty / step) * step).toFixed(stepDecimals));
+              if (q > maxOrderQty) q = parseFloat((Math.floor(maxOrderQty / step) * step).toFixed(stepDecimals));
+              if (q >= minOrderQty) fixedQty = q;
+            }
+          } catch { /* ignore */ }
+          const candidateBuilt: EntryPrepCandidate = {
+            symbol: topToken.symbol,
+            nextFundingTime: topToken.nextFundingTime,
+            fundingRate: topToken.fundingRate,
+            side,
+            safeLeverage: futuresLeverage,
+            qtyStep,
+            minOrderQty,
+            maxOrderQty,
+            tickSize,
+            ...(fixedQty != null && { fixedQty }),
+          };
+          passedData = { prep: prepBuilt, candidate: candidateBuilt };
+        }
+        const leverageForEntry = passedData.candidate.safeLeverage ?? settings.leverage ?? 10;
+        setLeverage(apiKey, apiSecret, topToken.symbol, leverageForEntry).catch(() => {});
+        if (hedgeMode && subKeys) {
+          setLeverage(subKeys.subApiKey, subKeys.subApiSecret, topToken.symbol, leverageForEntry).catch(() => {});
+        }
+        const scheduleNow = Date.now();
+        const delayMain = fundingTimeMs - scheduleNow - entryOffsetMs;
+        const tMain = setTimeout(() => {
+          executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'main', passedData).catch((e) =>
+            console.error('[autoBot] executeEntry main failed', e)
+          );
+        }, Math.max(0, delayMain));
+        if (hedgeMode && subKeys) {
           const delaySub = fundingTimeMs - scheduleNow - subEntryOffsetMs;
-          const tMain = setTimeout(() => {
-            executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'main', passedData).catch((e) =>
-              console.error('[autoBot] executeEntry main failed', e)
-            );
-          }, Math.max(0, delayMain));
           const tSub = setTimeout(() => {
             executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'sub', passedData).catch((e) =>
               console.error('[autoBot] executeEntry sub failed', e)
@@ -1862,6 +1861,9 @@ async function processUser(
           }, Math.max(0, delaySub));
           entryTimeoutByCycle.set(cycleKey, { main: tMain, sub: tSub });
           console.log(`[autoBot] Sub-hedge entry scheduled: main at ${exactEntryTimeMs} (in ${delayMain}ms), sub at ${exactSubEntryTimeMs} (in ${delaySub}ms).`);
+        } else {
+          entryTimeoutByCycle.set(cycleKey, tMain);
+          console.log(`[autoBot] Entry scheduled for Main (hedge_mode: false) at ${exactEntryTimeMs} (in ${delayMain}ms).`);
         }
         return;
       }
