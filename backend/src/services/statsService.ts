@@ -29,6 +29,8 @@ export interface DashboardStats {
   todayProfit: number;
   todayProfitPct: number;
   dailyRoi: number;
+  mainEquity: number;
+  subEquity: number;
 }
 
 /**
@@ -154,5 +156,7 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
     todayProfit,
     todayProfitPct,
     dailyRoi,
+    mainEquity,
+    subEquity,
   };
 }

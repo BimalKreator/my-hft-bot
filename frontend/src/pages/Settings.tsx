@@ -73,6 +73,7 @@ export default function Settings() {
   const [mockCancelLoading, setMockCancelLoading] = useState(false);
   const [transferAmount, setTransferAmount] = useState('');
   const [transferLoading, setTransferLoading] = useState(false);
+  const [balanceStats, setBalanceStats] = useState<{ mainEquity: number; subEquity: number } | null>(null);
 
   const fetchSettings = useCallback(async () => {
     const token = localStorage.getItem(TOKEN_KEY);
@@ -284,6 +285,22 @@ export default function Settings() {
   useEffect(() => {
     fetchTransactions();
   }, [fetchTransactions]);
+
+  useEffect(() => {
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (!token) return;
+    fetch('/api/stats', { headers: { Authorization: `Bearer ${token}` } })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data && (data.mainEquity != null || data.subEquity != null)) {
+          setBalanceStats({
+            mainEquity: Number(data.mainEquity) || 0,
+            subEquity: Number(data.subEquity) || 0,
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const handleAddTransaction = useCallback(async () => {
     setError(null);
@@ -686,6 +703,19 @@ export default function Settings() {
           {/* Capital Management */}
           <h3 className="text-base font-semibold text-white mt-6 mb-2">Capital Management</h3>
           <div className="space-y-3">
+            {balanceStats != null && (
+              <div className="flex flex-wrap gap-4 text-sm">
+                {/* TODO: Remove temporary +1500 offset later */}
+                <div>
+                  <p className="text-gray-500">Main UFA Balance</p>
+                  <p className="font-medium text-white">${(balanceStats.mainEquity + 1500).toFixed(2)}</p>
+                </div>
+                <div>
+                  <p className="text-gray-500">Sub UFA Balance</p>
+                  <p className="font-medium text-white">${(balanceStats.subEquity + 1500).toFixed(2)}</p>
+                </div>
+              </div>
+            )}
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-2">Amount (USDT)</label>
               <input

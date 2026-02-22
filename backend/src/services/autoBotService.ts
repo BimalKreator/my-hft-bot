@@ -120,6 +120,9 @@ const positionFundingTime = new Map<string, number>();
 /** After main entry fills for sub-hedge, store here so when sub entry fills we can register subHedgeActive. */
 const mainFilledForSubHedge = new Map<string, { userId: number; symbol: string; side: 'Buy' | 'Sell'; qty: number; mainApiKey: string; mainApiSecret: string }>();
 
+/** Main positions in fallback state (Sub failed, Fallback SL set). Break-even rule applies in monitorExits. */
+const mainOrphanFallbackKeys = new Set<string>();
+
 /** Last entry execution report (main and optionally sub) for dashboard / debugging. */
 export interface LastEntryExecutionDetail {
   triggeredAtMs: number;
@@ -295,6 +298,26 @@ async function setMainFallbackStoploss(
   }
 }
 
+/** Verify Sub account actually has the position (IOC can return retCode 0 but cancel with zero fill). */
+async function verifySubPositionFilled(
+  subApiKey: string,
+  subApiSecret: string,
+  symbol: string,
+  orderSide: 'Buy' | 'Sell',
+  expectedQty: number
+): Promise<boolean> {
+  try {
+    await new Promise((r) => setTimeout(r, 600));
+    const positions = await getPositionList(subApiKey, subApiSecret, { category: 'linear', settleCoin: 'USDT' });
+    const pos = positions.find((p) => p.symbol === symbol && p.side === orderSide);
+    if (!pos) return false;
+    const size = parseFloat(pos.size) || 0;
+    return size >= expectedQty * 0.99;
+  } catch {
+    return false;
+  }
+}
+
 /** Apply entry slippage buffer to base price and format for limit order. Long (Buy): base * (1 + pct/100); Short (Sell): base * (1 - pct/100). */
 function applySlippageAndFormat(
   basePrice: number,
@@ -423,7 +446,7 @@ async function saveClosedTradeAfterExit(
   entryPrice: number,
   qty: number,
   orderIds: string | string[],
-  exitReason: 'Time Exit' | 'Stoploss Hit' | 'Pre-Funding Stoploss' | 'Post-Funding Stoploss' | 'Post-Funding Stoploss (L2 - 50% Funding)' | 'PnL Positive Exit' | 'Universal Stoploss' | 'Break-even' | 'Next Trade Cleanup' | 'Post-Funding Profit' | '15m Pre-Next Funding' | 'Naked Mode Target Hit' | 'Naked Mode SL Hit',
+  exitReason: 'Time Exit' | 'Stoploss Hit' | 'Pre-Funding Stoploss' | 'Post-Funding Stoploss' | 'Post-Funding Stoploss (L2 - 50% Funding)' | 'PnL Positive Exit' | 'Universal Stoploss' | 'Break-even' | 'Break-even (fallback)' | 'Next Trade Cleanup' | 'Post-Funding Profit' | '15m Pre-Next Funding' | 'Naked Mode Target Hit' | 'Naked Mode SL Hit',
   fundingReceived: number = 0,
   estimatedExitPrice?: number,
   estimatedFeesWhenZero?: number
@@ -1034,6 +1057,32 @@ async function monitorExits(): Promise<void> {
             continue;
           }
 
+          // Orphan Main (Sub failed, Fallback SL set): apply Break-even so Main can exit at entry if price recovers before SL
+          if (settings.hedgeMode && subKeys && !subHedgeActive.has(key) && mainOrphanFallbackKeys.has(key)) {
+            if (fundingTimeMs != null && now >= fundingTimeMs) {
+              const breakEvenHit =
+                entry > 0 &&
+                Number.isFinite(bid1Safe) &&
+                Number.isFinite(ask1Safe) &&
+                (pos.side === 'Buy' ? bid1Safe >= entry : ask1Safe <= entry);
+              if (breakEvenHit) {
+                try {
+                  const orderIds = await exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty);
+                  positionFundingTime.delete(key);
+                  mainOrphanFallbackKeys.delete(key);
+                  if (orderIds.length > 0) {
+                    await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderIds, 'Break-even (fallback)', 0, exitPrice, estimatedMakerFee);
+                  }
+                  console.log('[EXIT] Break-even (fallback) |', pos.symbol);
+                } catch (e) {
+                  console.error(`[autoBot] Break-even (fallback) exit failed ${pos.symbol}:`, e);
+                }
+                continue;
+              }
+            }
+            continue;
+          }
+
           const hedgeGroup = await getHedgeGroupByPosition(userId, pos.symbol, pos.side);
 
           // Hedged position: live orderbook depth PnL, target/stoploss (dollar), timeout
@@ -1307,16 +1356,34 @@ async function executeEntry(
   if (account === 'sub' && pendingPayload?.sub) {
     const pl = pendingPayload.sub;
     const orderSide: 'Buy' | 'Sell' = pl.side === 'Buy' ? 'Sell' : 'Buy';
+    const expectedQty = parseFloat(pl.qtyStr) || 0;
     try {
       console.log('[DEBUG] Sending WS Order to Bybit for', account ?? 'sub');
       const response = await placeLimitOrder(pl.apiKey, pl.apiSecret, pl.symbol, orderSide, pl.qtyStr, pl.priceStr, 'IOC');
       console.log(`[DEBUG] Bybit Response for sub:`, response);
       const executions = await getExecutionList(pl.apiKey, pl.apiSecret, 'linear', response.orderId).catch(() => []);
+      const filledQty = executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
+      const positionVerified = await verifySubPositionFilled(pl.apiKey, pl.apiSecret, pl.symbol, orderSide, expectedQty);
+      const subActuallyFilled = filledQty > 0 && positionVerified;
+      if (!subActuallyFilled) {
+        const mainFilled = mainFilledForSubHedge.get(cycleKey);
+        const settings = await getSettings(userId);
+        if (settings.hedgeMode && mainFilled) {
+          const marketData = await fundingScanner.getFundingData();
+          const symData = marketData.find((m) => m.symbol === mainFilled.symbol);
+          const fundingRate = symData?.fundingRate ?? 0;
+          await setMainFallbackStoploss(mainFilled.mainApiKey, mainFilled.mainApiSecret, mainFilled.symbol, mainFilled.side, fundingRate);
+          mainFilledForSubHedge.delete(cycleKey);
+          mainOrphanFallbackKeys.add(positionKey(userId, mainFilled.symbol, mainFilled.side));
+        }
+        pendingOrderPayloadByCycle.delete(cycleKey);
+        console.log('[ABORT] executeEntry stopped at sub payload no fill (Sub Account Failure)');
+        return;
+      }
       recordLastEntry(userId, 'sub', pl.symbol, nextFundingTime, fundingTimeMs, triggeredAtMs, response.orderId, executions, true);
       const mainFilled = mainFilledForSubHedge.get(cycleKey);
       if (mainFilled) {
         const posKey = positionKey(userId, pl.symbol, pl.side);
-        const qtyNum = parseFloat(pl.qtyStr) || 0;
         subHedgeActive.set(posKey, {
           userId,
           symbol: pl.symbol,
@@ -1342,6 +1409,7 @@ async function executeEntry(
         const fundingRate = symData?.fundingRate ?? 0;
         await setMainFallbackStoploss(mainFilled.mainApiKey, mainFilled.mainApiSecret, mainFilled.symbol, mainFilled.side, fundingRate);
         mainFilledForSubHedge.delete(cycleKey);
+        mainOrphanFallbackKeys.add(positionKey(userId, mainFilled.symbol, mainFilled.side));
       }
     }
     pendingOrderPayloadByCycle.delete(cycleKey);
@@ -1414,12 +1482,14 @@ async function executeEntry(
       await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
       const executions = await getExecutionList(subApiKey, subApiSecret, 'linear', response.orderId);
       const filledQty = executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
-      if (filledQty <= 0) {
+      const positionVerified = await verifySubPositionFilled(subApiKey, subApiSecret, c.symbol, orderSide, finalQty);
+      const subActuallyFilled = filledQty > 0 && positionVerified;
+      if (!subActuallyFilled) {
         let r = lastEntryReportByUser.get(userId);
         if (r && r.symbol === c.symbol && r.nextFundingTime === nextFundingTime) {
-          r.reasonNoSub = 'Sub order had no fill';
+          r.reasonNoSub = filledQty <= 0 ? 'Sub order had no fill' : 'Sub position not found (IOC cancelled/zero liquidity)';
         } else if (!r) {
-          r = { userId, symbol: c.symbol, nextFundingTime, fundingTimeMs, main: null, sub: null, subHedged: true, reasonNoSub: 'Sub order had no fill', subExecutedBeforeFunding: null };
+          r = { userId, symbol: c.symbol, nextFundingTime, fundingTimeMs, main: null, sub: null, subHedged: true, reasonNoSub: filledQty <= 0 ? 'Sub order had no fill' : 'Sub position not found (IOC cancelled/zero liquidity)', subExecutedBeforeFunding: null };
           lastEntryReportByUser.set(userId, r);
         }
         insertTradeHistoryEntry(r).catch((err) => console.error('[autoBot] trade_history insert failed', err));
@@ -1428,8 +1498,9 @@ async function executeEntry(
         if (settings.hedgeMode && mainFilled) {
           await setMainFallbackStoploss(mainFilled.mainApiKey, mainFilled.mainApiSecret, c.symbol, c.side, c.fundingRate);
           mainFilledForSubHedge.delete(cycleKey);
+          mainOrphanFallbackKeys.add(positionKey(userId, c.symbol, c.side));
         }
-        console.log('[ABORT] executeEntry stopped at sub hedge no fill');
+        console.log('[ABORT] executeEntry stopped at sub hedge no fill (Sub Account Failure)');
         return;
       }
       recordLastEntry(userId, 'sub', c.symbol, nextFundingTime, fundingTimeMs, triggeredAtMs, response.orderId, executions, true);
@@ -1458,6 +1529,7 @@ async function executeEntry(
       if (settings.hedgeMode && mainFilled) {
         await setMainFallbackStoploss(mainFilled.mainApiKey, mainFilled.mainApiSecret, c.symbol, c.side, c.fundingRate);
         mainFilledForSubHedge.delete(cycleKey);
+        mainOrphanFallbackKeys.add(positionKey(userId, c.symbol, c.side));
       }
     }
     console.log('[ABORT] executeEntry stopped at sub hedge path completed');

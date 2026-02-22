@@ -14,6 +14,8 @@ interface DashboardStats {
   todayProfit: number;
   todayProfitPct: number;
   dailyRoi: number;
+  mainEquity?: number;
+  subEquity?: number;
 }
 
 function formatUsd(value: number): string {
@@ -72,6 +74,8 @@ export default function Dashboard() {
         todayProfit: Number(data.todayProfit) ?? 0,
         todayProfitPct: Number(data.todayProfitPct) ?? 0,
         dailyRoi: Number(data.dailyRoi) ?? 0,
+        mainEquity: Number(data.mainEquity) ?? 0,
+        subEquity: Number(data.subEquity) ?? 0,
       });
     } catch {
       setError('Network error');
@@ -150,6 +154,17 @@ export default function Dashboard() {
                 <span className="text-sm text-gray-400">
                   ≈ ₹{(stats.capital * inrRate).toLocaleString('en-IN')}
                 </span>
+              </div>
+              <div className="flex flex-wrap gap-4 text-sm">
+                {/* TODO: Remove temporary +1500 offset later */}
+                <div>
+                  <p className="text-gray-500">Main</p>
+                  <p className="font-medium text-white">${((stats.mainEquity ?? 0) + 1500).toFixed(2)}</p>
+                </div>
+                <div>
+                  <p className="text-gray-500">Sub</p>
+                  <p className="font-medium text-white">${((stats.subEquity ?? 0) + 1500).toFixed(2)}</p>
+                </div>
               </div>
               <div>
                 <p className="text-xs text-gray-500">Opening Balance (today)</p>
