@@ -158,6 +158,8 @@ export interface WalletBalanceResult {
   totalEquity: string;
   totalAvailableBalance: string;
   totalPerpUPL: string;
+  /** Account initial margin (USD) — actual margin used by open positions. Use for "Margin Used" display. */
+  totalInitialMargin: string;
   coins: Array<{
     coin: string;
     equity: string;
@@ -195,6 +197,7 @@ export async function getWalletBalance(
   const totalEquity = list?.totalEquity ?? '0';
   const totalAvailableBalance = list?.totalAvailableBalance ?? '0';
   const totalPerpUPL = list?.totalPerpUPL ?? '0';
+  const totalInitialMargin = list?.totalInitialMargin ?? '0';
   const accounts = list?.coin ?? [];
 
   const coins = accounts.map((c: { coin?: string; equity?: string; usdValue?: string; walletBalance?: string }) => ({
@@ -204,7 +207,7 @@ export async function getWalletBalance(
     walletBalance: c.walletBalance ?? '0',
   }));
 
-  return { totalEquity, totalAvailableBalance, totalPerpUPL, coins };
+  return { totalEquity, totalAvailableBalance, totalPerpUPL, totalInitialMargin, coins };
 }
 
 export interface UsdtWalletDetails {

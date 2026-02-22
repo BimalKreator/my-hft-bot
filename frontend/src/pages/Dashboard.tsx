@@ -66,8 +66,8 @@ export default function Dashboard() {
       }
       setStats({
         capital: Number(data.capital) ?? 0,
-        opening: Number(data.opening) ?? 0,
-        marginUsed: Number(data.marginUsed) ?? 0,
+        opening: Number(data.opening ?? data.opening_balance) ?? 0,
+        marginUsed: Number(data.marginUsed ?? data.margin_used) ?? 0,
         available: Number(data.available) ?? 0,
         todayProfit: Number(data.todayProfit) ?? 0,
         todayProfitPct: Number(data.todayProfitPct) ?? 0,

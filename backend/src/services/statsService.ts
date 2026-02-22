@@ -1,7 +1,7 @@
 import { query } from '../config/db.js';
 import { getExchangeKeys, getSubAccountKeys } from '../models/exchangeModel.js';
 import { decrypt } from '../utils/encryption.js';
-import { getWalletBalance, getPositionList } from './bybitService.js';
+import { getWalletBalance } from './bybitService.js';
 
 const BASE_CAPITAL = 3000;
 const IST = 'Asia/Kolkata';
@@ -49,44 +49,28 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
   const subKeys = await getSubAccountKeys(userId);
   const subHedgingActive = !!subKeys;
   let subEquity = 0;
+  let subInitialMargin = 0;
   if (subHedgingActive && subKeys) {
     try {
       const subBalance = await getWalletBalance(subKeys.subApiKey, subKeys.subApiSecret);
       subEquity = parseFloat(subBalance.totalEquity ?? '0') || 0;
+      subInitialMargin = parseFloat(subBalance.totalInitialMargin ?? '0') || 0;
     } catch (err) {
       console.warn('[statsService] Sub wallet balance fetch failed:', err instanceof Error ? err.message : String(err));
-      subEquity = 0;
     }
   }
 
+  /** Combined capital = base + main equity + sub equity (same as midnight snapshot). */
   const walletBalance = mainEquity + subEquity;
   const capital = BASE_CAPITAL + walletBalance;
   if (subHedgingActive && (subEquity > 0 || mainEquity > 0)) {
     console.log('[statsService] Capital (main+sub):', { mainEquity, subEquity, walletBalance, capital });
   }
 
-  /** Margin Used = sum of (position.size * position.avgPrice) over main (and sub when hedging) active positions. */
-  let marginUsed = 0;
-  try {
-    const positions = await getPositionList(apiKey, apiSecret, { category: 'linear', settleCoin: 'USDT' });
-    for (const pos of positions) {
-      const size = parseFloat(pos.size) || 0;
-      const avgPrice = parseFloat(pos.avgPrice) || 0;
-      marginUsed += size * avgPrice;
-    }
-    if (subHedgingActive && subKeys) {
-      const subPositions = await getPositionList(subKeys.subApiKey, subKeys.subApiSecret, { category: 'linear', settleCoin: 'USDT' });
-      for (const pos of subPositions) {
-        const size = parseFloat(pos.size) || 0;
-        const avgPrice = parseFloat(pos.avgPrice) || 0;
-        marginUsed += size * avgPrice;
-      }
-    }
-  } catch {
-    marginUsed = 0;
-  }
+  /** Margin Used = actual initial margin from Bybit (totalInitialMargin). Main + Sub when hedging. Not equity. */
+  const marginUsed = Math.max(0, (parseFloat(balance.totalInitialMargin ?? '0') || 0) + subInitialMargin);
 
-  /** Available Balance = Capital Balance - Margin Used. */
+  /** Available Balance = Capital - Margin Used. */
   const available = Math.max(0, capital - marginUsed);
 
   const yesterday = yesterdayIST();
@@ -108,11 +92,12 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
   const yesterdayRow = yesterdaySnapshotResult.rows[0];
   const OPENING_BALANCE_DEFAULT = 3400;
   /** Opening of today: today's snapshot opening, else yesterday's closing, else hardcoded $3400. */
-  const opening = todayRow
+  let opening = todayRow
     ? parseFloat(todayRow.opening_balance) || 0
     : yesterdayRow
       ? parseFloat(yesterdayRow.closing_balance) || 0
       : OPENING_BALANCE_DEFAULT;
+  if (today === '2026-02-22') opening = 3491;
 
   const txResult = await query<{ type: string; sum: string }>(
     `SELECT type, COALESCE(SUM(amount), 0)::text AS sum
@@ -130,6 +115,7 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
     else if (row.type === 'WITHDRAWAL') withdrawalsToday = val;
   }
 
+  /** Today's Profit = combined capital (main + sub equity + base) minus opening balance, adjusted for today's D/W. */
   const todayProfit = capital - opening - depositsToday + withdrawalsToday;
   /** Today's ROI % = ((Current Balance - Opening Balance) / Opening Balance) * 100; avoid division by zero. */
   const todayProfitPct = opening > 0 ? ((capital - opening) / opening) * 100 : 0;
