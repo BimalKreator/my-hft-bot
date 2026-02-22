@@ -166,7 +166,7 @@ export default function Settings() {
           hedgeMode: data.hedgeMode ?? data.hedge_mode ?? settings.hedgeMode,
           slippageBufferPct: Number(data.slippageBufferPct ?? data.slippage_buffer_pct) ?? settings.slippageBufferPct,
           autoEqualizeFunds: Boolean(data.autoEqualizeFunds ?? data.auto_equalize_funds ?? settings.autoEqualizeFunds),
-          fallbackSlMultiplier: Math.max(0.1, Number(data.fallbackSlMultiplier ?? data.fallback_sl_multiplier) || settings.fallbackSlMultiplier ?? 1),
+          fallbackSlMultiplier: Math.max(0.1, (Number(data.fallbackSlMultiplier || data.fallback_sl_multiplier) ?? settings.fallbackSlMultiplier) ?? 1),
         });
         setSuccessMessage('Success — bot updated.');
         setTimeout(() => setSuccessMessage(null), 3000);
