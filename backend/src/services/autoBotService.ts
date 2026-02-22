@@ -36,6 +36,7 @@ import {
   setFundingReceived,
   deleteHedgeGroup,
 } from '../models/hedgeGroupModel.js';
+import { insertTradeHistoryEntry } from '../models/tradeHistoryModel.js';
 
 const INTERVAL_MS = 5_000;
 const ENTRY_FAST_INTERVAL_MS = 500; // when countdown <= 15s (zero latency in final seconds)
@@ -113,6 +114,77 @@ const positionFundingTime = new Map<string, number>();
 
 /** After main entry fills for sub-hedge, store here so when sub entry fills we can register subHedgeActive. */
 const mainFilledForSubHedge = new Map<string, { userId: number; symbol: string; side: 'Buy' | 'Sell'; qty: number; mainApiKey: string; mainApiSecret: string }>();
+
+/** Last entry execution report (main and optionally sub) for dashboard / debugging. */
+export interface LastEntryExecutionDetail {
+  triggeredAtMs: number;
+  orderId: string;
+  execPrice: string;
+  execQty: string;
+  executedAtMs: number;
+}
+export interface LastEntryReport {
+  userId: number;
+  symbol: string;
+  nextFundingTime: string;
+  fundingTimeMs: number;
+  main: LastEntryExecutionDetail | null;
+  sub: LastEntryExecutionDetail | null;
+  subHedged: boolean;
+  subExecutedBeforeFunding: boolean | null;
+  reasonNoSub: string | null;
+}
+const lastEntryReportByUser = new Map<number, LastEntryReport>();
+
+function recordLastEntry(
+  userId: number,
+  account: 'main' | 'sub',
+  symbol: string,
+  nextFundingTime: string,
+  fundingTimeMs: number,
+  triggeredAtMs: number,
+  orderId: string,
+  executions: Array<{ execPrice: string; execQty: string; execTime?: string }>,
+  subHedgedExpected: boolean
+): void {
+  const executedAtMs =
+    executions.length > 0 && executions[0]?.execTime
+      ? parseInt(executions[0].execTime, 10) || Date.now()
+      : Date.now();
+  const execPrice = executions.length > 0 ? (executions[0]!.execPrice ?? '0') : '0';
+  const execQty = executions.length > 0 ? executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0).toFixed(8) : '0';
+  const detail: LastEntryExecutionDetail = { triggeredAtMs, orderId, execPrice, execQty, executedAtMs };
+
+  let report = lastEntryReportByUser.get(userId);
+  const cycleMatch = report && report.symbol === symbol && report.nextFundingTime === nextFundingTime;
+  if (!report || !cycleMatch) {
+    report = {
+      userId,
+      symbol,
+      nextFundingTime,
+      fundingTimeMs,
+      main: null,
+      sub: null,
+      subHedged: subHedgedExpected,
+      reasonNoSub: null,
+    };
+    lastEntryReportByUser.set(userId, report);
+  }
+  if (account === 'main') {
+    report.main = detail;
+    report.subHedged = subHedgedExpected;
+  } else {
+    report.sub = detail;
+    report.subExecutedBeforeFunding = executedAtMs < fundingTimeMs;
+  }
+  insertTradeHistoryEntry(report).catch((err) =>
+    console.error('[autoBot] trade_history insert failed', err)
+  );
+}
+
+export function getLastEntryReport(userId: number): LastEntryReport | null {
+  return lastEntryReportByUser.get(userId) ?? null;
+}
 /** Active subaccount hedge pairs: key = positionKey(userId, symbol, side). Exit when MainAccount_UnrealizedPnL > fees. */
 const subHedgeActive = new Map<string, { userId: number; symbol: string; side: 'Buy' | 'Sell'; qty: number; mainApiKey: string; mainApiSecret: string; subApiKey: string; subApiSecret: string }>();
 
@@ -1107,7 +1179,9 @@ async function executeEntry(
   account?: 'main' | 'sub',
   prepData?: ExecuteEntryPrepData
 ): Promise<void> {
-  console.log(`[DEBUG] executeEntry TRIGGERED for ${symbol} - Account: ${account ?? 'main'} at ${Date.now()}`);
+  const triggeredAtMs = Date.now();
+  const fundingTimeMs = parseInt(nextFundingTime, 10) || 0;
+  console.log(`[DEBUG] executeEntry TRIGGERED for ${symbol} - Account: ${account ?? 'main'} at ${triggeredAtMs}`);
   console.log('[DEBUG] PrepData Check:', !!prepData);
   try {
     const cycleKey = entryCycleKey(userId, symbol, nextFundingTime);
@@ -1145,6 +1219,8 @@ async function executeEntry(
       console.log('[DEBUG] Sending WS Order to Bybit for', account ?? 'sub');
       const response = await placeLimitOrder(pl.apiKey, pl.apiSecret, pl.symbol, orderSide, pl.qtyStr, pl.priceStr, 'IOC');
       console.log(`[DEBUG] Bybit Response for sub:`, response);
+      const executions = await getExecutionList(pl.apiKey, pl.apiSecret, 'linear', response.orderId).catch(() => []);
+      recordLastEntry(userId, 'sub', pl.symbol, nextFundingTime, fundingTimeMs, triggeredAtMs, response.orderId, executions, true);
       const mainFilled = mainFilledForSubHedge.get(cycleKey);
       if (mainFilled) {
         const posKey = positionKey(userId, pl.symbol, pl.side);
@@ -1178,6 +1254,8 @@ async function executeEntry(
       console.log('[DEBUG] Sending WS Order to Bybit for', account ?? 'main');
       const response = await placeLimitOrder(pl.apiKey, pl.apiSecret, pl.symbol, pl.side, pl.qtyStr, pl.priceStr, 'IOC');
       console.log(`[DEBUG] Bybit Response for main:`, response);
+      const executions = await getExecutionList(pl.apiKey, pl.apiSecret, 'linear', response.orderId).catch(() => []);
+      recordLastEntry(userId, 'main', pl.symbol, nextFundingTime, fundingTimeMs, triggeredAtMs, response.orderId, executions, !!(prep?.subApiKey && prep?.subApiSecret));
       const nextFundingMs = parseInt(nextFundingTime, 10) || 0;
       positionFundingTime.set(positionKey(userId, pl.symbol, pl.side), nextFundingMs);
       if (prep?.subApiKey && prep?.subApiSecret) {
@@ -1236,9 +1314,18 @@ async function executeEntry(
       const executions = await getExecutionList(subApiKey, subApiSecret, 'linear', response.orderId);
       const filledQty = executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
       if (filledQty <= 0) {
+        let r = lastEntryReportByUser.get(userId);
+        if (r && r.symbol === c.symbol && r.nextFundingTime === nextFundingTime) {
+          r.reasonNoSub = 'Sub order had no fill';
+        } else if (!r) {
+          r = { userId, symbol: c.symbol, nextFundingTime, fundingTimeMs, main: null, sub: null, subHedged: true, reasonNoSub: 'Sub order had no fill', subExecutedBeforeFunding: null };
+          lastEntryReportByUser.set(userId, r);
+        }
+        insertTradeHistoryEntry(r).catch((err) => console.error('[autoBot] trade_history insert failed', err));
         console.log('[ABORT] executeEntry stopped at sub hedge no fill');
         return;
       }
+      recordLastEntry(userId, 'sub', c.symbol, nextFundingTime, fundingTimeMs, triggeredAtMs, response.orderId, executions, true);
       const mainFilled = mainFilledForSubHedge.get(cycleKey);
       if (mainFilled) {
         const posKey = positionKey(userId, c.symbol, c.side);
@@ -1322,6 +1409,9 @@ async function executeEntry(
           await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
           const executions = await getExecutionList(prep.apiKey, prep.apiSecret, 'linear', response.orderId);
           const filledQty = executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
+          if (filledQty > 0) {
+            recordLastEntry(userId, 'main', c.symbol, nextFundingTime, fundingTimeMs, triggeredAtMs, response.orderId, executions, !!(prep.subApiKey && prep.subApiSecret));
+          }
           remainingQty -= filledQty;
           if (remainingQty <= 0) break;
         } catch (e) {
@@ -1438,6 +1528,9 @@ async function executeEntry(
         await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
         const executions = await getExecutionList(apiKey, apiSecret, 'linear', response.orderId);
         const filledQty = executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);
+        if (filledQty > 0) {
+          recordLastEntry(userId, 'main', symbol, nextFundingTime, fundingTimeMs, triggeredAtMs, response.orderId, executions, false);
+        }
         remainingQty -= filledQty;
         if (remainingQty <= 0) break;
       } catch (e) {

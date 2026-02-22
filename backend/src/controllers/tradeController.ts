@@ -10,8 +10,10 @@ import {
   getClosedPnl,
 } from '../services/bybitService.js';
 import { getEnrichedPositions } from '../services/vwapService.js';
+import { getLastEntryReport } from '../services/autoBotService.js';
 import { AuthRequest } from '../middleware/authMiddleware.js';
 import { insertClosedTrade, getClosedTrades } from '../models/closedTradesModel.js';
+import { getTradeHistoryByUserId } from '../models/tradeHistoryModel.js';
 import { getSettings } from '../models/settingsModel.js';
 
 const TRADE_TYPE = ['Manual', 'Auto'] as const;
@@ -465,6 +467,90 @@ export async function getTradeHistory(
     res.status(200).json(mapped);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to load trade history';
+    res.status(500).json({ error: msg });
+  }
+}
+
+/**
+ * GET /api/trade/execution-history — all trade_history records for the user (auto-entry execution log), ordered by created_at DESC.
+ */
+export async function getExecutionHistory(
+  req: AuthRequest,
+  res: Response
+): Promise<void> {
+  try {
+    const userId = req.user?.userId;
+    if (!userId) {
+      res.status(401).json({ error: 'Authentication required' });
+      return;
+    }
+    const rows = await getTradeHistoryByUserId(userId);
+    res.status(200).json(rows);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to load execution history';
+    res.status(500).json({ error: msg });
+  }
+}
+
+/**
+ * GET /api/trade/last-entry — last auto-entry execution report (main and sub): when triggered, when exchange executed, price, qty, and whether sub hedged and before/after funding.
+ */
+export async function getLastEntry(
+  req: AuthRequest,
+  res: Response
+): Promise<void> {
+  try {
+    const userId = req.user?.userId;
+    if (!userId) {
+      res.status(401).json({ error: 'Authentication required' });
+      return;
+    }
+    const report = getLastEntryReport(userId);
+    if (!report) {
+      res.status(200).json({ lastEntry: null, message: 'No auto-entry recorded yet.' });
+      return;
+    }
+    const formatMs = (ms: number) => new Date(ms).toISOString();
+    const mainDetail = report.main
+      ? {
+          triggeredAt: formatMs(report.main.triggeredAtMs),
+          triggeredAtMs: report.main.triggeredAtMs,
+          executedAt: formatMs(report.main.executedAtMs),
+          executedAtMs: report.main.executedAtMs,
+          orderId: report.main.orderId,
+          execPrice: report.main.execPrice,
+          execQty: report.main.execQty,
+          msBeforeFunding: report.fundingTimeMs - report.main.executedAtMs,
+        }
+      : null;
+    const subDetail = report.sub
+      ? {
+          triggeredAt: formatMs(report.sub.triggeredAtMs),
+          triggeredAtMs: report.sub.triggeredAtMs,
+          executedAt: formatMs(report.sub.executedAtMs),
+          executedAtMs: report.sub.executedAtMs,
+          orderId: report.sub.orderId,
+          execPrice: report.sub.execPrice,
+          execQty: report.sub.execQty,
+          msBeforeFunding: report.fundingTimeMs - report.sub.executedAtMs,
+          executedBeforeFunding: report.subExecutedBeforeFunding ?? null,
+        }
+      : null;
+    res.status(200).json({
+      lastEntry: {
+        symbol: report.symbol,
+        nextFundingTime: report.nextFundingTime,
+        fundingTime: formatMs(report.fundingTimeMs),
+        fundingTimeMs: report.fundingTimeMs,
+        main: mainDetail,
+        sub: subDetail,
+        subHedged: report.subHedged,
+        subExecutedBeforeFunding: report.subExecutedBeforeFunding,
+        reasonNoSub: report.reasonNoSub,
+      },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to load last entry report';
     res.status(500).json({ error: msg });
   }
 }

@@ -207,6 +207,33 @@ async function initDb() {
     );
   `);
 
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS trade_history (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      symbol TEXT NOT NULL,
+      funding_time_ms BIGINT NOT NULL,
+      funding_time TIMESTAMPTZ NOT NULL,
+      main_triggered_at_ms BIGINT,
+      main_order_id TEXT,
+      main_exec_price NUMERIC,
+      main_exec_qty NUMERIC,
+      main_executed_at_ms BIGINT,
+      main_ms_before_funding INTEGER,
+      sub_triggered_at_ms BIGINT,
+      sub_order_id TEXT,
+      sub_exec_price NUMERIC,
+      sub_exec_qty NUMERIC,
+      sub_executed_at_ms BIGINT,
+      sub_ms_before_funding INTEGER,
+      sub_executed_before_funding BOOLEAN,
+      reason_no_sub TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (user_id, symbol, funding_time_ms)
+    );
+  `);
+
   console.log('Tables created successfully.');
 }
 

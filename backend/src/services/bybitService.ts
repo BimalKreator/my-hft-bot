@@ -546,26 +546,28 @@ export async function placeLimitOrderReduceOnly(
 }
 
 /**
- * Get execution list for an order (e.g. to get exec price and fee after market order).
+ * Get execution list for an order (e.g. to get exec price, fee, and exec time after market order).
+ * execTime is Bybit's execution timestamp in ms (string).
  */
 export async function getExecutionList(
   apiKey: string,
   apiSecret: string,
   category: 'linear' | 'spot',
   orderId: string
-): Promise<Array<{ execPrice: string; execQty: string; execFee?: string }>> {
+): Promise<Array<{ execPrice: string; execQty: string; execFee?: string; execTime?: string }>> {
   const client = getClient(apiKey, apiSecret);
   const res = await client.getExecutionList({ category, orderId });
   if (res.retCode !== 0) {
     throw new Error(res.retMsg ?? 'Bybit get execution list failed');
   }
   const list = (res.result as {
-    list?: Array<{ execPrice: string; execQty: string; execFee?: string }>;
+    list?: Array<{ execPrice: string; execQty: string; execFee?: string; execTime?: string }>;
   })?.list ?? [];
   return list.map((e) => ({
     execPrice: e.execPrice,
     execQty: e.execQty,
     execFee: e.execFee,
+    execTime: e.execTime,
   }));
 }
 
