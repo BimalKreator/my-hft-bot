@@ -389,7 +389,7 @@ async function saveClosedTradeAfterExit(
   entryPrice: number,
   qty: number,
   orderIds: string | string[],
-  exitReason: 'Time Exit' | 'Stoploss Hit' | 'Pre-Funding Stoploss' | 'Post-Funding Stoploss' | 'Post-Funding Stoploss (L2 - 50% Funding)' | 'PnL Positive Exit' | 'Universal Stoploss' | 'Break-even' | 'Next Trade Cleanup' | 'Post-Funding Profit' | 'Naked Mode Target Hit' | 'Naked Mode SL Hit',
+  exitReason: 'Time Exit' | 'Stoploss Hit' | 'Pre-Funding Stoploss' | 'Post-Funding Stoploss' | 'Post-Funding Stoploss (L2 - 50% Funding)' | 'PnL Positive Exit' | 'Universal Stoploss' | 'Break-even' | 'Next Trade Cleanup' | 'Post-Funding Profit' | '15m Pre-Next Funding' | 'Naked Mode Target Hit' | 'Naked Mode SL Hit',
   fundingReceived: number = 0,
   estimatedExitPrice?: number,
   estimatedFeesWhenZero?: number
@@ -884,9 +884,9 @@ async function monitorExits(): Promise<void> {
           // Real-time exit price for triggers and saveClosedTradeAfterExit: LONG = bid1, SHORT = ask1
           const exitPrice = pos.side === 'Buy' ? bid1Safe : ask1Safe;
 
-          // Subaccount future-to-future hedge: Universal Stoploss (before funding), then after funding: Break-even, 15m Pre-next Funding, PnL Positive.
+          // Subaccount future-to-future hedge (hedge_mode only): Universal Stoploss (before funding), then after funding: 15m time exit, Break-even, Post-Funding Profit, Next Trade Cleanup, PnL Positive.
           const subHedge = subHedgeActive.get(key);
-          if (subHedge != null) {
+          if (settings.hedgeMode && subHedge != null) {
             const subPos = subPositions.find((p) => p.symbol === pos.symbol);
             const subEntry = subPos ? parseFloat(subPos.avgPrice) || 0 : 0;
             const subQty = subPos ? parseFloat(subPos.size) || 0 : subHedge.qty;
@@ -902,7 +902,7 @@ async function monitorExits(): Promise<void> {
             const combinedPnlPct = totalCapital > 0 ? (combinedPnl / totalCapital) * 100 : 0;
 
             const runSubHedgeExit = async (
-              exitReason: 'Universal Stoploss' | 'Break-even' | 'Next Trade Cleanup' | 'PnL Positive Exit' | 'Post-Funding Profit'
+              exitReason: 'Universal Stoploss' | 'Break-even' | 'Next Trade Cleanup' | 'PnL Positive Exit' | 'Post-Funding Profit' | '15m Pre-Next Funding'
             ): Promise<boolean> => {
               try {
                 // Orphaned sub safety: close main always; close sub only if sub has an open position (subQty > 0)
@@ -934,6 +934,7 @@ async function monitorExits(): Promise<void> {
                 else if (exitReason === 'Break-even') console.log('[EXIT] Break-even |', pos.symbol);
                 else if (exitReason === 'Next Trade Cleanup') console.log('[EXIT] Next Trade Cleanup |', pos.symbol);
                 else if (exitReason === 'Post-Funding Profit') console.log('[EXIT] Post-Funding Profit |', pos.symbol);
+                else if (exitReason === '15m Pre-Next Funding') console.log('[EXIT] Time limit hit (15 mins before next funding) for', pos.symbol + '.');
                 else console.log('[EXIT] PnL Positive Exit |', pos.symbol);
                 return true;
               } catch (e) {
@@ -950,6 +951,16 @@ async function monitorExits(): Promise<void> {
 
             // Funding guard: no automated exit (except Universal Stoploss) before tradeFundingTime
             if (fundingTimeMs == null || now < fundingTimeMs) {
+              continue;
+            }
+
+            // 1b) 15-min time exit: if time until this symbol's NEXT funding is in (0, 15 min], close immediately
+            const symbolMarket = marketData.find((m) => m.symbol === pos.symbol);
+            const nextFundingTimeMs = symbolMarket ? parseInt(symbolMarket.nextFundingTime, 10) || 0 : 0;
+            const msUntilNextFunding = nextFundingTimeMs - now;
+            if (nextFundingTimeMs > 0 && msUntilNextFunding > 0 && msUntilNextFunding <= PRE_NEXT_FUNDING_MS) {
+              console.log('[EXIT] Time limit hit (15 mins before next funding) for', pos.symbol + '.');
+              await runSubHedgeExit('15m Pre-Next Funding');
               continue;
             }
 
