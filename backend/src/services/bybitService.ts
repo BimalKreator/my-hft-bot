@@ -377,6 +377,27 @@ export async function setLeverage(
 }
 
 /**
+ * Set stop loss on a linear position (full position TP/SL mode). Used for Main fallback SL when Sub fails in hedge mode.
+ * stopLossPrice must be formatted to symbol tick size. positionIdx 0 = one-way mode.
+ */
+export async function setTradingStop(
+  apiKey: string,
+  apiSecret: string,
+  symbol: string,
+  stopLossPrice: string,
+  positionIdx: 0 | 1 | 2 = 0
+): Promise<void> {
+  const client = getClient(apiKey, apiSecret);
+  await client.setTradingStop({
+    category: 'linear',
+    symbol,
+    stopLoss: stopLossPrice,
+    tpslMode: 'Full',
+    positionIdx,
+  });
+}
+
+/**
  * Place a market order on linear perpetual. Uses WebSocket first, REST fallback.
  */
 export async function placeMarketOrder(

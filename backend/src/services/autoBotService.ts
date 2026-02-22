@@ -27,6 +27,7 @@ import {
   calculateUnrealizedPnLByDepth,
   warmupWsConnection,
   transferFunds,
+  setTradingStop,
 } from './bybitService.js';
 import type { OrderbookResult } from './bybitService.js';
 import { FundingScanner } from './scannerService.js';
@@ -259,6 +260,39 @@ function formatPriceToTick(price: number, tickSize: string): string {
   const decimals = tick.toString().includes('.') ? tick.toString().split('.')[1]!.length : 0;
   const rounded = Math.round(price / tick) * tick;
   return rounded.toFixed(decimals);
+}
+
+/**
+ * When Sub account fails in hedge mode and Main has already filled: set a fallback stop loss on the Main position
+ * equal to the funding rate. ONLY call when hedgeMode is true, Main executed, Sub failed. Never when both succeeded.
+ */
+async function setMainFallbackStoploss(
+  mainApiKey: string,
+  mainApiSecret: string,
+  symbol: string,
+  mainSide: 'Buy' | 'Sell',
+  fundingRate: number
+): Promise<void> {
+  try {
+    const positions = await getPositionList(mainApiKey, mainApiSecret, { category: 'linear', settleCoin: 'USDT' });
+    const pos = positions.find((p) => p.symbol === symbol && p.side === mainSide);
+    if (!pos) return;
+    const mainEntryPrice = parseFloat(pos.avgPrice) || 0;
+    if (mainEntryPrice <= 0) return;
+    const ls = await getInstrumentLotSize(mainApiKey, mainApiSecret, symbol);
+    const tickSize = ls.tickSize ?? '0.01';
+    const absRate = Math.abs(fundingRate);
+    const slPrice =
+      mainSide === 'Buy'
+        ? mainEntryPrice * (1 - absRate)
+        : mainEntryPrice * (1 + absRate);
+    const slPriceStr = formatPriceToTick(slPrice, tickSize);
+    await setTradingStop(mainApiKey, mainApiSecret, symbol, slPriceStr, 0);
+    const ratePct = (absRate * 100).toFixed(4);
+    console.log(`[autoBot] Sub account failed. Fallback SL set for Main account at ${slPriceStr} (SL% = Funding Rate ${ratePct}%).`);
+  } catch (e) {
+    console.error(`[autoBot] setMainFallbackStoploss failed ${symbol}:`, e);
+  }
 }
 
 /** Apply entry slippage buffer to base price and format for limit order. Long (Buy): base * (1 + pct/100); Short (Sell): base * (1 - pct/100). */
@@ -1300,6 +1334,15 @@ async function executeEntry(
       enteredThisCycle.add(cycleKey);
     } catch (e) {
       console.error(`[autoBot] executeEntry sub (payload) ${pendingPayload.sub.symbol} failed:`, e);
+      const mainFilled = mainFilledForSubHedge.get(cycleKey);
+      const settings = await getSettings(userId);
+      if (settings.hedgeMode && mainFilled) {
+        const marketData = await fundingScanner.getFundingData();
+        const symData = marketData.find((m) => m.symbol === mainFilled.symbol);
+        const fundingRate = symData?.fundingRate ?? 0;
+        await setMainFallbackStoploss(mainFilled.mainApiKey, mainFilled.mainApiSecret, mainFilled.symbol, mainFilled.side, fundingRate);
+        mainFilledForSubHedge.delete(cycleKey);
+      }
     }
     pendingOrderPayloadByCycle.delete(cycleKey);
     console.log('[ABORT] executeEntry stopped at sub payload path completed');
@@ -1380,6 +1423,12 @@ async function executeEntry(
           lastEntryReportByUser.set(userId, r);
         }
         insertTradeHistoryEntry(r).catch((err) => console.error('[autoBot] trade_history insert failed', err));
+        const mainFilled = mainFilledForSubHedge.get(cycleKey);
+        const settings = await getSettings(userId);
+        if (settings.hedgeMode && mainFilled) {
+          await setMainFallbackStoploss(mainFilled.mainApiKey, mainFilled.mainApiSecret, c.symbol, c.side, c.fundingRate);
+          mainFilledForSubHedge.delete(cycleKey);
+        }
         console.log('[ABORT] executeEntry stopped at sub hedge no fill');
         return;
       }
@@ -1404,6 +1453,12 @@ async function executeEntry(
       enteredThisCycle.add(cycleKey);
     } catch (e) {
       console.error(`[autoBot] executeEntry sub ${c.symbol} failed:`, e);
+      const mainFilled = mainFilledForSubHedge.get(cycleKey);
+      const settings = await getSettings(userId);
+      if (settings.hedgeMode && mainFilled) {
+        await setMainFallbackStoploss(mainFilled.mainApiKey, mainFilled.mainApiSecret, c.symbol, c.side, c.fundingRate);
+        mainFilledForSubHedge.delete(cycleKey);
+      }
     }
     console.log('[ABORT] executeEntry stopped at sub hedge path completed');
     return;
