@@ -228,10 +228,14 @@ export function getBinanceSymbol(symbol: string): BinanceSymbolData | undefined 
   return cache.get(symbol);
 }
 
-/** Build query string from params (keys sorted), then append &signature=HMAC_SHA256(query, secret). */
+/** Build query string from params (keys sorted) so HMAC input exactly matches URL/body. Uses URLSearchParams for consistent encoding. */
 function signParams(apiSecret: string, params: Record<string, string | number>): string {
   const keys = Object.keys(params).sort();
-  const query = keys.map((k) => `${k}=${encodeURIComponent(String(params[k]))}`).join('&');
+  const sp = new URLSearchParams();
+  for (const k of keys) {
+    sp.append(k, String(params[k]));
+  }
+  const query = sp.toString();
   const sig = crypto.createHmac('sha256', apiSecret).update(query).digest('hex');
   return `${query}&signature=${sig}`;
 }
@@ -254,7 +258,7 @@ function binanceSignedRequest(
   if (!cleanKey || !cleanSecret || cleanKey.length < 10) {
     return Promise.reject(new Error('Invalid Binance API key or secret (missing or too short after cleanup)'));
   }
-  const params = { ...bodyParams, timestamp: Date.now(), recvWindow: 10000 };
+  const params: Record<string, string | number> = { ...bodyParams, recvWindow: 10000, timestamp: Date.now() };
   const query = signParams(cleanSecret, params);
   return new Promise((resolve, reject) => {
     const pathWithQuery = method === 'GET' ? `${path}?${query}` : path;

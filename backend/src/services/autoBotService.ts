@@ -1226,17 +1226,19 @@ async function monitorExits(): Promise<void> {
                     console.error(`[autoBot] saveClosedTradeAfterExit (Bybit cross-exchange) failed ${pos.symbol}:`, e)
                   );
                 }
-                const binanceSide: 'Buy' | 'Sell' = binancePosition!.positionAmt > 0 ? 'Buy' : 'Sell';
-                const binanceQty = Math.abs(binancePosition!.positionAmt);
-                const binanceEntry = binancePosition!.entryPrice;
-                insertClosedTrade({
+                const binancePosAmt = Number(binancePosition!.positionAmt);
+                const binanceDirection: 'Buy' | 'Sell' = binancePosAmt > 0 ? 'Buy' : 'Sell';
+                const binanceQty = Math.abs(binancePosAmt);
+                const binanceEntry = Number(binancePosition!.entryPrice) || 0;
+                const binancePnl = Number(binancePosition!.unRealizedProfit) || 0;
+                await insertClosedTrade({
                   userId,
                   symbol: pos.symbol,
-                  side: binanceSide,
+                  side: binanceDirection,
                   entryPrice: binanceEntry,
                   exitPrice: binanceEntry,
                   qty: binanceQty,
-                  grossPnl: binancePosition!.unRealizedProfit,
+                  grossPnl: binancePnl,
                   funding: 0,
                   fees: 0,
                   source: 'auto',
@@ -1675,8 +1677,11 @@ async function executeBinanceEntry(
       entryTimeoutByCycle.delete(cycleKey);
     }
     verifyCrossExchangeFill(userId, symbol).catch((e) => console.error('[autoBot] verifyCrossExchangeFill failed', e));
-  } catch (e) {
-    console.error(`[autoBot] executeBinanceEntry ${symbol} failed:`, e);
+  } catch (error) {
+    const candidate = passedData?.candidate;
+    const sym = (candidate?.symbol ?? symbol);
+    console.error(`[autoBot] CRITICAL ERROR in executeBinanceEntry for ${sym}:`, (error instanceof Error ? error.message : error) || error);
+    throw error;
   }
 }
 
@@ -2667,7 +2672,7 @@ async function processUser(
             Promise.all([
               executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'main', passedData),
               executeBinanceEntry(userId, topToken.symbol, topToken.nextFundingTime, passedData),
-            ]).catch((e) => console.error('[autoBot] Cross-Exchange Entry Error:', e));
+            ]).catch((err) => console.error('[autoBot] Cross-Exchange Execution Error:', err));
           }, delayMs);
           console.log(`[autoBot] Cross-exchange entry scheduled: both legs in ${delayMs}ms (simultaneous).`);
           entryTimeoutByCycle.set(cycleKey, { main: tBoth, binance: tBoth });

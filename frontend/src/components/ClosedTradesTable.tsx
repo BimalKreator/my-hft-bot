@@ -151,7 +151,9 @@ export default function ClosedTradesTable() {
     return [...slice].sort((a, b) => new Date(b.closed_at).getTime() - new Date(a.closed_at).getTime());
   }, [rows, indexOfFirstItem, indexOfLastItem]);
 
-  type DisplayItem = { type: 'trade'; row: ClosedTradeRow } | { type: 'groupSummary'; netPnl: number; count: number };
+  type DisplayItem =
+    | { type: 'trade'; row: ClosedTradeRow; groupKey?: string; isFirstInGroup?: boolean }
+    | { type: 'groupSummary'; netPnl: number; count: number };
   const displayItems = useMemo((): DisplayItem[] => {
     if (currentItems.length === 0) return [];
     const list: DisplayItem[] = [];
@@ -165,7 +167,10 @@ export default function ClosedTradesTable() {
         group.push(row);
       } else {
         if (group.length > 0) {
-          group.forEach((r) => list.push({ type: 'trade', row: r }));
+          const groupKey = group.length > 1 ? `${group[0]!.symbol}-${new Date(group[0]!.closed_at).getTime()}` : undefined;
+          group.forEach((r, idx) =>
+            list.push({ type: 'trade', row: r, groupKey, isFirstInGroup: group.length > 1 ? idx === 0 : false })
+          );
           if (group.length > 1) {
             const netPnl = group.reduce((s, r) => s + (parseFloat(r.net_pnl) || 0), 0);
             list.push({ type: 'groupSummary', netPnl, count: group.length });
@@ -175,7 +180,10 @@ export default function ClosedTradesTable() {
       }
     }
     if (group.length > 0) {
-      group.forEach((r) => list.push({ type: 'trade', row: r }));
+      const groupKey = group.length > 1 ? `${group[0]!.symbol}-${new Date(group[0]!.closed_at).getTime()}` : undefined;
+      group.forEach((r, idx) =>
+        list.push({ type: 'trade', row: r, groupKey, isFirstInGroup: group.length > 1 ? idx === 0 : false })
+      );
       if (group.length > 1) {
         const netPnl = group.reduce((s, r) => s + (parseFloat(r.net_pnl) || 0), 0);
         list.push({ type: 'groupSummary', netPnl, count: group.length });
@@ -346,13 +354,24 @@ export default function ClosedTradesTable() {
                   const r = item.row;
                   const netPnl = parseFloat(r.net_pnl) || 0;
                   const isProfit = netPnl >= 0;
-                  const direction = r.side === 'Buy' ? 'LONG' : 'SHORT';
+                  const direction = (r.side === 'Buy' || r.side?.toLowerCase() === 'buy') ? 'LONG' : 'SHORT';
                   const exchangeLabel = r.exchange ?? (r.accountType === 'Sub' ? 'Bybit Sub' : r.accountType === 'Main' ? 'Bybit Main' : 'Bybit Main');
+                  const qtyAbs = Math.abs(parseFloat(r.qty) || 0);
+                  const isFirstInGroup = item.type === 'trade' && item.isFirstInGroup && item.groupKey;
+                  const exchangeBadgeStyle =
+                    exchangeLabel === 'Binance'
+                      ? { backgroundColor: 'rgba(245, 158, 11, 0.25)', color: '#fbbf24' }
+                      : exchangeLabel === 'Bybit Sub'
+                        ? { backgroundColor: 'rgba(168, 85, 247, 0.25)', color: '#c4b5fd' }
+                        : { backgroundColor: 'rgba(59, 130, 246, 0.25)', color: '#93c5fd' };
                   return (
                     <tr
                       key={r.id}
                       className="border-b border-gray-800/80 hover:bg-white/5"
-                      style={{ borderColor: 'rgba(255,255,255,0.06)' }}
+                      style={{
+                        borderColor: 'rgba(255,255,255,0.06)',
+                        ...(isFirstInGroup ? { borderLeft: '4px solid rgba(0, 123, 255, 0.5)', backgroundColor: 'rgba(0, 123, 255, 0.04)' } : {}),
+                      }}
                     >
                       <td className="px-4 py-2.5 font-medium text-white">
                         <span className="inline-flex items-center gap-1.5">
@@ -371,7 +390,11 @@ export default function ClosedTradesTable() {
                           )}
                         </span>
                       </td>
-                      <td className="px-4 py-2.5 text-gray-300 text-xs">{exchangeLabel}</td>
+                      <td className="px-4 py-2.5">
+                        <span className="inline-block rounded px-2 py-0.5 text-xs font-semibold" style={exchangeBadgeStyle}>
+                          {exchangeLabel}
+                        </span>
+                      </td>
                       <td className="px-4 py-2.5">
                         <span
                           className="inline-block rounded px-2 py-0.5 text-xs font-semibold"
@@ -384,9 +407,9 @@ export default function ClosedTradesTable() {
                           {direction}
                         </span>
                       </td>
-                      <td className="px-4 py-2.5 text-gray-300">{formatQty(parseFloat(r.qty) || 0)}</td>
+                      <td className="px-4 py-2.5 text-gray-300">{formatQty(qtyAbs)}</td>
                       <td className="px-4 py-2.5 text-gray-300">
-                        {formatUsdWithSign((parseFloat(r.qty) || 0) * (parseFloat(r.entry_price) || 0))}
+                        {formatUsdWithSign(qtyAbs * (parseFloat(r.entry_price) || 0))}
                       </td>
                       <td className="px-4 py-2.5 text-gray-400">
                         {formatPrice(parseFloat(r.entry_price) || 0)} / {formatPrice(parseFloat(r.exit_price) || 0)}

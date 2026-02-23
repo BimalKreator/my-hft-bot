@@ -512,7 +512,33 @@ export async function getTradeHistory(
           row.exitReason = dbMatch.exit_reason;
         }
       }
-      let filtered = merged;
+      const dbMapped = dbRows.map((d) => ({
+        id: d.id,
+        symbol: d.token,
+        side: d.direction,
+        qty: d.quantity,
+        entry_price: d.entry_price,
+        exit_price: d.exit_price,
+        closed_at: d.exit_time,
+        fees: d.fees,
+        funding_received: d.funding_received,
+        gross_pnl: d.gross_pnl,
+        net_pnl: d.net_pnl,
+        exit_reason: d.exit_reason,
+        exitReason: d.exit_reason,
+        accountType: d.exchange === 'Bybit Sub' ? 'Sub' as const : (d.exchange === 'Binance' ? undefined : 'Main' as const),
+        exchange: d.exchange ?? 'Bybit Main',
+      }));
+      const combined: typeof merged = [];
+      for (const row of merged) combined.push(row);
+      for (const dbRow of dbMapped) {
+        const hasMatch = merged.some(
+          (m) => m.symbol === dbRow.symbol && Math.abs(new Date(m.closed_at).getTime() - new Date(dbRow.closed_at).getTime()) <= MATCH_MS
+        );
+        if (!hasMatch) combined.push(dbRow as typeof merged[0]);
+      }
+      combined.sort((a, b) => new Date(b.closed_at).getTime() - new Date(a.closed_at).getTime());
+      let filtered = combined;
       if (from) {
         const fromTime = new Date(from).getTime();
         filtered = filtered.filter((r) => new Date(r.closed_at).getTime() >= fromTime);
