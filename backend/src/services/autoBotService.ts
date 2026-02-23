@@ -2345,15 +2345,20 @@ async function processUser(
       const delayMainForRange = targetTime - nowForRange - mainOffset;
       const inRangeFromDelay = delayMainForRange <= maxDelayMs && delayMainForRange > 0;
       const inRangeFromTimeToFunding = isMock && timeToFunding > 0 && timeToFunding <= MANUAL_MOCK_COUNTDOWN_MS;
-      const inRangeMain = inRangeFromDelay || inRangeFromTimeToFunding;
+      const inRangeMain = inRangeFromDelay || inRangeFromTimeToFunding || isMockTriggered;
 
       const hedgeMode = settings.hedgeMode !== false;
       if (subHedgingEnabled && entryTimeoutByCycle.has(cycleKey)) {
         return;
       }
 
+      const isPrefetchTime = (timeToFunding <= PREFETCH_WINDOW_MS && timeToFunding > 0) || isMockTriggered;
+      console.log(`[DEBUG MOCK VERIFY] Symbol: ${topToken.symbol}, isMock: ${isMockTriggered}, timeToFunding: ${timeToFunding}, targetTime: ${targetTime}, now: ${now}`);
+      if (!isPrefetchTime && !inRangeMain) {
+        return;
+      }
       const inPrefetchByTimeToFunding = timeToFunding > 0 && timeToFunding <= PREFETCH_WINDOW_MS;
-      const shouldEnterPrefetch = inPrefetchWindow || (isMockTriggered && inPrefetchByTimeToFunding);
+      const shouldEnterPrefetch = inPrefetchWindow || isPrefetchTime;
 
       if (inRangeMain && !entryTimeoutByCycle.has(cycleKey)) {
         if (isMockTriggered) {
@@ -2486,6 +2491,15 @@ async function processUser(
             ...(fixedQty != null && { fixedQty }),
           };
           passedData = { prep: prepBuilt, candidate: candidateBuilt };
+        }
+        let targetQty = passedData.candidate.fixedQty ?? 0;
+        if (isMockTriggered && targetQty <= 0) {
+          console.log('[DEBUG MOCK] targetQty was 0, forcing it to 10 for mock execution.');
+          targetQty = 10;
+          (passedData.candidate as { fixedQty?: number }).fixedQty = 10;
+        }
+        if (targetQty <= 0) {
+          return;
         }
         const leverageForEntry = passedData.candidate.safeLeverage ?? settings.leverage ?? 10;
         setLeverage(apiKey, apiSecret, topToken.symbol, leverageForEntry).catch(() => {});
