@@ -12,6 +12,9 @@ const BASE_CAPITAL = 3000;
 const OPENING_BALANCE_DEFAULT = 3400;
 const IST = 'Asia/Kolkata';
 
+/** Last known Binance balance per user (fallback when API fails at snapshot time). */
+const lastBinanceBalanceByUser = new Map<number, number>();
+
 /** Today's date in IST (YYYY-MM-DD). */
 function todayIST(): string {
   return new Date().toLocaleDateString('en-CA', { timeZone: IST });
@@ -77,8 +80,15 @@ async function runDailySnapshot(): Promise<void> {
       if (crossExchangeMode && settings.binanceApiKey && settings.binanceApiSecret) {
         try {
           binanceBalance = await getBinanceAvailableBalance(decrypt(settings.binanceApiKey), decrypt(settings.binanceApiSecret));
+          lastBinanceBalanceByUser.set(userId, binanceBalance);
         } catch (err) {
-          console.warn('[cron] Binance balance fetch failed for user', userId, err instanceof Error ? err.message : String(err));
+          const fallback = lastBinanceBalanceByUser.get(userId);
+          binanceBalance = fallback ?? 0;
+          if (fallback != null) {
+            console.warn('[cron] Binance balance fetch failed for user', userId, 'using cached balance', fallback, err instanceof Error ? err.message : String(err));
+          } else {
+            console.warn('[cron] Binance balance fetch failed for user', userId, err instanceof Error ? err.message : String(err));
+          }
         }
       }
 

@@ -16,6 +16,37 @@ export async function initSettingsTable(): Promise<void> {
   }
 }
 
+/**
+ * Ensures trade_history has the exchange column (for closed-trade / history display).
+ * Call once at server startup.
+ */
+export async function initTradeHistoryTable(): Promise<void> {
+  try {
+    await query(`
+      ALTER TABLE trade_history
+      ADD COLUMN IF NOT EXISTS exchange VARCHAR(50) DEFAULT 'Bybit Main'
+    `);
+    console.log('[Database] Ensured exchange column exists in trade_history.');
+  } catch (err) {
+    console.error('[Database] Error altering trade_history table:', err);
+  }
+}
+
+/**
+ * Ensures closed_trades has the exchange column (Bybit Main / Bybit Sub / Binance).
+ * Call once at server startup (in case db:init was not run after this column was added).
+ */
+export async function initClosedTradesExchangeColumn(): Promise<void> {
+  try {
+    await query(`
+      ALTER TABLE closed_trades ADD COLUMN IF NOT EXISTS exchange TEXT
+    `);
+    console.log('[Database] Ensured exchange column exists in closed_trades.');
+  } catch (err) {
+    console.error('[Database] Error altering closed_trades table:', err);
+  }
+}
+
 export interface BotSettings {
   userId: number;
   autoEntryEnabled: boolean;

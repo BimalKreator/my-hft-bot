@@ -254,7 +254,7 @@ function binanceSignedRequest(
   if (!cleanKey || !cleanSecret || cleanKey.length < 10) {
     return Promise.reject(new Error('Invalid Binance API key or secret (missing or too short after cleanup)'));
   }
-  const params = { ...bodyParams, timestamp: Date.now() };
+  const params = { ...bodyParams, timestamp: Date.now(), recvWindow: 10000 };
   const query = signParams(cleanSecret, params);
   return new Promise((resolve, reject) => {
     const pathWithQuery = method === 'GET' ? `${path}?${query}` : path;
