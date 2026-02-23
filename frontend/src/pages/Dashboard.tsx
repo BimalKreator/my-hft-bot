@@ -249,7 +249,7 @@ export default function Dashboard() {
 
       <ActivePositions />
 
-      <NextToTrade />
+      <NextToTrade crossExchangeMode={stats?.crossExchangeMode === true} />
 
       <ClosedTradesTable />
     </div>

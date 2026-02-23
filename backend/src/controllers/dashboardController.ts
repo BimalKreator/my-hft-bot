@@ -29,7 +29,9 @@ export async function getNextToTrade(req: AuthRequest, res: Response): Promise<v
 
     const isCrossExchange =
       settings.crossExchangeMode === true ||
-      (settings as { cross_exchange_mode?: boolean }).cross_exchange_mode === true;
+      (settings as { cross_exchange_mode?: boolean }).cross_exchange_mode === true ||
+      (settings as { crossExchangeMode?: unknown }).crossExchangeMode === 'true' ||
+      (settings as { crossExchangeMode?: unknown }).crossExchangeMode === 1;
 
     const marketData = isCrossExchange
       ? await fundingScanner.getCrossExchangeFundingData()
@@ -59,7 +61,7 @@ export async function getNextToTrade(req: AuthRequest, res: Response): Promise<v
 
     const topTokens = sorted.slice(0, maxTrades);
 
-    res.status(200).json({ tokens: topTokens, maxTrades });
+    res.status(200).json({ tokens: topTokens, maxTrades, crossExchangeMode: isCrossExchange });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to fetch next-to-trade';
     res.status(500).json({ error: msg });

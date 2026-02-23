@@ -758,8 +758,18 @@ async function runTick(): Promise<number> {
     }
 
     const isMockTriggered = process.env.TEST_MODE === 'true' || (isManualMockActive && manualMockFundingTimeMs != null);
+    const mockTargetTime = isMockTriggered
+      ? (process.env.TEST_MODE === 'true' ? mockFundingTimeMs! : manualMockFundingTimeMs!)
+      : undefined;
     if (isMockTriggered && marketData.length > 0) {
-      console.log('[DEBUG] Mock Trigger Active. Selected:', marketData[0]!.symbol);
+      const first = marketData[0]!;
+      console.log(`[DEBUG] Mock Trigger Active. Selected: ${first.symbol}`);
+      first.nextFundingTime = String(mockTargetTime!);
+      (first as MarketTicker & { binanceNextFundingTime?: number }).binanceNextFundingTime = mockTargetTime!;
+      first.fundingRate = 100;
+      (first as MarketTicker & { binanceFundingRate?: number }).binanceFundingRate = 200;
+      (first as MarketTicker & { netSpread?: number }).netSpread = 100;
+      first.countdownMs = Math.max(0, mockTargetTime! - now);
     }
     if (marketData.length === 0) {
       console.log('[DEBUG] topCandidates is EMPTY! Check scanner mapping.');
@@ -785,7 +795,7 @@ async function runTick(): Promise<number> {
 
     for (const userId of userIds) {
       try {
-        await processUser(userId, marketData, now);
+        await processUser(userId, marketData, now, isMockTriggered, mockTargetTime);
       } catch (err) {
         console.error(`[autoBot] User ${userId} error:`, err);
       }
@@ -2019,7 +2029,9 @@ async function processUserCritical(
 async function processUser(
   userId: number,
   marketData: MarketTicker[],
-  now: number
+  now: number,
+  isMockTriggered?: boolean,
+  mockTargetTime?: number
 ): Promise<void> {
   const globalMinCountdownSec =
     marketData.length > 0 ? Math.min(...marketData.map((m) => Math.floor(m.countdownMs / 1000))) : 9999;
@@ -2066,13 +2078,13 @@ async function processUser(
 
   // Auto Exit is handled by monitorExits (1s loop) with reduce-only orders and unified logging.
 
-  // Auto Entry: filter by min funding rate (compare % to % so negative/short-squeeze rates are not missed)
+  // Auto Entry: filter by min funding rate (compare % to % so negative/short-squeeze rates are not missed). Bypass when mock (TEST_MODE or manual).
   const minFundingRate = settings.minFundingRate ?? 0;
   const minPct = minFundingRate > 0 && minFundingRate < 0.1 ? minFundingRate * 100 : minFundingRate;
 
   let meetsMinFunding: typeof marketData;
-  if (isManualMockActive) {
-    // Mock bypass: take #1 ranked token regardless of rate for testing
+  if (isMockTriggered) {
+    // Mock bypass: take candidates regardless of rate for testing
     meetsMinFunding = [...marketData];
   } else {
     meetsMinFunding = marketData.filter((token) => {
@@ -2267,15 +2279,21 @@ async function processUser(
   const prepCandidates: EntryPrepCandidate[] = [];
   await Promise.all(
     candidates.map(async (topToken) => {
-      const fundingTimeMs = parseInt(topToken.nextFundingTime, 10) || 0;
+      const isCrossExchange = Boolean(settings.crossExchangeMode);
+      const targetTime = (isMockTriggered && mockTargetTime != null)
+        ? mockTargetTime
+        : (isCrossExchange ? Number(topToken.binanceNextFundingTime ?? topToken.nextFundingTime) : Number(topToken.nextFundingTime));
+      const timeToFunding = targetTime - now;
+      if (isMockTriggered) {
+        console.log(`[DEBUG MOCK] ${topToken.symbol} - targetTime: ${targetTime}, now: ${now}, timeToFunding: ${timeToFunding}ms`);
+      }
+      const fundingTimeMs = targetTime;
       const exactEntryTimeMs = fundingTimeMs - entryOffsetMs;
       const delayMs = exactEntryTimeMs - now;
       const subEntryOffsetMs = settings.subEntryOffsetMs ?? 10;
       const cycleKey = entryCycleKey(userId, topToken.symbol, topToken.nextFundingTime);
 
-      const globalManualMockTarget = isManualMockActive && manualMockFundingTimeMs != null ? manualMockFundingTimeMs : 0;
-      const isMock = globalManualMockTarget > 0;
-      const targetTime = isMock ? globalManualMockTarget : fundingTimeMs;
+      const isMock = isMockTriggered && mockTargetTime != null && mockTargetTime > 0;
       const mainOffset = entryOffsetMs;
       const maxDelayMs = isMock ? MANUAL_MOCK_COUNTDOWN_MS : ENTRY_SCHEDULE_MAX_MS;
       const nowForRange = Date.now();
@@ -2383,6 +2401,12 @@ async function processUser(
               if (q >= minOrderQty) fixedQty = q;
             }
           } catch { /* ignore */ }
+          if (settings.crossExchangeMode) {
+            const cacheForLog = walletCacheByUser.get(userId);
+            const bybitAvail = cacheForLog?.totalAvailableBalance ?? 'N/A';
+            const binanceAvail = cacheForLog?.binanceAvailableBalance ?? 'N/A';
+            console.log(`[DEBUG] Cross-Exchange targetQty: ${fixedQty} (Bybit Avail: ${bybitAvail}, Binance Avail: ${binanceAvail})`);
+          }
           const candidateBuilt: EntryPrepCandidate = {
             symbol: topToken.symbol,
             nextFundingTime: topToken.nextFundingTime,
@@ -2504,6 +2528,11 @@ async function processUser(
             }
           } catch {
             /* ignore */
+          }
+          if (settings.crossExchangeMode) {
+            const bybitAvail = cache?.totalAvailableBalance ?? 'N/A';
+            const binanceAvail = cache?.binanceAvailableBalance ?? 'N/A';
+            console.log(`[DEBUG] Cross-Exchange targetQty: ${fixedQty} (Bybit Avail: ${bybitAvail}, Binance Avail: ${binanceAvail})`);
           }
           prepCandidates.push({
             symbol: topToken.symbol,

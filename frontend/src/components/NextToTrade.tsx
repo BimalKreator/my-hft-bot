@@ -14,6 +14,8 @@ interface NextToTradeToken {
   fundingIntervalHours: number;
   maxLeverage: string;
   maxOrderQty: string;
+  /** Cross-exchange: Bybit–Binance net spread (decimal, e.g. 0.01 = 1%). */
+  netSpread?: number;
 }
 
 interface NextToTradeResponse {
@@ -90,7 +92,12 @@ function predictedProfitPer1k(fundingRate: number): string {
   return '$' + est.toFixed(4) + ' / $1k';
 }
 
-export default function NextToTrade() {
+interface NextToTradeProps {
+  /** When true, show Token / Net Spread / Time only (matches Scanner cross-exchange). */
+  crossExchangeMode?: boolean;
+}
+
+export default function NextToTrade({ crossExchangeMode = false }: NextToTradeProps) {
   const [data, setData] = useState<NextToTradeResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -178,6 +185,47 @@ export default function NextToTrade() {
       {tokens.length === 0 && !error ? (
         <div className="px-4 py-8 text-center text-gray-400">
           No tokens match your min funding rate and banned list, or settings not loaded.
+        </div>
+      ) : crossExchangeMode ? (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-gray-400" style={{ backgroundColor: 'rgba(0, 0, 0, 0.2)' }}>
+                <th className="px-4 py-2.5 font-medium">Token</th>
+                <th className="px-4 py-2.5 font-medium">Net Spread</th>
+                <th className="px-4 py-2.5 font-medium">Time</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tokens.map((row) => (
+                <tr
+                  key={row.symbol}
+                  className="border-b border-gray-800/80 hover:bg-white/5"
+                  style={{ borderColor: 'rgba(255,255,255,0.06)' }}
+                >
+                  <td className="px-4 py-2.5">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className="flex h-8 w-8 items-center justify-center rounded-full text-xs font-medium"
+                        style={{ backgroundColor: 'rgba(0, 123, 255, 0.2)', color: '#007BFF' }}
+                      >
+                        {tokenName(row.symbol).slice(0, 2)}
+                      </span>
+                      <span className="font-medium text-white">{tokenName(row.symbol)}</span>
+                    </div>
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <span className="text-gray-300 font-medium">
+                      {row.netSpread != null ? (row.netSpread * 100).toFixed(4) + '%' : '—'}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <CountdownCell nextFundingTime={row.nextFundingTime} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       ) : (
         <div className="overflow-x-auto">
