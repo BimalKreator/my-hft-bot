@@ -694,10 +694,10 @@ async function runTick(): Promise<number> {
 
     if (isManualMockActive && manualMockFundingTimeMs != null && manualMockEndMs != null && now < manualMockEndMs) {
       try {
-        marketData = await Promise.race([
+        marketData = (await Promise.race([
           fundingScanner.getCrossExchangeFundingData(),
           new Promise<never>((_, rej) => setTimeout(() => rej(new Error('getFundingData timeout')), 5000)),
-        ]);
+        ])) as MarketTicker[];
       } catch {
         const countdownMs = Math.max(0, manualMockFundingTimeMs - now);
         const nextFundingTime = String(manualMockFundingTimeMs);
@@ -709,7 +709,7 @@ async function runTick(): Promise<number> {
           markPrice: '0',
           lastPrice: '0',
           fundingIntervalHours: 8,
-        }];
+        }] as MarketTicker[];
       }
     } else {
       if (isManualMockActive && (manualMockFundingTimeMs == null || manualMockEndMs == null || now >= manualMockEndMs)) {
@@ -726,7 +726,7 @@ async function runTick(): Promise<number> {
           console.log('[autoBot] Manual mock state cleared (missing times); resuming live sync.');
         }
       }
-      marketData = await fundingScanner.getCrossExchangeFundingData();
+      marketData = (await fundingScanner.getCrossExchangeFundingData()) as MarketTicker[];
     }
 
     if (process.env.TEST_MODE === 'true') {
@@ -736,11 +736,11 @@ async function runTick(): Promise<number> {
       }
       const countdownMs = Math.max(0, mockFundingTimeMs - now);
       const nextFundingTime = String(mockFundingTimeMs);
-      marketData = marketData.map((m) => ({ ...m, nextFundingTime, countdownMs }));
+      marketData = marketData.map((m) => ({ ...m, nextFundingTime, countdownMs })) as MarketTicker[];
     } else if (isManualMockActive && manualMockFundingTimeMs != null && manualMockEndMs != null && now < manualMockEndMs) {
       const countdownMs = Math.max(0, manualMockFundingTimeMs - now);
       const nextFundingTime = String(manualMockFundingTimeMs);
-      marketData = marketData.map((m) => ({ ...m, nextFundingTime, countdownMs }));
+      marketData = marketData.map((m) => ({ ...m, nextFundingTime, countdownMs })) as MarketTicker[];
     }
 
     const minCountdownSec =
@@ -2108,9 +2108,10 @@ async function processUser(
         if (Number.isNaN(delayMs) || delayMs < 0) return;
         const prepForPayload = entryPrepCacheByUser.get(userId);
         const cForPayload = prepForPayload?.candidates.find((x) => x.symbol === topToken.symbol && x.nextFundingTime === topToken.nextFundingTime);
+        const binanceFr = (topToken as MarketTicker).binanceFundingRate;
         const side: 'Buy' | 'Sell' =
-          settings.crossExchangeMode && topToken.binanceFundingRate != null
-            ? (topToken.binanceFundingRate > topToken.fundingRate ? 'Buy' : 'Sell')
+          settings.crossExchangeMode && binanceFr != null
+            ? (binanceFr > topToken.fundingRate ? 'Buy' : 'Sell')
             : (topToken.fundingRate < 0 ? 'Buy' : 'Sell');
         if (hedgeMode && subKeys && prepForPayload && cForPayload && cForPayload.fixedQty != null && prepForPayload.subApiKey && prepForPayload.subApiSecret) {
           try {
@@ -2275,9 +2276,10 @@ async function processUser(
               /* ignore */
             }
           }
+          const binanceFrPrefetch = (topToken as MarketTicker).binanceFundingRate;
           const side: 'Buy' | 'Sell' =
-            settings.crossExchangeMode && topToken.binanceFundingRate != null
-              ? (topToken.binanceFundingRate > topToken.fundingRate ? 'Buy' : 'Sell')
+            settings.crossExchangeMode && binanceFrPrefetch != null
+              ? (binanceFrPrefetch > topToken.fundingRate ? 'Buy' : 'Sell')
               : (topToken.fundingRate < 0 ? 'Buy' : 'Sell');
           let qtyStep = 0.1;
           let minOrderQty = 0;
