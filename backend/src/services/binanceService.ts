@@ -218,7 +218,6 @@ export async function getBinanceAvailableBalance(apiKey: string, apiSecret: stri
     return 0;
   }
   const usdtAsset = data.find((r: { asset?: string }) => r.asset === 'USDT') as Record<string, unknown> | undefined;
-  console.log('[binanceService] Raw USDT Asset Data:', usdtAsset ?? null);
   if (!usdtAsset) return 0;
 
   const availableBalance = usdtAsset.availableBalance ?? usdtAsset.available_balance;

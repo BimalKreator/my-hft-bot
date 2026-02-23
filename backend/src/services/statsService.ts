@@ -221,11 +221,7 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
         const isBanned = bannedTokens.includes(c.symbol);
         if (isBanned) return false;
         const spread = Number(c.netSpread ?? 0);
-        const passes = spread >= minProfitDec;
-        if (!passes) {
-          console.log(`[DEBUG Filter] Symbol: ${c.symbol}, Spread: ${spread}, MinRequired: ${minProfitDec}`);
-        }
-        return passes;
+        return spread >= minProfitDec;
       });
       const top = validCandidates.slice(0, maxTrades);
       nextToTrade = top.map((t) => ({

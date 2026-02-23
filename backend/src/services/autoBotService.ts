@@ -767,6 +767,10 @@ async function runTick(): Promise<number> {
         ...('binanceFundingRate' in m && { binanceNextFundingTime: mockTargetTime }),
       })) as MarketTicker[];
     } else if (isManualMockActive && manualMockFundingTimeMs != null && manualMockEndMs != null && now < manualMockEndMs) {
+      if (manualMockFundingTimeMs <= now) {
+        manualMockFundingTimeMs = now + MANUAL_MOCK_COUNTDOWN_MS;
+        manualMockEndMs = manualMockFundingTimeMs + MANUAL_MOCK_EXIT_BUFFER_MS;
+      }
       const countdownMs = Math.max(0, manualMockFundingTimeMs - now);
       const nextFundingTime = String(manualMockFundingTimeMs);
       const mockTargetTime = manualMockFundingTimeMs;
@@ -779,9 +783,18 @@ async function runTick(): Promise<number> {
     }
 
     const isMockTriggered = process.env.TEST_MODE === 'true' || (isManualMockActive && manualMockFundingTimeMs != null);
-    const mockTargetTime = isMockTriggered
+    let mockTargetTime: number | undefined = isMockTriggered
       ? (process.env.TEST_MODE === 'true' ? mockFundingTimeMs! : manualMockFundingTimeMs!)
       : undefined;
+    if (isMockTriggered && mockTargetTime != null && mockTargetTime <= now) {
+      mockTargetTime = now + MANUAL_MOCK_COUNTDOWN_MS;
+      if (!(process.env.TEST_MODE === 'true')) {
+        manualMockFundingTimeMs = mockTargetTime;
+        manualMockEndMs = manualMockFundingTimeMs + MANUAL_MOCK_EXIT_BUFFER_MS;
+      } else {
+        mockFundingTimeMs = mockTargetTime;
+      }
+    }
     if (isMockTriggered && marketData.length > 0) {
       const first = marketData[0]!;
       console.log(`[DEBUG] Mock Trigger Active. Selected: ${first.symbol}`);
@@ -2396,8 +2409,8 @@ async function processUser(
         if (isMockTriggered) {
           console.log(`[DEBUG MOCK] Entered execution setup: ${topToken.symbol} (timeToFunding: ${timeToFunding}ms <= ${MANUAL_MOCK_COUNTDOWN_MS}ms)`);
         }
-        if (processedTokens.has(processedKey(userId, topToken.symbol, topToken.nextFundingTime))) return;
-        if (enteredThisCycle.has(cycleKey)) return;
+        if (!isMockTriggered && processedTokens.has(processedKey(userId, topToken.symbol, topToken.nextFundingTime))) return;
+        if (!isMockTriggered && enteredThisCycle.has(cycleKey)) return;
         if (!isMockTriggered && (Number.isNaN(delayMs) || delayMs < 0)) return;
         const prepForPayload = entryPrepCacheByUser.get(userId);
         const cForPayload = prepForPayload?.candidates.find((x) => x.symbol === topToken.symbol && x.nextFundingTime === topToken.nextFundingTime);
@@ -2697,7 +2710,7 @@ async function processUser(
       }
 
       const procKey = processedKey(userId, topToken.symbol, topToken.nextFundingTime);
-      if (processedTokens.has(procKey)) {
+      if (!isMockTriggered && processedTokens.has(procKey)) {
         if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: Already processed this cycle', 'symbol:', topToken.symbol);
         return;
       }
@@ -2712,7 +2725,7 @@ async function processUser(
         console.log(`[autoBot] ${topToken.symbol}${spotTag} - Countdown: ${countdownSec}s | Base Capital: $${totalWalletBalance.toFixed(2)} | Target Margin: $${tradeMargin.toFixed(2)}`);
       }
 
-      if (enteredThisCycle.has(cycleKey)) {
+      if (!isMockTriggered && enteredThisCycle.has(cycleKey)) {
         if (debugSkipToken) console.log('[DEBUG] Trade Skipped Reason: Already entered this cycle', 'symbol:', topToken.symbol);
         return;
       }
