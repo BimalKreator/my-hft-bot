@@ -57,6 +57,112 @@ interface HedgeCardProps {
   tokenName: (symbol: string) => string;
 }
 
+/** Cross-exchange hedge: same symbol, one Bybit + one Binance. Combined PnL, both entry prices, single Close Hedge. */
+interface CrossHedgeGroupCardProps {
+  symbol: string;
+  bybitPos: PositionRow;
+  binancePos: PositionRow;
+  closingId: string | null;
+  onCloseHedge: (symbol: string) => void;
+  formatNum: (value: number, decimals?: number) => string;
+  tokenName: (symbol: string) => string;
+}
+
+function CrossHedgeGroupCard({ symbol, bybitPos, binancePos, closingId, onCloseHedge, formatNum, tokenName }: CrossHedgeGroupCardProps) {
+  const combinedPnl = (bybitPos?.pnl ?? 0) + (binancePos?.pnl ?? 0);
+  const side = bybitPos?.side ?? 'Buy';
+  const direction = side === 'Buy' ? 'LONG' : 'SHORT';
+  const safeSymbol = symbol ?? '';
+  const hedgeClosingId = `hedge_${safeSymbol}`;
+  const isClosing = closingId === hedgeClosingId;
+  const isFundingFlipped = !!(bybitPos?.isFundingFlipped || binancePos?.isFundingFlipped);
+  const qty = bybitPos?.size ?? binancePos?.size ?? '—';
+  const bybitEntry = parseFloat(bybitPos?.avgPrice ?? '') || 0;
+  const binanceEntry = parseFloat(binancePos?.avgPrice ?? '') || 0;
+
+  return (
+    <div
+      className="px-4 py-4"
+      style={{
+        backgroundColor: 'rgba(234, 179, 8, 0.06)',
+        borderLeft: '3px solid rgba(234, 179, 8, 0.6)',
+      }}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="font-semibold text-white">{tokenName(safeSymbol)}</span>
+          <span className="inline-block rounded px-1.5 py-0.5 text-xs font-medium" style={{ backgroundColor: 'rgba(0, 123, 255, 0.2)', color: '#007BFF' }}>
+            Bybit
+          </span>
+          <span className="inline-block rounded px-1.5 py-0.5 text-xs font-medium" style={{ backgroundColor: 'rgba(234, 179, 8, 0.25)', color: '#eab308' }}>
+            Binance
+          </span>
+          <span
+            className="inline-block rounded px-2 py-0.5 text-xs font-semibold"
+            style={
+              direction === 'LONG'
+                ? { backgroundColor: 'rgba(34, 197, 94, 0.2)', color: '#22c55e' }
+                : { backgroundColor: 'rgba(239, 68, 68, 0.2)', color: '#ef4444' }
+            }
+          >
+            {direction} / Cross-hedge
+          </span>
+          {isFundingFlipped && (
+            <span className="rounded px-2 py-0.5 text-xs font-semibold bg-red-500/20 text-red-400 border border-red-500/40">
+              Funding Flip
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="text-right">
+            <div className="text-xs text-gray-400">Combined PnL (Bybit + Binance)</div>
+            <span
+              className="text-lg font-bold tabular-nums"
+              style={{
+                color: combinedPnl >= 0 ? '#22c55e' : '#ef4444',
+                textShadow: combinedPnl >= 0 ? '0 0 10px rgba(34,197,94,0.4)' : '0 0 10px rgba(239,68,68,0.4)',
+              }}
+            >
+              {combinedPnl >= 0 ? '+' : ''}{formatNum(combinedPnl)}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => onCloseHedge(safeSymbol)}
+            disabled={isClosing}
+            className="rounded px-3 py-1.5 text-xs font-semibold text-white transition disabled:opacity-50 shrink-0"
+            style={{ backgroundColor: '#ef4444', boxShadow: '0 0 12px rgba(239, 68, 68, 0.3)' }}
+          >
+            {isClosing ? 'Closing…' : 'Close Hedge'}
+          </button>
+        </div>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+        <div className="rounded-lg p-3 flex flex-wrap items-center justify-between gap-2" style={{ backgroundColor: 'rgba(0,0,0,0.2)' }}>
+          <div>
+            <div className="text-gray-400 text-xs font-medium uppercase tracking-wide">Bybit</div>
+            <div className="text-white">Side: {bybitPos?.side ?? '—'} · Qty: {qty}</div>
+            <div className="text-gray-300">Entry: {formatNum(bybitEntry)}</div>
+            <div className="text-xs mt-0.5 font-medium" style={{ color: (bybitPos?.pnl ?? 0) >= 0 ? '#22c55e' : '#ef4444' }}>
+              PnL: {(bybitPos?.pnl ?? 0) >= 0 ? '+' : ''}{formatNum(bybitPos?.pnl ?? 0)}
+            </div>
+          </div>
+        </div>
+        <div className="rounded-lg p-3 flex flex-wrap items-center justify-between gap-2" style={{ backgroundColor: 'rgba(0,0,0,0.2)' }}>
+          <div>
+            <div className="text-gray-400 text-xs font-medium uppercase tracking-wide">Binance</div>
+            <div className="text-white">Side: {binancePos?.side ?? '—'} · Qty: {qty}</div>
+            <div className="text-gray-300">Entry: {formatNum(binanceEntry)}</div>
+            <div className="text-xs mt-0.5 font-medium" style={{ color: (binancePos?.pnl ?? 0) >= 0 ? '#22c55e' : '#ef4444' }}>
+              PnL: {(binancePos?.pnl ?? 0) >= 0 ? '+' : ''}{formatNum(binancePos?.pnl ?? 0)}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** Grouped card for sub-account hedging: same symbol, main + sub. Combined PnL at top, single Close Hedge button, then Main/Sub rows (no per-row Exit). */
 interface SubHedgeGroupCardProps {
   symbol: string;
@@ -304,7 +410,7 @@ export default function ActivePositions() {
 
   const activePositions = Array.isArray(positions) ? positions : [];
 
-  const { subHedgeGroups, standalone } = useMemo(() => {
+  const { subHedgeGroups, crossExchangeGroups, standalone } = useMemo(() => {
     const bySymbol = new Map<string, PositionRow[]>();
     for (const p of activePositions) {
       const symbol = p?.symbol;
@@ -314,18 +420,24 @@ export default function ActivePositions() {
       bySymbol.set(symbol, list);
     }
     const subHedgeGroups: { symbol: string; positions: PositionRow[] }[] = [];
+    const crossExchangeGroups: { symbol: string; bybitPos: PositionRow; binancePos: PositionRow }[] = [];
     const standalone: PositionRow[] = [];
     for (const [symbol, list] of bySymbol) {
       const safeList = Array.isArray(list) ? list : [];
       const hasMain = safeList.some((p) => p?.accountType === 'main');
       const hasSub = safeList.some((p) => p?.accountType === 'sub');
+      const bybitPos = safeList.find((p) => p?.exchange === 'Bybit');
+      const binancePos = safeList.find((p) => p?.exchange === 'Binance');
+      const isCrossExchangePair = safeList.length === 2 && bybitPos && binancePos;
       if (safeList.length === 2 && hasMain && hasSub) {
         subHedgeGroups.push({ symbol, positions: safeList });
+      } else if (isCrossExchangePair) {
+        crossExchangeGroups.push({ symbol, bybitPos, binancePos });
       } else {
         standalone.push(...safeList);
       }
     }
-    return { subHedgeGroups, standalone };
+    return { subHedgeGroups, crossExchangeGroups, standalone };
   }, [activePositions]);
 
   const handleExit = useCallback(
@@ -443,6 +555,26 @@ export default function ActivePositions() {
                   key={`subhedge_${symbol}`}
                   symbol={symbol}
                   positions={groupPositions}
+                  closingId={closingId}
+                  onCloseHedge={handleCloseHedge}
+                  formatNum={formatNum}
+                  tokenName={tokenName}
+                />
+              );
+            })}
+          {/* Cross-exchange hedge groups: same symbol, one Bybit + one Binance */}
+          {Array.isArray(crossExchangeGroups) &&
+            crossExchangeGroups.map((group) => {
+              const symbol = group?.symbol;
+              const bybitPos = group?.bybitPos;
+              const binancePos = group?.binancePos;
+              if (!symbol || !bybitPos || !binancePos) return null;
+              return (
+                <CrossHedgeGroupCard
+                  key={`crosshedge_${symbol}`}
+                  symbol={symbol}
+                  bybitPos={bybitPos}
+                  binancePos={binancePos}
                   closingId={closingId}
                   onCloseHedge={handleCloseHedge}
                   formatNum={formatNum}

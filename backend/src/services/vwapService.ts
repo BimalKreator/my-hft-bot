@@ -144,8 +144,9 @@ export async function getEnrichedPositions(userId: number): Promise<EnrichedPosi
       const binancePos = binanceBySymbol.get(pos.symbol);
       const bybitFR = fundingRate;
       const binanceFR = getBinanceSymbol(pos.symbol)?.fundingRate ?? 0;
-      const fundingYield = pos.side === 'Buy' ? binanceFR - bybitFR : bybitFR - binanceFR;
-      const isFundingFlipped = !!binancePos && fundingYield < 0;
+      // Cross-Exchange: Bybit Long => we expect BinanceFR > BybitFR; flip if BinanceFR < BybitFR. Bybit Short => we expect BybitFR > BinanceFR; flip if BybitFR < BinanceFR.
+      const isBybitLong = pos.side === 'Buy';
+      const isFundingFlipped = !!binancePos && (isBybitLong ? binanceFR < bybitFR : bybitFR < binanceFR);
 
       const hedgeGroup = await getHedgeGroupByPosition(userId, pos.symbol, pos.side);
 
@@ -204,8 +205,9 @@ export async function getEnrichedPositions(userId: number): Promise<EnrichedPosi
     const bybitFR = fundingBySymbol.get(bp.symbol) ?? 0;
     const binanceFR = getBinanceSymbol(bp.symbol)?.fundingRate ?? 0;
     const binanceSide: 'Buy' | 'Sell' = bp.positionAmt > 0 ? 'Buy' : 'Sell';
-    const fundingYield = binanceSide === 'Sell' ? binanceFR - bybitFR : bybitFR - binanceFR;
-    const isFundingFlipped = fundingYield < 0;
+    // Same flip logic as Bybit leg: Bybit Long (= Binance Short) => expect BinanceFR > BybitFR, flip if BinanceFR < BybitFR. Bybit Short (= Binance Long) => expect BybitFR > BinanceFR, flip if BybitFR < BinanceFR.
+    const isBybitLong = bp.positionAmt < 0;
+    const isFundingFlipped = isBybitLong ? binanceFR < bybitFR : bybitFR < binanceFR;
     const markPrice = getBinanceSymbol(bp.symbol)?.markPrice ?? '';
     const entry = bp.entryPrice;
     const qty = Math.abs(bp.positionAmt);
