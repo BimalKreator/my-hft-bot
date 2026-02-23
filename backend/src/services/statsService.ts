@@ -3,7 +3,7 @@ import { getExchangeKeys, getSubAccountKeys } from '../models/exchangeModel.js';
 import { getSettings } from '../models/settingsModel.js';
 import { decrypt } from '../utils/encryption.js';
 import { getWalletBalance } from './bybitService.js';
-import { getBinanceAvailableBalance } from './binanceService.js';
+import { getBinanceEquity } from './binanceService.js';
 import { getCrossExchangeFundingData } from './marketService.js';
 import { getBannedTokens } from '../models/bannedTokensModel.js';
 import type { FundingDataItem } from './scannerService.js';
@@ -104,7 +104,7 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
       console.warn('[statsService] Binance API key empty after decryption/fallback');
     }
     try {
-      binanceBalance = await getBinanceAvailableBalance(binanceApiKey, binanceApiSecret);
+      binanceBalance = await getBinanceEquity(binanceApiKey, binanceApiSecret);
       // console.log('[statsService] Binance Balance API Result:', binanceBalance);
     } catch (err) {
       console.warn('[stats] Binance balance fetch failed', err instanceof Error ? err.message : String(err));

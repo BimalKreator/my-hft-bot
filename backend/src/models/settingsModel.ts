@@ -26,7 +26,12 @@ export async function initTradeHistoryTable(): Promise<void> {
       ALTER TABLE trade_history
       ADD COLUMN IF NOT EXISTS exchange VARCHAR(50) DEFAULT 'Bybit Main'
     `);
-    console.log('[Database] Ensured exchange column exists in trade_history.');
+    await query(`ALTER TABLE trade_history ADD COLUMN IF NOT EXISTS binance_order_id TEXT`);
+    await query(`ALTER TABLE trade_history ADD COLUMN IF NOT EXISTS binance_exec_price NUMERIC`);
+    await query(`ALTER TABLE trade_history ADD COLUMN IF NOT EXISTS binance_exec_qty NUMERIC`);
+    await query(`ALTER TABLE trade_history ADD COLUMN IF NOT EXISTS binance_executed_at_ms BIGINT`);
+    await query(`ALTER TABLE trade_history ADD COLUMN IF NOT EXISTS binance_ms_before_funding INTEGER`);
+    console.log('[Database] Ensured exchange and binance columns exist in trade_history.');
   } catch (err) {
     console.error('[Database] Error altering trade_history table:', err);
   }

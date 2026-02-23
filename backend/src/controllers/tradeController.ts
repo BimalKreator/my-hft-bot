@@ -564,7 +564,14 @@ export async function getExecutionHistory(
       return;
     }
     const rows = await getTradeHistoryByUserId(userId);
-    res.status(200).json(rows);
+    const withExchange = rows.map((r) => {
+      const parts: string[] = [];
+      if (r.main_exec_price != null && r.main_exec_price !== '') parts.push('Bybit Main');
+      if (r.sub_exec_price != null && r.sub_exec_price !== '') parts.push('Bybit Sub');
+      if (r.binance_exec_price != null && r.binance_exec_price !== '') parts.push('Binance');
+      return { ...r, exchange: parts.length > 0 ? parts.join(', ') : (r.exchange ?? '—') };
+    });
+    res.status(200).json(withExchange);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to load execution history';
     res.status(500).json({ error: msg });

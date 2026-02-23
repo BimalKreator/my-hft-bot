@@ -11,6 +11,8 @@ export interface TradeHistoryInsert {
   subHedged: boolean;
   subExecutedBeforeFunding: boolean | null;
   reasonNoSub: string | null;
+  /** Exchange for this leg: 'Bybit Main' | 'Bybit Sub'. */
+  exchange?: string;
 }
 
 /**
@@ -33,14 +35,15 @@ export async function insertTradeHistoryEntry(report: TradeHistoryInsert): Promi
   const subMsBeforeFunding = report.sub != null ? report.fundingTimeMs - report.sub.executedAtMs : null;
   const subExecutedBeforeFunding = report.subExecutedBeforeFunding ?? null;
   const reasonNoSub = report.reasonNoSub ?? null;
+  const exchange = report.exchange ?? 'Bybit Main';
 
   await query(
     `INSERT INTO trade_history (
       user_id, symbol, funding_time_ms, funding_time,
       main_triggered_at_ms, main_order_id, main_exec_price, main_exec_qty, main_executed_at_ms, main_ms_before_funding,
       sub_triggered_at_ms, sub_order_id, sub_exec_price, sub_exec_qty, sub_executed_at_ms, sub_ms_before_funding, sub_executed_before_funding,
-      reason_no_sub, updated_at
-    ) VALUES ($1, $2, $3, $4::timestamptz, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, NOW())
+      reason_no_sub, exchange, updated_at
+    ) VALUES ($1, $2, $3, $4::timestamptz, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW())
     ON CONFLICT (user_id, symbol, funding_time_ms) DO UPDATE SET
       main_triggered_at_ms = COALESCE(EXCLUDED.main_triggered_at_ms, trade_history.main_triggered_at_ms),
       main_order_id = COALESCE(EXCLUDED.main_order_id, trade_history.main_order_id),
@@ -56,6 +59,7 @@ export async function insertTradeHistoryEntry(report: TradeHistoryInsert): Promi
       sub_ms_before_funding = COALESCE(EXCLUDED.sub_ms_before_funding, trade_history.sub_ms_before_funding),
       sub_executed_before_funding = COALESCE(EXCLUDED.sub_executed_before_funding, trade_history.sub_executed_before_funding),
       reason_no_sub = COALESCE(EXCLUDED.reason_no_sub, trade_history.reason_no_sub),
+      exchange = COALESCE(EXCLUDED.exchange, trade_history.exchange),
       updated_at = NOW()`,
     [
       report.userId,
@@ -76,7 +80,36 @@ export async function insertTradeHistoryEntry(report: TradeHistoryInsert): Promi
       subMsBeforeFunding,
       subExecutedBeforeFunding,
       reasonNoSub,
+      exchange,
     ]
+  );
+}
+
+/** Update Binance execution for an existing trade_history row (same cycle). */
+export async function updateTradeHistoryBinanceEntry(
+  userId: number,
+  symbol: string,
+  fundingTimeMs: number,
+  detail: { orderId: number | string; execPrice: string | number; execQty: string | number; executedAtMs: number }
+): Promise<void> {
+  const fundingTimeIso = new Date(fundingTimeMs).toISOString();
+  const binanceOrderId = String(detail.orderId);
+  const binanceExecPrice = typeof detail.execPrice === 'number' ? detail.execPrice : parseFloat(String(detail.execPrice)) || null;
+  const binanceExecQty = typeof detail.execQty === 'number' ? detail.execQty : parseFloat(String(detail.execQty)) || null;
+  const binanceExecutedAtMs = detail.executedAtMs;
+  const binanceMsBeforeFunding = fundingTimeMs - detail.executedAtMs;
+  await query(
+    `INSERT INTO trade_history (
+      user_id, symbol, funding_time_ms, funding_time, exchange, binance_order_id, binance_exec_price, binance_exec_qty, binance_executed_at_ms, binance_ms_before_funding, updated_at
+    ) VALUES ($1, $2, $3, $4::timestamptz, 'Binance', $5, $6, $7, $8, $9, NOW())
+    ON CONFLICT (user_id, symbol, funding_time_ms) DO UPDATE SET
+      binance_order_id = EXCLUDED.binance_order_id,
+      binance_exec_price = EXCLUDED.binance_exec_price,
+      binance_exec_qty = EXCLUDED.binance_exec_qty,
+      binance_executed_at_ms = EXCLUDED.binance_executed_at_ms,
+      binance_ms_before_funding = EXCLUDED.binance_ms_before_funding,
+      updated_at = NOW()`,
+    [userId, symbol, fundingTimeMs, fundingTimeIso, binanceOrderId, binanceExecPrice, binanceExecQty, binanceExecutedAtMs, binanceMsBeforeFunding]
   );
 }
 
@@ -100,6 +133,12 @@ export interface TradeHistoryRow {
   sub_ms_before_funding: number | null;
   sub_executed_before_funding: boolean | null;
   reason_no_sub: string | null;
+  exchange: string | null;
+  binance_order_id: string | null;
+  binance_exec_price: string | null;
+  binance_exec_qty: string | null;
+  binance_executed_at_ms: string | null;
+  binance_ms_before_funding: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -109,7 +148,9 @@ export async function getTradeHistoryByUserId(userId: number): Promise<TradeHist
     `SELECT id, user_id, symbol, funding_time_ms::text, funding_time::text,
             main_triggered_at_ms::text, main_order_id, main_exec_price::text, main_exec_qty::text, main_executed_at_ms::text, main_ms_before_funding,
             sub_triggered_at_ms::text, sub_order_id, sub_exec_price::text, sub_exec_qty::text, sub_executed_at_ms::text, sub_ms_before_funding, sub_executed_before_funding,
-            reason_no_sub, created_at::text, updated_at::text
+            reason_no_sub, exchange,
+            binance_order_id, binance_exec_price::text, binance_exec_qty::text, binance_executed_at_ms::text, binance_ms_before_funding,
+            created_at::text, updated_at::text
      FROM trade_history
      WHERE user_id = $1
      ORDER BY created_at DESC`,

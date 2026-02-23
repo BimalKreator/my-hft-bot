@@ -231,12 +231,13 @@ export async function getEnrichedPositions(userId: number): Promise<EnrichedPosi
   }
 
   for (const bp of binancePositions) {
+    const posAmt = Number(bp.positionAmt);
     const bybitFR = Number(fundingBySymbol.get(bp.symbol) ?? 0);
     const binanceSymbol = getBinanceSymbol(bp.symbol);
     const binanceFRNum = binanceSymbol != null && binanceSymbol.fundingRate !== undefined ? Number(binanceSymbol.fundingRate) : null;
     const binanceFR = binanceFRNum ?? 0;
-    const binanceSide: 'Buy' | 'Sell' = bp.positionAmt > 0 ? 'Buy' : 'Sell';
-    const isBybitLong = bp.positionAmt < 0;
+    const binanceSide: 'Buy' | 'Sell' = posAmt > 0 ? 'Buy' : 'Sell';
+    const isBybitLong = posAmt < 0;
     let isFundingFlipped = false;
     if (binanceFRNum !== null) {
       const currentYield = isBybitLong ? binanceFRNum - bybitFR : bybitFR - binanceFRNum;
@@ -244,7 +245,7 @@ export async function getEnrichedPositions(userId: number): Promise<EnrichedPosi
     }
     const markPrice = getBinanceSymbol(bp.symbol)?.markPrice ?? '';
     const entry = bp.entryPrice;
-    const qty = Math.abs(bp.positionAmt);
+    const qty = Math.abs(posAmt);
     const vwapPrice = markPrice ? parseFloat(markPrice) || 0 : 0;
     const pnl = bp.unRealizedProfit;
     const slPrice = binanceSide === 'Buy' ? entry * (1 - binanceFR) : entry * (1 + binanceFR);
@@ -256,7 +257,7 @@ export async function getEnrichedPositions(userId: number): Promise<EnrichedPosi
     enriched.push({
       symbol: bp.symbol,
       side: binanceSide,
-      size: String(qty),
+      size: Math.abs(Number(bp.positionAmt)).toString(),
       avgPrice: String(entry),
       markPrice: markPrice || String(entry),
       vwapPrice,

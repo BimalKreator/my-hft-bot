@@ -12,6 +12,7 @@ interface TradeHistoryRow {
   sub_exec_price: string | null;
   sub_ms_before_funding: number | null;
   reason_no_sub: string | null;
+  exchange?: string | null;
 }
 
 function formatMsBeforeFunding(ms: number | null): string {
@@ -74,6 +75,7 @@ export default function BotStatus() {
               <thead>
                 <tr className="text-gray-400 border-b border-gray-700">
                   <th className="py-2 pr-4">Symbol</th>
+                  <th className="py-2 pr-4">Exchange</th>
                   <th className="py-2 pr-4">Target Funding Time</th>
                   <th className="py-2 pr-4">Main Exec Price</th>
                   <th className="py-2 pr-4">Main Ms Before/After</th>
@@ -89,6 +91,7 @@ export default function BotStatus() {
                   return (
                     <tr key={row.id} className="border-b border-gray-800 text-gray-300">
                       <td className="py-2 pr-4 font-medium text-white">{row.symbol}</td>
+                      <td className="py-2 pr-4">{row.exchange ?? '—'}</td>
                       <td className="py-2 pr-4">{row.funding_time ? new Date(row.funding_time).toISOString().replace('T', ' ').slice(0, 19) : '—'}</td>
                       <td className="py-2 pr-4">{row.main_exec_price ?? '—'}</td>
                       <td className="py-2 pr-4">

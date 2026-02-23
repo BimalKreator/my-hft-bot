@@ -323,6 +323,33 @@ export async function getBinanceAvailableBalance(apiKey: string, apiSecret: stri
   return value;
 }
 
+/** Get USDT equity for Binance Futures (cross margin): Wallet Balance + Unrealized PnL. Use for capital/growth, not sizing. */
+export async function getBinanceEquity(apiKey: string, apiSecret: string): Promise<number> {
+  let raw: unknown;
+  try {
+    raw = await binanceSignedRequest(apiKey, apiSecret, 'GET', '/fapi/v2/balance', {});
+  } catch (err) {
+    const errMsg = err && typeof err === 'object' && 'response' in err
+      ? String((err as { response?: { data?: unknown } }).response?.data ?? (err as Error).message)
+      : (err instanceof Error ? err.message : String(err));
+    console.error('[binanceService] getBinanceEquity API Error:', errMsg);
+    throw err;
+  }
+  const data = Array.isArray(raw)
+    ? raw
+    : (raw as { balances?: Array<Record<string, unknown>> }).balances;
+  if (!Array.isArray(data)) return 0;
+  const usdtAsset = data.find((r: { asset?: string }) => r.asset === 'USDT') as Record<string, unknown> | undefined;
+  if (!usdtAsset) return 0;
+  const crossWalletBalance = usdtAsset.crossWalletBalance ?? usdtAsset.cross_wallet_balance;
+  const crossUnPnl = usdtAsset.crossUnPnl ?? usdtAsset.cross_un_pnl;
+  const totalMarginBalance = usdtAsset.totalMarginBalance ?? usdtAsset.total_margin_balance;
+  const wallet = parseFloat(String(crossWalletBalance ?? 0)) || 0;
+  const unpnl = parseFloat(String(crossUnPnl ?? 0)) || 0;
+  const total = parseFloat(String(totalMarginBalance ?? 0)) || 0;
+  return total > 0 ? total : wallet + unpnl;
+}
+
 /** Position risk row from GET /fapi/v2/positionRisk (one-way mode). */
 export interface BinancePositionRisk {
   positionAmt: number;

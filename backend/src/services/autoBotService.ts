@@ -48,7 +48,7 @@ import {
   setFundingReceived,
   deleteHedgeGroup,
 } from '../models/hedgeGroupModel.js';
-import { insertTradeHistoryEntry } from '../models/tradeHistoryModel.js';
+import { insertTradeHistoryEntry, updateTradeHistoryBinanceEntry } from '../models/tradeHistoryModel.js';
 
 /** Decrypt if possible; if decrypt throws (e.g. malformed UTF-8 or value saved as plain text), return raw string. Used for Binance keys so execution does not crash. */
 function tryDecrypt(val: string | undefined | null): string {
@@ -213,9 +213,11 @@ function recordLastEntry(
   if (account === 'main') {
     report.main = detail;
     report.subHedged = subHedgedExpected;
+    report.exchange = 'Bybit Main';
   } else {
     report.sub = detail;
     report.subExecutedBeforeFunding = executedAtMs < fundingTimeMs;
+    report.exchange = 'Bybit Sub';
   }
   insertTradeHistoryEntry(report).catch((err) =>
     console.error('[autoBot] trade_history insert failed', err)
@@ -1656,8 +1658,17 @@ async function executeBinanceEntry(
     const price = markPrice * mult;
     const { safeQty, safePrice } = await formatBinanceOrderParams(symbol, qty, price);
     console.log(`[DEBUG] Binance Limit Order Formatted: Qty ${safeQty}, Price ${safePrice}`);
-    await placeBinanceOrder(cleanKey, cleanSecret, symbol, binanceSide, safeQty, safePrice);
+    const { orderId } = await placeBinanceOrder(cleanKey, cleanSecret, symbol, binanceSide, safeQty, safePrice);
     console.log(`[autoBot] Binance entry executed | ${symbol} ${binanceSide} qty=${safeQty} price=${safePrice}`);
+    const fundingTimeMs = parseFloat(nextFundingTime) || 0;
+    if (fundingTimeMs > 0) {
+      updateTradeHistoryBinanceEntry(userId, symbol, fundingTimeMs, {
+        orderId,
+        execPrice: safePrice,
+        execQty: safeQty,
+        executedAtMs: Date.now(),
+      }).catch((err) => console.error('[autoBot] updateTradeHistoryBinanceEntry failed', err));
+    }
     const cycleKey = entryCycleKey(userId, symbol, nextFundingTime);
     const existing = entryTimeoutByCycle.get(cycleKey);
     if (existing && typeof existing === 'object' && existing.binance) {
@@ -2634,33 +2645,39 @@ async function processUser(
           setLeverage(subKeys.subApiKey, subKeys.subApiSecret, topToken.symbol, leverageForEntry).catch(() => {});
         }
         const scheduleNow = Date.now();
-        const delayMain = targetTime - scheduleNow - mainOffset;
-        const tMain = setTimeout(() => {
-          executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'main', passedData).catch((e) =>
-            console.error('[autoBot] executeEntry main failed', e)
-          );
-        }, Math.max(0, delayMain));
+        const offsetMs = mainOffset;
+        const delayMs = Math.max(0, targetTime - scheduleNow - offsetMs);
         if (hedgeMode && subKeys) {
-          const delaySub = targetTime - scheduleNow - subEntryOffsetMs;
+          const tMain = setTimeout(() => {
+            executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'main', passedData).catch((e) =>
+              console.error('[autoBot] executeEntry main failed', e)
+            );
+          }, Math.max(0, delayMs));
+          const delaySub = Math.max(0, targetTime - scheduleNow - subEntryOffsetMs);
           const tSub = setTimeout(() => {
             executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'sub', passedData).catch((e) =>
               console.error('[autoBot] executeEntry sub failed', e)
             );
-          }, Math.max(0, delaySub));
-          console.log(`[autoBot] Sub-hedge entry scheduled: main in ${delayMain}ms, sub in ${delaySub}ms.`);
+          }, delaySub);
+          console.log(`[autoBot] Sub-hedge entry scheduled: main in ${delayMs}ms, sub in ${delaySub}ms.`);
           entryTimeoutByCycle.set(cycleKey, { main: tMain, sub: tSub });
         } else if (settings.crossExchangeMode && passedData?.candidate?.fixedQty != null) {
-          const binanceEntryOffsetMs = settings.binanceEntryOffsetMs ?? 0;
-          const delayBinance = targetTime - scheduleNow - binanceEntryOffsetMs;
-          const tBinance = setTimeout(() => {
-            executeBinanceEntry(userId, topToken.symbol, topToken.nextFundingTime, passedData).catch((e) =>
-              console.error('[autoBot] executeBinanceEntry failed', e)
-            );
-          }, Math.max(0, delayBinance));
-          console.log(`[autoBot] Cross-exchange entry scheduled: Main in ${delayMain}ms, Binance in ${delayBinance}ms.`);
-          entryTimeoutByCycle.set(cycleKey, { main: tMain, binance: tBinance });
+          const tBoth = setTimeout(() => {
+            console.log(`[autoBot] Firing simultaneous Cross-Exchange entry at offset ${offsetMs}ms`);
+            Promise.all([
+              executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'main', passedData),
+              executeBinanceEntry(userId, topToken.symbol, topToken.nextFundingTime, passedData),
+            ]).catch((e) => console.error('[autoBot] Cross-Exchange Entry Error:', e));
+          }, delayMs);
+          console.log(`[autoBot] Cross-exchange entry scheduled: both legs in ${delayMs}ms (simultaneous).`);
+          entryTimeoutByCycle.set(cycleKey, { main: tBoth, binance: tBoth });
         } else {
-          console.log(`[autoBot] Entry scheduled for Main (hedge_mode: false) in ${delayMain}ms.`);
+          const tMain = setTimeout(() => {
+            executeEntry(userId, topToken.symbol, topToken.nextFundingTime, 'main', passedData).catch((e) =>
+              console.error('[autoBot] executeEntry main failed', e)
+            );
+          }, delayMs);
+          console.log(`[autoBot] Entry scheduled for Main (hedge_mode: false) in ${delayMs}ms.`);
           entryTimeoutByCycle.set(cycleKey, tMain);
         }
         return;

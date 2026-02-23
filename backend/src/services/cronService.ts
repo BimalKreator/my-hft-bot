@@ -4,7 +4,7 @@ import { getExchangeKeys, getSubAccountKeys } from '../models/exchangeModel.js';
 import { getSettings } from '../models/settingsModel.js';
 import { decrypt } from '../utils/encryption.js';
 import { getWalletBalance } from './bybitService.js';
-import { getBinanceAvailableBalance } from './binanceService.js';
+import { getBinanceEquity } from './binanceService.js';
 
 /** Same as statsService: used for Closing Balance = BASE_CAPITAL + wallet equity. */
 const BASE_CAPITAL = 3000;
@@ -79,7 +79,7 @@ async function runDailySnapshot(): Promise<void> {
       let binanceBalance = 0;
       if (crossExchangeMode && settings.binanceApiKey && settings.binanceApiSecret) {
         try {
-          binanceBalance = await getBinanceAvailableBalance(decrypt(settings.binanceApiKey), decrypt(settings.binanceApiSecret));
+          binanceBalance = await getBinanceEquity(decrypt(settings.binanceApiKey), decrypt(settings.binanceApiSecret));
           lastBinanceBalanceByUser.set(userId, binanceBalance);
         } catch (err) {
           const fallback = lastBinanceBalanceByUser.get(userId);
