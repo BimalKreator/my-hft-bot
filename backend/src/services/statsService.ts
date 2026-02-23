@@ -110,7 +110,7 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
     }
     try {
       binanceBalance = await getBinanceAvailableBalance(binanceApiKey, binanceApiSecret);
-      console.log('[statsService] Binance Balance API Result:', binanceBalance);
+      // console.log('[statsService] Binance Balance API Result:', binanceBalance);
     } catch (err) {
       console.warn('[stats] Binance balance fetch failed', err instanceof Error ? err.message : String(err));
       binanceBalance = 0;
@@ -120,11 +120,11 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
   /** Combined capital: cross-exchange = base + main + binance; else base + main + sub. */
   const walletBalance = isCrossExchange ? mainEquity + binanceBalance : mainEquity + subEquity;
   const capital = BASE_CAPITAL + walletBalance;
-  if (isCrossExchange) {
-    console.log('[statsService] Capital (cross-exchange):', { mainEquity, binanceBalance, walletBalance, capital });
-  } else if (subHedgingActive && (subEquity > 0 || mainEquity > 0)) {
-    console.log('[statsService] Capital (main+sub):', { mainEquity, subEquity, walletBalance, capital });
-  }
+  // if (isCrossExchange) {
+  //   console.log('[statsService] Capital (cross-exchange):', { mainEquity, binanceBalance, walletBalance, capital });
+  // } else if (subHedgingActive && (subEquity > 0 || mainEquity > 0)) {
+  //   console.log('[statsService] Capital (main+sub):', { mainEquity, subEquity, walletBalance, capital });
+  // }
 
   /** Margin Used = actual initial margin from Bybit (totalInitialMargin). Main + Sub when hedging. Not equity. */
   const marginUsed = Math.max(0, (parseFloat(balance.totalInitialMargin ?? '0') || 0) + subInitialMargin);

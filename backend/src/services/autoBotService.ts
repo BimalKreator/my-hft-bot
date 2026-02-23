@@ -59,6 +59,16 @@ function tryDecrypt(val: string | undefined | null): string {
   }
 }
 
+/** Round qty to 1 decimal to avoid Binance "Precision is over the maximum" rejection; use same for Bybit in cross-exchange. */
+function safeBinanceQty(qty: number): number {
+  return Math.floor(Number(qty) * 10) / 10;
+}
+
+/** Round price to 5 decimals for Binance API. */
+function safeBinancePrice(price: number): string {
+  return Number(price).toFixed(5);
+}
+
 const INTERVAL_MS = 5_000;
 const ENTRY_FAST_INTERVAL_MS = 500; // when countdown <= 15s (zero latency in final seconds)
 const EXIT_INTERVAL_MS = 2_000; // Fallback if WebSocket settlement event doesn't fire
@@ -1576,8 +1586,10 @@ async function executeBinanceEntry(
     const slippagePct = passedData?.prep?.settings.slippageBufferPct ?? settings.slippageBufferPct ?? 2;
     const mult = binanceSide === 'BUY' ? 1 + slippagePct / 100 : 1 - slippagePct / 100;
     const price = markPrice * mult;
-    await placeBinanceOrder(cleanKey, cleanSecret, symbol, binanceSide, qty, price);
-    console.log(`[autoBot] Binance entry executed | ${symbol} ${binanceSide} qty=${qty} price=${price.toFixed(4)}`);
+    const safeQty = safeBinanceQty(qty);
+    const safePriceStr = safeBinancePrice(price);
+    await placeBinanceOrder(cleanKey, cleanSecret, symbol, binanceSide, safeQty, parseFloat(safePriceStr));
+    console.log(`[autoBot] Binance entry executed | ${symbol} ${binanceSide} qty=${safeQty} price=${safePriceStr}`);
     const cycleKey = entryCycleKey(userId, symbol, nextFundingTime);
     const existing = entryTimeoutByCycle.get(cycleKey);
     if (existing && typeof existing === 'object' && existing.binance) {
@@ -1744,7 +1756,7 @@ async function executeEntry(
       return;
     }
     const tickSize = c.tickSize ?? '0.01';
-    const finalQty = c.fixedQty!;
+    const finalQty = safeBinanceQty(c.fixedQty!);
     const qtyStr = formatQtyToStep(finalQty, String(c.qtyStep));
     if (parseFloat(qtyStr) <= 0) {
       console.log('[ABORT] executeEntry stopped at sub hedge qty zero or negative');
@@ -1857,6 +1869,7 @@ async function executeEntry(
       console.log('[ABORT] executeEntry stopped at main prep final qty below min order qty');
       return;
     }
+    finalQty = safeBinanceQty(finalQty);
     if (!isMainHedge) {
       processedTokens.add(procKey);
       enteredThisCycle.add(cycleKey);
@@ -1980,6 +1993,7 @@ async function executeEntry(
       console.log('[ABORT] executeEntry stopped at fallback final qty below min');
       return;
     }
+    finalQty = safeBinanceQty(finalQty);
     processedTokens.add(procKey);
     enteredThisCycle.add(cycleKey);
     let remainingQty = finalQty;
