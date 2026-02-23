@@ -1586,7 +1586,13 @@ async function verifyCrossExchangeFill(userId: number, symbol: string): Promise<
       }
     } else if (binanceSize > 0 && bybitSize === 0) {
       console.log('[autoBot] Orphan detected in Cross-Exchange. Instantly closing Binance via MARKET.');
-      await closeBinancePositionWithRetry(binanceApiKey, binanceApiSecret, symbol, lastBinanceData.positionAmt, 'MARKET');
+      const binancePosAmt = Number(lastBinanceData.positionAmt ?? 0);
+      await closeBinancePositionWithRetry(binanceApiKey, binanceApiSecret, symbol, binancePosAmt, 'MARKET');
+      const binanceDir: 'Buy' | 'Sell' = binancePosAmt > 0 ? 'Buy' : 'Sell';
+      const binanceQty = Math.abs(binancePosAmt);
+      await saveClosedTrade(userId, symbol, binanceDir, binanceQty, 0, 'Orphan Exit', 0, 'Binance').catch((e) =>
+        console.error(`[autoBot] saveClosedTrade (Binance orphan) failed ${symbol}:`, e)
+      );
     }
   } catch (e) {
     console.error(`[autoBot] verifyCrossExchangeFill ${symbol} failed:`, e);

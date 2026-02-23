@@ -10,13 +10,13 @@ import {
   getClosedPnl,
   getWalletBalance,
 } from '../services/bybitService.js';
-import { getBinanceSymbol, getBinanceAvailableBalance, placeBinanceOrder } from '../services/binanceService.js';
+import { getBinanceSymbol, getBinanceAvailableBalance, placeBinanceOrder, getBinancePositions, closeBinancePosition } from '../services/binanceService.js';
 import { FundingScanner } from '../services/scannerService.js';
 import { getCrossExchangeFundingData } from '../services/marketService.js';
 import { getEnrichedPositions } from '../services/vwapService.js';
 import { getLastEntryReport } from '../services/autoBotService.js';
 import { AuthRequest } from '../middleware/authMiddleware.js';
-import { insertClosedTrade, getClosedTrades } from '../models/closedTradesModel.js';
+import { insertClosedTrade, saveClosedTrade, getClosedTrades } from '../models/closedTradesModel.js';
 import { getTradeHistoryByUserId } from '../models/tradeHistoryModel.js';
 import { getSettings } from '../models/settingsModel.js';
 
@@ -269,6 +269,106 @@ export async function closePosition(
       return;
     }
 
+    const settings = await getSettings(userId);
+    const isCrossExchange = !useSubAccount && !!(
+      settings.crossExchangeMode &&
+      settings.binanceApiKey &&
+      settings.binanceApiSecret
+    );
+
+    if (isCrossExchange) {
+      const keys = await getExchangeKeys(userId, 'Bybit');
+      if (!keys) {
+        res.status(404).json({ error: 'No Bybit keys found.' });
+        return;
+      }
+      const bybitKey = decrypt(keys.api_key);
+      const bybitSecret = decrypt(keys.api_secret);
+      const binanceKey = decrypt(settings.binanceApiKey!);
+      const binanceSecret = decrypt(settings.binanceApiSecret!);
+      const [bybitPositions, binancePos] = await Promise.all([
+        getPositionList(bybitKey, bybitSecret, { category: 'linear', settleCoin: 'USDT' }),
+        getBinancePositions(binanceKey, binanceSecret, symbol),
+      ]);
+      const bybitPos = bybitPositions.find((p) => p.symbol === symbol && parseFloat(p.size) > 0);
+      const bybitSize = bybitPos ? parseFloat(bybitPos.size) || 0 : 0;
+      const binanceAmt = binancePos ? Number(binancePos.positionAmt ?? 0) : 0;
+      const binanceSize = Math.abs(binanceAmt);
+
+      if (bybitSize > 0 && binanceSize > 0) {
+        console.log(`[API] Manual close closing BOTH legs for ${symbol}`);
+        await Promise.all([
+          placeMarketOrderReduceOnly(bybitKey, bybitSecret, symbol, bybitPos!.side, bybitPos!.size),
+          closeBinancePosition(binanceKey, binanceSecret, symbol, binanceAmt, 'MARKET'),
+        ]);
+        await new Promise((r) => setTimeout(r, 2000));
+        let exitPrice = 0;
+        let fees = 0;
+        let grossPnl: number;
+        let exactNetPnl: number | undefined;
+        const entryPrice = parseFloat(bybitPos!.avgPrice) || 0;
+        const qtyNum = bybitSize;
+        try {
+          const closedList = await getClosedPnl(bybitKey, bybitSecret, 'linear', symbol, 50);
+          const nowMs = Date.now();
+          const recent = closedList.filter((row) => {
+            const ut = parseInt(row.updatedTime, 10) || 0;
+            return ut >= nowMs - 15_000 && ut <= nowMs + 1000;
+          });
+          if (recent.length > 0) {
+            const sumClosedPnl = recent.reduce((s, r) => s + (parseFloat(r.closedPnl) || 0), 0);
+            const exactTotalFee = recent.reduce((s, r) => s + (parseFloat(r.openFee) || 0) + (parseFloat(r.closeFee) || 0), 0);
+            exactNetPnl = sumClosedPnl + fundingReceived;
+            fees = exactTotalFee;
+            grossPnl = (exactNetPnl ?? 0) + exactTotalFee - fundingReceived;
+            const avgExit = recent[0]!.avgExitPrice;
+            if (avgExit) exitPrice = parseFloat(avgExit) || 0;
+          } else {
+            grossPnl = 0;
+            exitPrice = entryPrice;
+          }
+        } catch {
+          grossPnl = 0;
+          exitPrice = entryPrice;
+        }
+        const entryPriceStored = Number(entryPrice.toFixed(6));
+        const exitPriceStored = Number(exitPrice.toFixed(6));
+        await insertClosedTrade({
+          userId,
+          symbol,
+          side: bybitPos!.side,
+          entryPrice: entryPriceStored,
+          exitPrice: exitPriceStored,
+          qty: qtyNum,
+          grossPnl,
+          funding: fundingReceived,
+          fees,
+          ...(exactNetPnl != null && { netPnl: exactNetPnl }),
+          source: 'manual',
+          exitReason,
+          exchange: 'Bybit Main',
+        });
+        const binanceDir: 'Buy' | 'Sell' = binanceAmt > 0 ? 'Buy' : 'Sell';
+        await saveClosedTrade(userId, symbol, binanceDir, Math.abs(binanceAmt), 0, exitReason, 0, 'Binance');
+        res.status(200).json({ ok: true, message: 'Both legs closed (Bybit + Binance).' });
+        return;
+      }
+
+      if (bybitSize === 0 && binanceSize > 0) {
+        await closeBinancePosition(binanceKey, binanceSecret, symbol, binanceAmt, 'MARKET');
+        const binanceDir: 'Buy' | 'Sell' = binanceAmt > 0 ? 'Buy' : 'Sell';
+        await saveClosedTrade(userId, symbol, binanceDir, Math.abs(binanceAmt), 0, exitReason, 0, 'Binance');
+        res.status(200).json({ ok: true, message: 'Binance leg closed (no Bybit position).' });
+        return;
+      }
+
+      if (bybitSize === 0 && binanceSize === 0) {
+        res.status(400).json({ error: `No open position for ${symbol} on Bybit or Binance.` });
+        return;
+      }
+      // Only Bybit has position — fall through to single Bybit close using main keys below
+    }
+
     let apiKey: string;
     let apiSecret: string;
     if (useSubAccount) {
@@ -290,6 +390,7 @@ export async function closePosition(
       apiKey = decrypt(keys.api_key);
       apiSecret = decrypt(keys.api_secret);
     }
+    // When cross-exchange and only Bybit had position, we already validated; keys above are main Bybit
 
     const qtyStr = typeof qtyVal === 'number' ? String(qtyVal) : String(qtyVal);
     const qtyNum = typeof qtyVal === 'number' ? qtyVal : parseFloat(String(qtyVal));

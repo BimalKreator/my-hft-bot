@@ -91,6 +91,14 @@ function buildQuery(params: {
 
 const ITEMS_PER_PAGE = 15;
 
+/** Safe timestamp in ms for sorting/grouping; returns 0 if closed_at/exit_time is null or invalid. */
+function safeTimeMs(r: ClosedTradeRow): number {
+  const raw = r.closed_at || (r as { exit_time?: string }).exit_time;
+  if (raw == null || raw === '') return 0;
+  const ms = new Date(raw).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
+
 type GroupedItem = { isGroup: boolean; trades: ClosedTradeRow[] };
 
 export default function ClosedTradesTable() {
@@ -166,8 +174,12 @@ export default function ClosedTradesTable() {
   }, [fetchHistory]);
 
   const sortedRows = useMemo(() => {
-    const key = (r: ClosedTradeRow) => new Date((r.closed_at || (r as { exit_time?: string }).exit_time) || 0).getTime();
-    return [...rows].sort((a, b) => key(b) - key(a));
+    return [...rows].sort((a, b) => {
+      const symA = a.symbol || (a as { token?: string }).token || '';
+      const symB = b.symbol || (b as { token?: string }).token || '';
+      if (symA !== symB) return symA.localeCompare(symB);
+      return safeTimeMs(b) - safeTimeMs(a);
+    });
   }, [rows]);
 
   const groupedTrades = useMemo((): GroupedItem[] => {
@@ -180,13 +192,11 @@ export default function ClosedTradesTable() {
       }
       const current = sortedRows[i]!;
       const next = sortedRows[i + 1];
-      const currentTime = new Date(current.closed_at).getTime();
-      const nextTime = next ? new Date(next.closed_at).getTime() : 0;
-      if (
-        next &&
-        (current.symbol || (current as { token?: string }).token) === (next.symbol || (next as { token?: string }).token) &&
-        Math.abs(currentTime - nextTime) < GROUP_WINDOW_MS
-      ) {
+      const currentTime = safeTimeMs(current);
+      const nextTime = next ? safeTimeMs(next) : 0;
+      const sameSymbol = (current.symbol || (current as { token?: string }).token) === (next?.symbol || (next as { token?: string } | undefined)?.token);
+      const withinWindow = currentTime > 0 && nextTime > 0 && Math.abs(currentTime - nextTime) < GROUP_WINDOW_MS;
+      if (next && sameSymbol && withinWindow) {
         groups.push({ isGroup: true, trades: [current, next] });
         skipNext = true;
       } else {
