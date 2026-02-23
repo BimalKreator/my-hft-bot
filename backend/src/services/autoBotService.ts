@@ -1256,17 +1256,23 @@ async function monitorExits(): Promise<void> {
               await runCrossExchangeExit('Cross-Exchange Exit (SL/Breakeven)', true);
               continue;
             }
-            // Funding reversal: 10 mins before next funding, if net funding has reversed against us, exit both via IOC
+            // Funding reversal: 10 mins before next funding, only exit if we have valid Binance rate and yield has truly gone negative
             const symbolMarket = marketData.find((m) => m.symbol === pos.symbol);
             const nextFundingTimeMs = symbolMarket ? parseInt(symbolMarket.nextFundingTime, 10) || 0 : 0;
             const msUntilNextFunding = nextFundingTimeMs - now;
             const TEN_MIN_MS = 10 * 60 * 1000;
             if (nextFundingTimeMs > 0 && msUntilNextFunding > 0 && msUntilNextFunding <= TEN_MIN_MS) {
-              const earnedRate = pos.side === 'Buy' ? currentBinanceFR - currentBybitFR : currentBybitFR - currentBinanceFR;
-              if (earnedRate < 0) {
-                console.log('[autoBot] Funding reversed 10 mins before snapshot. Exiting Cross-Exchange via IOC.');
-                await runCrossExchangeExit('Cross-Exchange Exit (SL/Breakeven)', true);
-                continue;
+              const isBybitLong = pos.side === 'Buy';
+              const bybitFR = Number(fundingRate ?? 0);
+              const binanceData = getBinanceSymbol(pos.symbol);
+              const binanceFR = binanceData != null && binanceData.fundingRate !== undefined ? Number(binanceData.fundingRate) : null;
+              if (binanceFR !== null) {
+                const currentYield = isBybitLong ? binanceFR - bybitFR : bybitFR - binanceFR;
+                if (currentYield < 0) {
+                  console.log(`[autoBot] True Funding reversed for ${pos.symbol}. Yield: ${currentYield}. Exiting Cross-Exchange via IOC.`);
+                  await runCrossExchangeExit('Cross-Exchange Exit (SL/Breakeven)', true);
+                  continue;
+                }
               }
             }
             continue;
