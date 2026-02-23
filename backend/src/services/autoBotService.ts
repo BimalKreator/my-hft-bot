@@ -30,6 +30,7 @@ import {
   setTradingStop,
 } from './bybitService.js';
 import type { OrderbookResult } from './bybitService.js';
+import type { MarketTicker } from '../models/marketModel.js';
 import { FundingScanner } from './scannerService.js';
 import {
   getBinanceAvailableBalance,
@@ -689,7 +690,7 @@ async function runTick(): Promise<number> {
   }
   try {
     const now = Date.now();
-    let marketData: Array<{ symbol: string; fundingRate: number; nextFundingTime: string; countdownMs: number; markPrice?: string; lastPrice?: string; fundingIntervalHours?: number; binanceFundingRate?: number }>;
+    let marketData: MarketTicker[];
 
     if (isManualMockActive && manualMockFundingTimeMs != null && manualMockEndMs != null && now < manualMockEndMs) {
       try {
@@ -1792,7 +1793,7 @@ async function executeEntry(
  */
 async function processUserCritical(
   userId: number,
-  marketData: Array<{ symbol: string; fundingRate: number; nextFundingTime: string; countdownMs: number }>,
+  marketData: MarketTicker[],
   now: number
 ): Promise<void> {
   const prep = entryPrepCacheByUser.get(userId);
@@ -1832,15 +1833,7 @@ async function processUserCritical(
 
 async function processUser(
   userId: number,
-  marketData: Array<{
-    symbol: string;
-    fundingRate: number;
-    nextFundingTime: string;
-    countdownMs: number;
-    markPrice: string;
-    lastPrice: string;
-    fundingIntervalHours?: number;
-  }>,
+  marketData: MarketTicker[],
   now: number
 ): Promise<void> {
   const globalMinCountdownSec =

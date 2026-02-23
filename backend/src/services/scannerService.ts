@@ -27,6 +27,10 @@ export interface FundingDataItem {
   binanceFundingRate?: number;
   /** Cross-exchange: Binance funding interval in hours. */
   binanceIntervalHours?: number;
+  /** Cross-exchange: Binance mark price. */
+  binanceMarkPrice?: number;
+  /** Cross-exchange: Binance next funding time (ms). */
+  binanceNextFundingTime?: number;
   /** Cross-exchange: |binanceFundingRate - fundingRate|. */
   netSpread?: number;
   /** Cross-exchange: "Short Binance / Long Bybit" or "Short Bybit / Long Binance". */
@@ -163,6 +167,8 @@ export class FundingScanner {
         ...row,
         binanceFundingRate: binance.fundingRate,
         binanceIntervalHours: binance.fundingIntervalHours,
+        binanceMarkPrice: parseFloat(binance.markPrice) || undefined,
+        binanceNextFundingTime: binance.nextFundingTime || undefined,
         netSpread,
         hedgeDirection,
       });
