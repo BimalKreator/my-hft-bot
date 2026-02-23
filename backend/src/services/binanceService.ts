@@ -211,6 +211,106 @@ export async function getBinanceAvailableBalance(apiKey: string, apiSecret: stri
   return value;
 }
 
+/** Position risk row from GET /fapi/v2/positionRisk (one-way mode). */
+export interface BinancePositionRisk {
+  positionAmt: number;
+  unRealizedProfit: number;
+  entryPrice: number;
+}
+
+/**
+ * Fetch open position for a symbol from Binance Futures (USDT-M).
+ * Returns null if no open position or symbol not found.
+ */
+export async function getBinancePositions(
+  apiKey: string,
+  apiSecret: string,
+  symbol: string
+): Promise<BinancePositionRisk | null> {
+  const all = await getBinanceAllPositions(apiKey, apiSecret);
+  return all.find((p) => p.symbol === symbol) ?? null;
+}
+
+/** One position from getBinanceAllPositions (includes symbol). */
+export interface BinancePositionRiskWithSymbol extends BinancePositionRisk {
+  symbol: string;
+}
+
+/**
+ * Fetch all open positions from Binance Futures (USDT-M) with positionAmt !== 0.
+ */
+export async function getBinanceAllPositions(
+  apiKey: string,
+  apiSecret: string
+): Promise<BinancePositionRiskWithSymbol[]> {
+  const raw = await binanceSignedRequest(apiKey, apiSecret, 'GET', '/fapi/v2/positionRisk', {});
+  const list = Array.isArray(raw) ? raw : (raw as { positions?: unknown[] }).positions;
+  if (!Array.isArray(list)) return [];
+  const out: BinancePositionRiskWithSymbol[] = [];
+  for (const row of list as Array<{ symbol?: string; positionAmt?: string; unRealizedProfit?: string; entryPrice?: string }>) {
+    const symbol = row.symbol ?? '';
+    if (!symbol) continue;
+    const amt = parseFloat(row.positionAmt ?? '0') || 0;
+    if (amt === 0) continue;
+    out.push({
+      symbol,
+      positionAmt: amt,
+      unRealizedProfit: parseFloat(row.unRealizedProfit ?? '0') || 0,
+      entryPrice: parseFloat(row.entryPrice ?? '0') || 0,
+    });
+  }
+  return out;
+}
+
+const CROSS_EXCHANGE_IOC_SLIPPAGE_PCT = 3; // 2–4% worse price to ensure fill
+
+/**
+ * Close an open Binance Futures position.
+ * currentPositionAmt: from getBinancePositions (positive = long, negative = short).
+ * Long → SELL to close; Short → BUY to close.
+ * @param orderType - 'MARKET' (default): market reduce-only. 'IOC': limit IOC with mark price ± slippage (2–4%) to ensure fill.
+ */
+export async function closeBinancePosition(
+  apiKey: string,
+  apiSecret: string,
+  symbol: string,
+  currentPositionAmt: number,
+  orderType: 'MARKET' | 'IOC' = 'MARKET'
+): Promise<{ orderId: number }> {
+  const absQty = Math.abs(currentPositionAmt);
+  if (absQty <= 0) throw new Error('closeBinancePosition: positionAmt is zero');
+  const side: 'BUY' | 'SELL' = currentPositionAmt > 0 ? 'SELL' : 'BUY';
+
+  if (orderType === 'IOC') {
+    let binanceData = getBinanceSymbol(symbol);
+    if (!binanceData) await getBinanceDataMap();
+    binanceData = getBinanceSymbol(symbol);
+    const markPrice = binanceData ? parseFloat(binanceData.markPrice) : 0;
+    if (!Number.isFinite(markPrice) || markPrice <= 0) throw new Error('closeBinancePosition IOC: no mark price');
+    const slippage = CROSS_EXCHANGE_IOC_SLIPPAGE_PCT / 100;
+    const price = side === 'SELL' ? markPrice * (1 - slippage) : markPrice * (1 + slippage);
+    const data = (await binanceSignedRequest(apiKey, apiSecret, 'POST', '/fapi/v1/order', {
+      symbol,
+      side,
+      type: 'LIMIT',
+      timeInForce: 'IOC',
+      quantity: String(absQty),
+      price: String(price),
+      reduceOnly: 'true',
+    })) as { orderId: number };
+    return { orderId: data.orderId };
+  }
+
+  const data = (await binanceSignedRequest(apiKey, apiSecret, 'POST', '/fapi/v1/order', {
+    symbol,
+    side,
+    type: 'MARKET',
+    quantity: String(absQty),
+    reduceOnly: 'true',
+  })) as { orderId: number };
+  return { orderId: data.orderId };
+}
+
 /**
  * Place a LIMIT IOC order on Binance Futures. Optimized for 5–10ms latency (keepAlive + built-in crypto).
  * @returns orderId (number)

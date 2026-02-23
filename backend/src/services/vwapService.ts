@@ -1,9 +1,11 @@
 import { getOrderbook, getOrderBookDepth, ORDERBOOK_DEPTH_BEST } from './bybitService.js';
 import { getPositionList, type LinearPosition } from './bybitService.js';
 import { getExchangeKeys, getSubAccountKeys } from '../models/exchangeModel.js';
+import { getSettings } from '../models/settingsModel.js';
 import { decrypt } from '../utils/encryption.js';
 import { FundingScanner } from './scannerService.js';
 import { getHedgeGroupByPosition } from '../models/hedgeGroupModel.js';
+import { getBinanceAllPositions, getBinanceSymbol } from './binanceService.js';
 
 const ORDERBOOK_DEPTH = 50;
 const LIQUIDITY_MULTIPLIER = 1.2;
@@ -49,6 +51,8 @@ export async function calculateVWAP(
 
 export type AccountType = 'main' | 'sub';
 
+export type ExchangeLabel = 'Bybit' | 'Binance';
+
 export interface EnrichedPosition extends LinearPosition {
   vwapPrice: number;
   pnl: number;
@@ -63,6 +67,10 @@ export interface EnrichedPosition extends LinearPosition {
   isPaired?: boolean;
   /** Set when subaccount hedging is enabled: which account this position belongs to */
   accountType?: AccountType;
+  /** Exchange this position belongs to (for cross-exchange and grouping) */
+  exchange?: ExchangeLabel;
+  /** True when cross-exchange funding spread has reversed against the open positions */
+  isFundingFlipped?: boolean;
 }
 
 /**
@@ -100,6 +108,20 @@ export async function getEnrichedPositions(userId: number): Promise<EnrichedPosi
 
   const enriched: EnrichedPosition[] = [];
 
+  let binancePositions: Awaited<ReturnType<typeof getBinanceAllPositions>> = [];
+  const settings = await getSettings(userId);
+  const crossExchangeMode = !!settings.crossExchangeMode && !!settings.binanceApiKey && !!settings.binanceApiSecret;
+  if (crossExchangeMode) {
+    try {
+      const binanceApiKey = decrypt(settings.binanceApiKey!);
+      const binanceApiSecret = decrypt(settings.binanceApiSecret!);
+      binancePositions = await getBinanceAllPositions(binanceApiKey, binanceApiSecret);
+    } catch (e) {
+      console.warn('[vwapService] Binance positions fetch failed:', e);
+    }
+  }
+  const binanceBySymbol = new Map(binancePositions.map((p) => [p.symbol, p]));
+
   async function enrichList(
     positions: LinearPosition[],
     accountType: AccountType,
@@ -109,6 +131,11 @@ export async function getEnrichedPositions(userId: number): Promise<EnrichedPosi
       const entry = parseFloat(pos.avgPrice) || 0;
       const qty = parseFloat(pos.size) || 0;
       const fundingRate = fundingBySymbol.get(pos.symbol) ?? 0;
+      const binancePos = binanceBySymbol.get(pos.symbol);
+      const bybitFR = fundingRate;
+      const binanceFR = getBinanceSymbol(pos.symbol)?.fundingRate ?? 0;
+      const fundingYield = pos.side === 'Buy' ? binanceFR - bybitFR : bybitFR - binanceFR;
+      const isFundingFlipped = !!binancePos && fundingYield < 0;
 
       const hedgeGroup = await getHedgeGroupByPosition(userId, pos.symbol, pos.side);
 
@@ -145,6 +172,8 @@ export async function getEnrichedPositions(userId: number): Promise<EnrichedPosi
         targetPrice,
         fundingRate,
         accountType,
+        exchange: 'Bybit',
+        ...(isFundingFlipped && { isFundingFlipped: true }),
         ...(hedgeGroup != null && {
           hedgeGroupId: hedgeGroup.hedgeGroupId,
           fundingAmountReceived: hedgeGroup.fundingAmountReceived,
@@ -159,6 +188,35 @@ export async function getEnrichedPositions(userId: number): Promise<EnrichedPosi
   await enrichList(mainPositions, 'main', { apiKey, apiSecret });
   if (subHedgingEnabled && subKeys) {
     await enrichList(subPositions, 'sub', { apiKey: subKeys.subApiKey, apiSecret: subKeys.subApiSecret });
+  }
+
+  for (const bp of binancePositions) {
+    const bybitFR = fundingBySymbol.get(bp.symbol) ?? 0;
+    const binanceFR = getBinanceSymbol(bp.symbol)?.fundingRate ?? 0;
+    const binanceSide: 'Buy' | 'Sell' = bp.positionAmt > 0 ? 'Buy' : 'Sell';
+    const fundingYield = binanceSide === 'Sell' ? binanceFR - bybitFR : bybitFR - binanceFR;
+    const isFundingFlipped = fundingYield < 0;
+    const markPrice = getBinanceSymbol(bp.symbol)?.markPrice ?? '';
+    const entry = bp.entryPrice;
+    const qty = Math.abs(bp.positionAmt);
+    const vwapPrice = markPrice ? parseFloat(markPrice) || 0 : 0;
+    const pnl = bp.unRealizedProfit;
+    const slPrice = binanceSide === 'Buy' ? entry * (1 - binanceFR) : entry * (1 + binanceFR);
+    const targetPrice = binanceSide === 'Buy' ? entry * (1 + binanceFR) : entry * (1 - binanceFR);
+    enriched.push({
+      symbol: bp.symbol,
+      side: binanceSide,
+      size: String(qty),
+      avgPrice: String(entry),
+      markPrice: markPrice || String(entry),
+      vwapPrice,
+      pnl,
+      slPrice,
+      targetPrice,
+      fundingRate: binanceFR,
+      exchange: 'Binance',
+      ...(isFundingFlipped && { isFundingFlipped: true }),
+    });
   }
 
   return enriched;

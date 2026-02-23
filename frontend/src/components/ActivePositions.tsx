@@ -4,6 +4,7 @@ const TOKEN_KEY = 'hft_token';
 const POLL_MS = 1000;
 
 export type AccountType = 'main' | 'sub';
+export type ExchangeLabel = 'Bybit' | 'Binance';
 
 export interface PositionRow {
   symbol: string;
@@ -23,6 +24,10 @@ export interface PositionRow {
   isPaired?: boolean;
   /** Sub-account hedging: which account this position belongs to */
   accountType?: AccountType;
+  /** Exchange this position belongs to (Bybit or Binance) */
+  exchange?: ExchangeLabel;
+  /** True when cross-exchange funding spread has reversed against the position */
+  isFundingFlipped?: boolean;
 }
 
 function tokenName(symbol: string | undefined | null): string {
@@ -82,6 +87,9 @@ function SubHedgeGroupCard({ symbol, positions, closingId, onCloseHedge, formatN
       <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
         <div className="flex flex-wrap items-center gap-3">
           <span className="font-semibold text-white">{tokenName(safeSymbol)}</span>
+          <span className="inline-block rounded px-1.5 py-0.5 text-xs font-medium" style={{ backgroundColor: 'rgba(0, 123, 255, 0.2)', color: '#007BFF' }}>
+            Bybit
+          </span>
           <span
             className="inline-block rounded px-2 py-0.5 text-xs font-semibold"
             style={
@@ -92,6 +100,11 @@ function SubHedgeGroupCard({ symbol, positions, closingId, onCloseHedge, formatN
           >
             {direction} / Sub-hedge
           </span>
+          {safePositions.some((p) => p?.isFundingFlipped) && (
+            <span className="rounded px-2 py-0.5 text-xs font-semibold bg-red-500/20 text-red-400 border border-red-500/40">
+              Funding Flip
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-3">
           <div className="text-right">
@@ -169,6 +182,12 @@ function HedgeCard({ pos, combinedPnl, spotPnl, funding, closingId, onExit, form
         <div className="flex flex-wrap items-center gap-3">
           <span className="font-semibold text-white">{tokenName(pos.symbol)}</span>
           <span
+            className="inline-block rounded px-1.5 py-0.5 text-xs font-medium"
+            style={pos.exchange === 'Binance' ? { backgroundColor: 'rgba(234, 179, 8, 0.25)', color: '#eab308' } : { backgroundColor: 'rgba(0, 123, 255, 0.2)', color: '#007BFF' }}
+          >
+            {pos.exchange === 'Binance' ? 'Binance' : 'Bybit'}
+          </span>
+          <span
             className="inline-block rounded px-2 py-0.5 text-xs font-semibold"
             style={
               direction === 'LONG'
@@ -178,6 +197,11 @@ function HedgeCard({ pos, combinedPnl, spotPnl, funding, closingId, onExit, form
           >
             {direction} / Spot hedge
           </span>
+          {pos.isFundingFlipped && (
+            <span className="rounded px-2 py-0.5 text-xs font-semibold bg-red-500/20 text-red-400 border border-red-500/40">
+              Funding Flip
+            </span>
+          )}
           <span
             className="rounded px-2 py-0.5 text-xs font-medium"
             style={{ backgroundColor: 'rgba(234, 179, 8, 0.2)', color: '#eab308' }}
@@ -279,7 +303,6 @@ export default function ActivePositions() {
   }, [fetchPositions]);
 
   const activePositions = Array.isArray(positions) ? positions : [];
-  console.log('Positions received:', positions);
 
   const { subHedgeGroups, standalone } = useMemo(() => {
     const bySymbol = new Map<string, PositionRow[]>();
@@ -468,7 +491,7 @@ export default function ActivePositions() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="text-left text-gray-400" style={{ backgroundColor: 'rgba(0, 0, 0, 0.2)' }}>
-                    <th className="px-4 py-2.5 font-medium">Token</th>
+                    <th className="px-4 py-2.5 font-medium">Token / Exchange</th>
                     <th className="px-4 py-2.5 font-medium">Direction</th>
                     <th className="px-4 py-2.5 font-medium">Entry</th>
                     <th className="px-4 py-2.5 font-medium">Trade Amount</th>
@@ -504,7 +527,24 @@ export default function ActivePositions() {
                           style={{ borderColor: 'rgba(255,255,255,0.06)' }}
                         >
                           <td className="px-4 py-2.5 font-medium text-white">
-                            {tokenName(pos.symbol ?? '')}
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span>{tokenName(pos.symbol ?? '')}</span>
+                              <span
+                                className="inline-block rounded px-1.5 py-0.5 text-xs font-medium opacity-90"
+                                style={
+                                  pos.exchange === 'Binance'
+                                    ? { backgroundColor: 'rgba(234, 179, 8, 0.25)', color: '#eab308' }
+                                    : { backgroundColor: 'rgba(0, 123, 255, 0.2)', color: '#007BFF' }
+                                }
+                              >
+                                {pos.exchange === 'Binance' ? 'Binance' : 'Bybit'}
+                              </span>
+                              {pos.isFundingFlipped && (
+                                <span className="rounded px-2 py-0.5 text-xs font-semibold bg-red-500/20 text-red-400 border border-red-500/40">
+                                  Funding Flip
+                                </span>
+                              )}
+                            </div>
                           </td>
                           <td className="px-4 py-2.5">
                             <span

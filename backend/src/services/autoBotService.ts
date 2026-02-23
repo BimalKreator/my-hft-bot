@@ -35,6 +35,8 @@ import { FundingScanner } from './scannerService.js';
 import {
   getBinanceAvailableBalance,
   getBinanceSymbol,
+  getBinancePositions,
+  closeBinancePosition,
   placeBinanceOrder,
 } from './binanceService.js';
 import { insertClosedTrade } from '../models/closedTradesModel.js';
@@ -455,7 +457,7 @@ async function saveClosedTradeAfterExit(
   entryPrice: number,
   qty: number,
   orderIds: string | string[],
-  exitReason: 'Time Exit' | 'Stoploss Hit' | 'Pre-Funding Stoploss' | 'Post-Funding Stoploss' | 'Post-Funding Stoploss (L2 - 50% Funding)' | 'PnL Positive Exit' | 'Universal Stoploss' | 'Break-even' | 'Break-even (fallback)' | 'Next Trade Cleanup' | 'Post-Funding Profit' | '15m Pre-Next Funding' | 'Naked Mode Target Hit' | 'Naked Mode SL Hit',
+  exitReason: 'Time Exit' | 'Stoploss Hit' | 'Pre-Funding Stoploss' | 'Post-Funding Stoploss' | 'Post-Funding Stoploss (L2 - 50% Funding)' | 'PnL Positive Exit' | 'Universal Stoploss' | 'Break-even' | 'Break-even (fallback)' | 'Next Trade Cleanup' | 'Post-Funding Profit' | '15m Pre-Next Funding' | 'Naked Mode Target Hit' | 'Naked Mode SL Hit' | 'Cross-Exchange Exit (SL/Breakeven)' | 'Cross-Exchange Orphan Exit',
   fundingReceived: number = 0,
   estimatedExitPrice?: number,
   estimatedFeesWhenZero?: number
@@ -1093,6 +1095,112 @@ async function monitorExits(): Promise<void> {
             continue;
           }
 
+          // Cross-Exchange (Bybit + Binance): combined PnL exits and orphan fallback
+          if (settings.crossExchangeMode === true && settings.binanceApiKey && settings.binanceApiSecret) {
+            let binanceApiKey: string;
+            let binanceApiSecret: string;
+            try {
+              binanceApiKey = decrypt(settings.binanceApiKey);
+              binanceApiSecret = decrypt(settings.binanceApiSecret);
+            } catch {
+              continue;
+            }
+            let binancePosition: Awaited<ReturnType<typeof getBinancePositions>> = null;
+            try {
+              binancePosition = await getBinancePositions(binanceApiKey, binanceApiSecret, pos.symbol);
+            } catch (e) {
+              console.error(`[autoBot] getBinancePositions failed ${pos.symbol}:`, e);
+              continue;
+            }
+            // Orphan: Bybit filled but Binance position is 0 — immediately IOC exit Bybit (no fallback SL)
+            if (!binancePosition || binancePosition.positionAmt === 0) {
+              console.log('[autoBot] Orphan detected in Cross-Exchange. Instantly exiting the filled side via IOC.');
+              try {
+                const orderIds = await exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty);
+                positionFundingTime.delete(key);
+                if (orderIds.length > 0) {
+                  saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderIds, 'Cross-Exchange Orphan Exit', 0, exitPrice).catch((e) =>
+                    console.error(`[autoBot] saveClosedTradeAfterExit (orphan) failed ${pos.symbol}:`, e)
+                  );
+                }
+              } catch (e) {
+                console.error(`[autoBot] Cross-exchange orphan exit failed ${pos.symbol}:`, e);
+              }
+              continue;
+            }
+            const combinedPnL = pnl + binancePosition.unRealizedProfit;
+            const cache = walletCacheByUser.get(userId);
+            const totalCapital = cache
+              ? (cache.binanceAvailableBalance != null ? cache.totalEquity + cache.binanceAvailableBalance : cache.totalEquity)
+              : 0;
+            const universalStoplossAmount = totalCapital > 0 ? (totalCapital * universalStoplossPct) / 100 : 0;
+            const runCrossExchangeExit = async (exitReason: 'Cross-Exchange Exit (SL/Breakeven)', useIoc: boolean = false) => {
+              try {
+                const binanceOrderType = useIoc ? 'IOC' : 'MARKET';
+                const [mainOrderIds, _binanceClose] = await Promise.all([
+                  exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty),
+                  closeBinancePosition(binanceApiKey, binanceApiSecret, pos.symbol, binancePosition!.positionAmt, binanceOrderType),
+                ]);
+                positionFundingTime.delete(key);
+                if (mainOrderIds.length > 0) {
+                  saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, mainOrderIds, exitReason, 0, exitPrice).catch((e) =>
+                    console.error(`[autoBot] saveClosedTradeAfterExit (Bybit cross-exchange) failed ${pos.symbol}:`, e)
+                  );
+                }
+                const binanceSide: 'Buy' | 'Sell' = binancePosition!.positionAmt > 0 ? 'Buy' : 'Sell';
+                const binanceQty = Math.abs(binancePosition!.positionAmt);
+                const binanceEntry = binancePosition!.entryPrice;
+                insertClosedTrade({
+                  userId,
+                  symbol: pos.symbol,
+                  side: binanceSide,
+                  entryPrice: binanceEntry,
+                  exitPrice: binanceEntry,
+                  qty: binanceQty,
+                  grossPnl: binancePosition!.unRealizedProfit,
+                  funding: 0,
+                  fees: 0,
+                  source: 'auto',
+                  exitReason,
+                }).catch((e) => console.error(`[autoBot] insertClosedTrade (Binance cross-exchange) failed ${pos.symbol}:`, e));
+                console.log('[EXIT] Cross-Exchange Exit (SL/Breakeven) |', pos.symbol);
+                return true;
+              } catch (e) {
+                console.error(`[autoBot] Cross-exchange exit failed ${pos.symbol}:`, e);
+                return false;
+              }
+            };
+            // Universal Stoploss: always MARKET for both to guarantee emergency execution
+            if (combinedPnL <= -universalStoplossAmount && totalCapital > 0) {
+              await runCrossExchangeExit('Cross-Exchange Exit (SL/Breakeven)', false);
+              continue;
+            }
+            // Target: exit both via IOC when combined PnL >= (position value) * |binanceFR - bybitFR|
+            const binanceSymbolData = getBinanceSymbol(pos.symbol);
+            const currentBybitFR = fundingRate;
+            const currentBinanceFR = binanceSymbolData?.fundingRate ?? 0;
+            const positionValue = qty * entry;
+            const targetPnL = positionValue * Math.abs(currentBinanceFR - currentBybitFR);
+            if (combinedPnL >= targetPnL && targetPnL > 0) {
+              await runCrossExchangeExit('Cross-Exchange Exit (SL/Breakeven)', true);
+              continue;
+            }
+            // Funding reversal: 10 mins before next funding, if net funding has reversed against us, exit both via IOC
+            const symbolMarket = marketData.find((m) => m.symbol === pos.symbol);
+            const nextFundingTimeMs = symbolMarket ? parseInt(symbolMarket.nextFundingTime, 10) || 0 : 0;
+            const msUntilNextFunding = nextFundingTimeMs - now;
+            const TEN_MIN_MS = 10 * 60 * 1000;
+            if (nextFundingTimeMs > 0 && msUntilNextFunding > 0 && msUntilNextFunding <= TEN_MIN_MS) {
+              const earnedRate = pos.side === 'Buy' ? currentBinanceFR - currentBybitFR : currentBybitFR - currentBinanceFR;
+              if (earnedRate < 0) {
+                console.log('[autoBot] Funding reversed 10 mins before snapshot. Exiting Cross-Exchange via IOC.');
+                await runCrossExchangeExit('Cross-Exchange Exit (SL/Breakeven)', true);
+                continue;
+              }
+            }
+            continue;
+          }
+
           const hedgeGroup = await getHedgeGroupByPosition(userId, pos.symbol, pos.side);
 
           // Hedged position: live orderbook depth PnL, target/stoploss (dollar), timeout
@@ -1323,6 +1431,62 @@ type ExecuteEntryPrepData = { prep: EntryPrep; candidate: EntryPrepCandidate };
  * Execute Binance Futures LIMIT IOC order at scheduled time (cross-exchange mode).
  * Uses passedData.candidate.fixedQty and Bybit side to derive Binance side (opposite for hedge).
  */
+const ORPHAN_RETRY_COUNT = 5;
+const ORPHAN_RETRY_DELAY_MS = 1000;
+
+/** Orphan verification: poll both exchanges up to 5 times (1s apart). Only trigger IOC exit if the opposite exchange definitively has 0 position after all retries. */
+async function verifyCrossExchangeFill(userId: number, symbol: string): Promise<void> {
+  await new Promise((r) => setTimeout(r, 2000));
+  try {
+    const settings = await getSettings(userId);
+    if (!settings.crossExchangeMode || !settings.binanceApiKey || !settings.binanceApiSecret) return;
+    const keys = await getExchangeKeys(userId, 'Bybit');
+    if (!keys) return;
+    const bybitApiKey = decrypt(keys.api_key);
+    const bybitApiSecret = decrypt(keys.api_secret);
+    const binanceApiKey = decrypt(settings.binanceApiKey);
+    const binanceApiSecret = decrypt(settings.binanceApiSecret);
+
+    let bybitPos: Awaited<ReturnType<typeof getPositionList>>[number] | undefined;
+    let binancePosition: Awaited<ReturnType<typeof getBinancePositions>> = null;
+    for (let attempt = 1; attempt <= ORPHAN_RETRY_COUNT; attempt++) {
+      const [bybitPositions, binancePosResult] = await Promise.all([
+        getPositionList(bybitApiKey, bybitApiSecret, { category: 'linear', settleCoin: 'USDT' }),
+        getBinancePositions(binanceApiKey, binanceApiSecret, symbol),
+      ]);
+      bybitPos = bybitPositions.find((p) => p.symbol === symbol && parseFloat(p.size) > 0);
+      binancePosition = binancePosResult;
+      const bybitHas = !!bybitPos;
+      const binanceHas = !!binancePosition && binancePosition.positionAmt !== 0;
+      if (bybitHas && binanceHas) return;
+      if (attempt < ORPHAN_RETRY_COUNT) {
+        await new Promise((r) => setTimeout(r, ORPHAN_RETRY_DELAY_MS));
+      }
+    }
+
+    const bybitHasPosition = !!bybitPos;
+    const binanceHasPosition = !!binancePosition && binancePosition.positionAmt !== 0;
+    if (bybitHasPosition && !binanceHasPosition) {
+      console.log('[autoBot] Orphan detected in Cross-Exchange. Instantly exiting the filled side via IOC.');
+      const side = bybitPos!.side as 'Buy' | 'Sell';
+      const qty = parseFloat(bybitPos!.size) || 0;
+      const entry = parseFloat(bybitPos!.avgPrice) || 0;
+      const orderIds = await exitPositionWithIocSweep(bybitApiKey, bybitApiSecret, symbol, side, qty);
+      positionFundingTime.delete(positionKey(userId, symbol, side));
+      if (orderIds.length > 0) {
+        const ob = await getOrderBookDepth(bybitApiKey, bybitApiSecret, symbol, ORDERBOOK_DEPTH_BEST).catch(() => null);
+        const exitPrice = ob ? (side === 'Buy' ? ob.bidPrice : ob.askPrice) : entry;
+        await saveClosedTradeAfterExit(userId, bybitApiKey, bybitApiSecret, symbol, side, entry, qty, orderIds, 'Cross-Exchange Orphan Exit', 0, exitPrice);
+      }
+    } else if (binanceHasPosition && !bybitHasPosition) {
+      console.log('[autoBot] Orphan detected in Cross-Exchange. Instantly exiting the filled side via IOC.');
+      await closeBinancePosition(binanceApiKey, binanceApiSecret, symbol, binancePosition!.positionAmt, 'IOC');
+    }
+  } catch (e) {
+    console.error(`[autoBot] verifyCrossExchangeFill ${symbol} failed:`, e);
+  }
+}
+
 async function executeBinanceEntry(
   userId: number,
   symbol: string,
@@ -1352,6 +1516,7 @@ async function executeBinanceEntry(
     if (existing && typeof existing === 'object' && existing.binance) {
       entryTimeoutByCycle.delete(cycleKey);
     }
+    verifyCrossExchangeFill(userId, symbol).catch((e) => console.error('[autoBot] verifyCrossExchangeFill failed', e));
   } catch (e) {
     console.error(`[autoBot] executeBinanceEntry ${symbol} failed:`, e);
   }
