@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 dns.setDefaultResultOrder('ipv4first');
 
 import './config/db.js';
+import { initSettingsTable } from './models/settingsModel.js';
 import { startMonitoring } from './services/autoBotService.js';
 import { startDailySnapshotCron } from './services/cronService.js';
 import authRoutes from './routes/authRoutes.js';
@@ -44,6 +45,13 @@ app.use('/api/transactions', transactionRoutes);
 startMonitoring();
 startDailySnapshotCron();
 
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-});
+initSettingsTable()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`Server running on http://localhost:${PORT}`);
+    });
+  })
+  .catch((e) => {
+    console.error('Server startup failed:', e);
+    process.exit(1);
+  });

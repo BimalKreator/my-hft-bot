@@ -1,5 +1,21 @@
 import { query } from '../config/db.js';
 
+/**
+ * Ensures bot_settings has the target_profit_multiplier column (for deployments that haven't run db:init).
+ * Call once at server startup.
+ */
+export async function initSettingsTable(): Promise<void> {
+  try {
+    await query(`
+      ALTER TABLE bot_settings
+      ADD COLUMN IF NOT EXISTS target_profit_multiplier NUMERIC DEFAULT 1.0
+    `);
+    console.log('[Database] Ensured target_profit_multiplier column exists.');
+  } catch (err) {
+    console.error('[Database] Error altering bot_settings table:', err);
+  }
+}
+
 export interface BotSettings {
   userId: number;
   autoEntryEnabled: boolean;
