@@ -39,6 +39,7 @@ import {
   getBinancePositions,
   closeBinancePosition,
   placeBinanceOrder,
+  formatBinanceOrderParams,
 } from './binanceService.js';
 import { insertClosedTrade } from '../models/closedTradesModel.js';
 import {
@@ -1586,10 +1587,10 @@ async function executeBinanceEntry(
     const slippagePct = passedData?.prep?.settings.slippageBufferPct ?? settings.slippageBufferPct ?? 2;
     const mult = binanceSide === 'BUY' ? 1 + slippagePct / 100 : 1 - slippagePct / 100;
     const price = markPrice * mult;
-    const safeQty = safeBinanceQty(qty);
-    const safePriceStr = safeBinancePrice(price);
-    await placeBinanceOrder(cleanKey, cleanSecret, symbol, binanceSide, safeQty, parseFloat(safePriceStr));
-    console.log(`[autoBot] Binance entry executed | ${symbol} ${binanceSide} qty=${safeQty} price=${safePriceStr}`);
+    const { safeQty, safePrice } = await formatBinanceOrderParams(symbol, qty, price);
+    console.log(`[DEBUG] Binance Limit Order Formatted: Qty ${safeQty}, Price ${safePrice}`);
+    await placeBinanceOrder(cleanKey, cleanSecret, symbol, binanceSide, safeQty, safePrice);
+    console.log(`[autoBot] Binance entry executed | ${symbol} ${binanceSide} qty=${safeQty} price=${safePrice}`);
     const cycleKey = entryCycleKey(userId, symbol, nextFundingTime);
     const existing = entryTimeoutByCycle.get(cycleKey);
     if (existing && typeof existing === 'object' && existing.binance) {

@@ -3,9 +3,62 @@
  * Used by the cross-exchange scanner and cross-exchange execution (order placement, balance).
  */
 
+import axios from 'axios';
 import crypto from 'crypto';
 import https from 'https';
 import WebSocket from 'ws';
+
+const EXCHANGE_INFO_URL = 'https://fapi.binance.com/fapi/v1/exchangeInfo';
+
+/** Cached exchange info for PRICE_FILTER / LOT_SIZE; refreshed once per process. */
+let exchangeInfoCache: { symbols: Array<{ symbol: string; filters: Array<{ filterType: string; tickSize?: string; stepSize?: string }> }> } | null = null;
+
+export async function getBinanceExchangeInfo(): Promise<typeof exchangeInfoCache> {
+  if (exchangeInfoCache) return exchangeInfoCache;
+  try {
+    const res = await axios.get(EXCHANGE_INFO_URL);
+    exchangeInfoCache = res.data as typeof exchangeInfoCache;
+    return exchangeInfoCache;
+  } catch (e) {
+    console.error('[binanceService] Failed to fetch Binance exchange info', e instanceof Error ? e.message : String(e));
+    return null;
+  }
+}
+
+/**
+ * Format qty and price to Binance tick/step so LIMIT orders pass "Price not increased by tick size" and "Precision is over the maximum".
+ */
+export async function formatBinanceOrderParams(
+  symbol: string,
+  qty: string | number,
+  price: string | number
+): Promise<{ safeQty: string; safePrice: string }> {
+  const info = await getBinanceExchangeInfo();
+  if (!info) return { safeQty: String(qty), safePrice: String(price) };
+
+  const symbolData = info.symbols.find((s: { symbol: string }) => s.symbol === symbol);
+  if (!symbolData) return { safeQty: String(qty), safePrice: String(price) };
+
+  const priceFilter = symbolData.filters.find((f: { filterType: string }) => f.filterType === 'PRICE_FILTER');
+  const lotFilter = symbolData.filters.find((f: { filterType: string }) => f.filterType === 'LOT_SIZE');
+
+  let safePrice = Number(price);
+  let safeQty = Number(qty);
+
+  if (priceFilter?.tickSize != null) {
+    const tickSize = Number(priceFilter.tickSize);
+    if (tickSize > 0) safePrice = Math.floor(safePrice / tickSize) * tickSize;
+  }
+  if (lotFilter?.stepSize != null) {
+    const stepSize = Number(lotFilter.stepSize);
+    if (stepSize > 0) safeQty = Math.floor(safeQty / stepSize) * stepSize;
+  }
+
+  return {
+    safeQty: String(parseFloat(safeQty.toFixed(10))),
+    safePrice: String(parseFloat(safePrice.toFixed(10))),
+  };
+}
 
 const BINANCE_BASE = 'fapi.binance.com';
 const PREMIUM_INDEX_URL = `https://${BINANCE_BASE}/fapi/v1/premiumIndex`;
@@ -305,30 +358,32 @@ export async function closeBinancePosition(
     if (!Number.isFinite(markPrice) || markPrice <= 0) throw new Error('closeBinancePosition IOC: no mark price');
     const slippage = CROSS_EXCHANGE_IOC_SLIPPAGE_PCT / 100;
     const price = side === 'SELL' ? markPrice * (1 - slippage) : markPrice * (1 + slippage);
+    const { safeQty, safePrice } = await formatBinanceOrderParams(symbol, absQty, price);
     const data = (await binanceSignedRequest(apiKey, apiSecret, 'POST', '/fapi/v1/order', {
       symbol,
       side,
       type: 'LIMIT',
       timeInForce: 'IOC',
-      quantity: String(absQty),
-      price: String(price),
+      quantity: safeQty,
+      price: safePrice,
       reduceOnly: 'true',
     })) as { orderId: number };
     return { orderId: data.orderId };
   }
 
+  const { safeQty } = await formatBinanceOrderParams(symbol, absQty, 0);
   const data = (await binanceSignedRequest(apiKey, apiSecret, 'POST', '/fapi/v1/order', {
     symbol,
     side,
     type: 'MARKET',
-    quantity: String(absQty),
+    quantity: safeQty,
     reduceOnly: 'true',
   })) as { orderId: number };
   return { orderId: data.orderId };
 }
 
 /**
- * Place a LIMIT IOC order on Binance Futures. Optimized for 5–10ms latency (keepAlive + built-in crypto).
+ * Place a LIMIT IOC order on Binance Futures. qty/price can be number or pre-formatted string from formatBinanceOrderParams.
  * @returns orderId (number)
  */
 export async function placeBinanceOrder(
@@ -336,8 +391,8 @@ export async function placeBinanceOrder(
   apiSecret: string,
   symbol: string,
   side: 'BUY' | 'SELL',
-  qty: number,
-  price: number
+  qty: number | string,
+  price: number | string
 ): Promise<{ orderId: number }> {
   const qtyStr = String(qty);
   const priceStr = String(price);
