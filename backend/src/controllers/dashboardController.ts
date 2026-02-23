@@ -12,6 +12,7 @@ const fundingScanner = new FundingScanner();
  * Returns the top tokens the bot is targeting for the authenticated user:
  * sorted scanner results filtered by user's min funding rate and banned list,
  * sliced to settings.maxTrades (exact number the bot will consider).
+ * When cross-exchange mode is on, uses getCrossExchangeFundingData and sorts by netSpread.
  */
 export async function getNextToTrade(req: AuthRequest, res: Response): Promise<void> {
   try {
@@ -21,24 +22,38 @@ export async function getNextToTrade(req: AuthRequest, res: Response): Promise<v
       return;
     }
 
-    const [settings, bannedList, marketData] = await Promise.all([
+    const [settings, bannedList] = await Promise.all([
       getSettings(userId),
       getBannedTokens(userId),
-      fundingScanner.getFundingData(),
     ]);
+
+    const isCrossExchange =
+      settings.crossExchangeMode === true ||
+      (settings as { cross_exchange_mode?: boolean }).cross_exchange_mode === true;
+
+    const marketData = isCrossExchange
+      ? await fundingScanner.getCrossExchangeFundingData()
+      : await fundingScanner.getFundingData();
 
     const minFundingRate = settings.minFundingRate ?? 0;
     const maxTrades = settings.maxTrades ?? 1;
 
     const bannedSet = new Set(bannedList);
-    let meetsMinFunding = marketData.filter(
-      (token) => Math.abs(token.fundingRate) >= minFundingRate && !bannedSet.has(token.symbol)
-    );
+    let meetsMinFunding = marketData.filter((token) => {
+      if (bannedSet.has(token.symbol)) return false;
+      if (isCrossExchange && token.netSpread != null) {
+        return token.netSpread >= minFundingRate;
+      }
+      return Math.abs(token.fundingRate) >= minFundingRate;
+    });
 
     const sorted = [...meetsMinFunding].sort((a, b) => {
       const intervalA = a.fundingIntervalHours ?? 0;
       const intervalB = b.fundingIntervalHours ?? 0;
       if (intervalA !== intervalB) return intervalA - intervalB;
+      if (isCrossExchange && a.netSpread != null && b.netSpread != null) {
+        return b.netSpread - a.netSpread;
+      }
       return Math.abs(b.fundingRate) - Math.abs(a.fundingRate);
     });
 

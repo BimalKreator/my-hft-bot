@@ -32,16 +32,23 @@ const cache = new Map<string, BinanceSymbolData>();
 let ws: WebSocket | null = null;
 let restPromise: Promise<void> | null = null;
 
-/** Binance USDT-M standard interval is 8h; some symbols use 4h. Deduce from nextFundingTime vs time. */
-function deduceIntervalHours(nextFundingTimeMs: number, serverTimeMs: number): number {
-  const msToNext = nextFundingTimeMs - serverTimeMs;
-  const eightHoursMs = 8 * 60 * 60 * 1000;
-  const fourHoursMs = 4 * 60 * 60 * 1000;
-  // If next funding is in ~0–4h, could be 4h cycle; if ~0–8h, 8h cycle. Use remainder to detect cycle length.
+/** Binance USDT-M: support 1h, 2h, 4h, 8h, 24h. Deduce from nextFundingTime (UTC timestamp). */
+function deduceIntervalHours(nextFundingTimeMs: number, _serverTimeMs: number): number {
+  const oneHourMs = 3600000;
+  const twoHoursMs = 2 * oneHourMs;
+  const fourHoursMs = 4 * oneHourMs;
+  const eightHoursMs = 8 * oneHourMs;
+  const twentyFourHoursMs = 24 * oneHourMs;
+  const mod24 = nextFundingTimeMs % twentyFourHoursMs;
   const mod8 = nextFundingTimeMs % eightHoursMs;
   const mod4 = nextFundingTimeMs % fourHoursMs;
-  // Binance 8h: 00:00, 08:00, 16:00 UTC -> nextFundingTime % 28800000 is consistent. 4h: 00, 04, 08, 12, 16, 20.
-  if (mod4 === 0 && mod8 !== 0) return 4;
+  const mod2 = nextFundingTimeMs % twoHoursMs;
+  const mod1 = nextFundingTimeMs % oneHourMs;
+  if (mod24 === 0) return 24;
+  if (mod8 === 0) return 8;
+  if (mod4 === 0) return 4;
+  if (mod2 === 0) return 2;
+  if (mod1 === 0) return 1;
   return 8;
 }
 
