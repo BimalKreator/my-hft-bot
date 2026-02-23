@@ -738,11 +738,31 @@ async function runTick(): Promise<number> {
       }
       const countdownMs = Math.max(0, mockFundingTimeMs - now);
       const nextFundingTime = String(mockFundingTimeMs);
-      marketData = marketData.map((m) => ({ ...m, nextFundingTime, countdownMs })) as MarketTicker[];
+      const mockTargetTime = mockFundingTimeMs;
+      marketData = marketData.map((m) => ({
+        ...m,
+        nextFundingTime,
+        countdownMs,
+        ...('binanceFundingRate' in m && { binanceNextFundingTime: mockTargetTime }),
+      })) as MarketTicker[];
     } else if (isManualMockActive && manualMockFundingTimeMs != null && manualMockEndMs != null && now < manualMockEndMs) {
       const countdownMs = Math.max(0, manualMockFundingTimeMs - now);
       const nextFundingTime = String(manualMockFundingTimeMs);
-      marketData = marketData.map((m) => ({ ...m, nextFundingTime, countdownMs })) as MarketTicker[];
+      const mockTargetTime = manualMockFundingTimeMs;
+      marketData = marketData.map((m) => ({
+        ...m,
+        nextFundingTime,
+        countdownMs,
+        ...('binanceFundingRate' in m && { binanceNextFundingTime: mockTargetTime }),
+      })) as MarketTicker[];
+    }
+
+    const isMockTriggered = process.env.TEST_MODE === 'true' || (isManualMockActive && manualMockFundingTimeMs != null);
+    if (isMockTriggered && marketData.length > 0) {
+      console.log('[DEBUG] Mock Trigger Active. Selected:', marketData[0]!.symbol);
+    }
+    if (marketData.length === 0) {
+      console.log('[DEBUG] topCandidates is EMPTY! Check scanner mapping.');
     }
 
     const minCountdownSec =

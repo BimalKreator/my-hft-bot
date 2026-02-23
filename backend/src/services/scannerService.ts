@@ -141,8 +141,8 @@ export class FundingScanner {
   }
 
   /**
-   * Cross-exchange scanner: merge Bybit + Binance. Match strictly by next funding time alignment (1 min tolerance).
-   * No interval-based filtering — 1h, 2h, 4h, 8h, 24h tokens are included when times align.
+   * Cross-exchange scanner: merge Bybit + Binance. Include every token that exists on both exchanges.
+   * We trust Bybit's nextFundingTime for both legs (funding cycles align globally). No time-match filter.
    * Uses Bybit's funding interval for display (binanceIntervalHours = row.fundingIntervalHours).
    * Sort by interval asc then netSpread desc.
    */
@@ -153,17 +153,12 @@ export class FundingScanner {
     ]);
 
     const merged: FundingDataItem[] = [];
-    const TOLERANCE_MS = 60000;
 
     for (const row of bybitItems) {
       const binance = binanceMap.get(row.symbol);
       if (!binance) continue;
 
       const bybitNextMs = Number(row.nextFundingTime) || 0;
-      const binanceNextMs = binance.nextFundingTime ?? 0;
-      const isTimeMatch = Math.abs(bybitNextMs - binanceNextMs) <= TOLERANCE_MS;
-      if (!isTimeMatch) continue;
-
       const netSpread = Math.abs(binance.fundingRate - row.fundingRate);
       const hedgeDirection =
         binance.fundingRate > row.fundingRate
@@ -175,7 +170,7 @@ export class FundingScanner {
         binanceFundingRate: binance.fundingRate,
         binanceIntervalHours: row.fundingIntervalHours,
         binanceMarkPrice: parseFloat(binance.markPrice) || undefined,
-        binanceNextFundingTime: binanceNextMs || undefined,
+        binanceNextFundingTime: bybitNextMs || undefined,
         netSpread,
         hedgeDirection,
       });
