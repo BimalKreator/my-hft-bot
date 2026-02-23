@@ -182,15 +182,33 @@ function binanceSignedRequest(
 
 /** Get USDT available balance for Binance Futures (cross margin). Returns 0 on error or no USDT. */
 export async function getBinanceAvailableBalance(apiKey: string, apiSecret: string): Promise<number> {
-  const raw = await binanceSignedRequest(apiKey, apiSecret, 'GET', '/fapi/v2/balance', {});
+  let raw: unknown;
+  try {
+    raw = await binanceSignedRequest(apiKey, apiSecret, 'GET', '/fapi/v2/balance', {});
+  } catch (err) {
+    const errMsg = err && typeof err === 'object' && 'response' in err
+      ? String((err as { response?: { data?: unknown } }).response?.data ?? (err as Error).message)
+      : (err instanceof Error ? err.message : String(err));
+    console.error('[binanceService] API Error:', errMsg);
+    throw err;
+  }
+
   const data = Array.isArray(raw)
     ? raw
-    : (raw as { balances?: Array<{ asset?: string; availableBalance?: string }> }).balances;
-  if (!Array.isArray(data)) return 0;
-  const usdt = data.find((r: { asset?: string }) => r.asset === 'USDT');
-  const row = usdt as { availableBalance?: string; available_balance?: string };
-  const balanceStr = row?.availableBalance ?? row?.available_balance;
-  return balanceStr != null ? parseFloat(String(balanceStr)) || 0 : 0;
+    : (raw as { balances?: Array<Record<string, unknown>> }).balances;
+  if (!Array.isArray(data)) {
+    console.error('[binanceService] Balance response is not an array:', typeof raw);
+    return 0;
+  }
+  const usdtAsset = data.find((r: { asset?: string }) => r.asset === 'USDT') as Record<string, unknown> | undefined;
+  console.log('[binanceService] Raw USDT Asset Data:', usdtAsset ?? null);
+  if (!usdtAsset) return 0;
+
+  const availableBalance = usdtAsset.availableBalance ?? usdtAsset.available_balance;
+  const crossWalletBalance = usdtAsset.crossWalletBalance ?? usdtAsset.cross_wallet_balance;
+  const balanceStr = String(availableBalance ?? crossWalletBalance ?? '0').trim();
+  const value = parseFloat(balanceStr) || 0;
+  return value;
 }
 
 /**

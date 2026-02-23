@@ -5,6 +5,18 @@ import { decrypt } from '../utils/encryption.js';
 import { getWalletBalance } from './bybitService.js';
 import { getBinanceAvailableBalance } from './binanceService.js';
 
+/** Decrypt if possible; if decrypt throws (e.g. value was saved as plain text), return raw string. */
+function tryDecrypt(value: string): string {
+  if (!value || typeof value !== 'string') return value;
+  try {
+    const d = decrypt(value);
+    const s = d != null ? String(d).trim() : '';
+    return s || value;
+  } catch {
+    return value;
+  }
+}
+
 const BASE_CAPITAL = 3000;
 const IST = 'Asia/Kolkata';
 
@@ -51,17 +63,17 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
   const apiSecret = decrypt(keys.api_secret);
 
   const settings = await getSettings(userId);
-  const crossExchangeMode = !!(
+  const crossExchangeMode =
     settings.crossExchangeMode === true ||
-    (settings as { cross_exchange_mode?: boolean }).cross_exchange_mode === true
-  );
+    (settings as { cross_exchange_mode?: boolean }).cross_exchange_mode === true;
+  const isCrossExchange = crossExchangeMode === true;
 
   let mainEquity = 0;
   const balance = await getWalletBalance(apiKey, apiSecret);
   mainEquity = parseFloat(balance.totalEquity ?? '0') || 0;
 
   const subKeys = await getSubAccountKeys(userId);
-  const subHedgingActive = !crossExchangeMode && !!subKeys;
+  const subHedgingActive = !isCrossExchange && !!subKeys;
   let subEquity = 0;
   let subInitialMargin = 0;
   if (subHedgingActive && subKeys) {
@@ -75,9 +87,16 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
   }
 
   let binanceBalance = 0;
-  if (crossExchangeMode && settings.binanceApiKey && settings.binanceApiSecret) {
+  if (isCrossExchange && settings.binanceApiKey && settings.binanceApiSecret) {
+    const binanceApiKey = tryDecrypt(settings.binanceApiKey) || settings.binanceApiKey;
+    const binanceApiSecret = tryDecrypt(settings.binanceApiSecret) || settings.binanceApiSecret;
+    if (binanceApiKey) {
+      console.log('[statsService] Using Binance Key:', binanceApiKey.substring(0, 5) + '...');
+    } else {
+      console.warn('[statsService] Binance API key empty after decryption/fallback');
+    }
     try {
-      binanceBalance = await getBinanceAvailableBalance(decrypt(settings.binanceApiKey), decrypt(settings.binanceApiSecret));
+      binanceBalance = await getBinanceAvailableBalance(binanceApiKey, binanceApiSecret);
       console.log('[statsService] Binance Balance API Result:', binanceBalance);
     } catch (err) {
       console.warn('[stats] Binance balance fetch failed', err instanceof Error ? err.message : String(err));
@@ -86,9 +105,9 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
   }
 
   /** Combined capital: cross-exchange = base + main + binance; else base + main + sub. */
-  const walletBalance = crossExchangeMode ? mainEquity + binanceBalance : mainEquity + subEquity;
+  const walletBalance = isCrossExchange ? mainEquity + binanceBalance : mainEquity + subEquity;
   const capital = BASE_CAPITAL + walletBalance;
-  if (crossExchangeMode) {
+  if (isCrossExchange) {
     console.log('[statsService] Capital (cross-exchange):', { mainEquity, binanceBalance, walletBalance, capital });
   } else if (subHedgingActive && (subEquity > 0 || mainEquity > 0)) {
     console.log('[statsService] Capital (main+sub):', { mainEquity, subEquity, walletBalance, capital });
@@ -184,9 +203,9 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
     mainEquity,
     subEquity,
     binanceBalance,
-    crossExchangeMode,
+    crossExchangeMode: isCrossExchange,
   };
-  if (crossExchangeMode) {
+  if (isCrossExchange) {
     console.log('[statsService] Returning stats (cross-exchange):', { capital, binanceBalance, crossExchangeMode: result.crossExchangeMode });
   }
   return result;
