@@ -2215,32 +2215,39 @@ async function processUser(
 
   // Auto Exit is handled by monitorExits (1s loop) with reduce-only orders and unified logging.
 
-  // Auto Entry: filter by minimum profit (same logic as Scanner UI). Cross-exchange = netSpread, naked = abs funding rate. ALWAYS bypass when mock.
-  const minSpreadDec = Number((settings as { min_funding_rate_profit?: number }).min_funding_rate_profit ?? settings.minFundingRate ?? 0) / 100;
-  const isCrossExchange = Boolean(settings.crossExchangeMode);
+  // Auto Entry: strict min_funding_rate_profit filter (same as Scanner). Cross-exchange = netSpread >= min; naked = |fundingRate| >= min. Bypass only when mock.
+  const minFundingRateProfit = (settings as { min_funding_rate_profit?: number }).min_funding_rate_profit;
+  const minSpreadDec =
+    minFundingRateProfit != null ? Number(minFundingRateProfit) / 100 : Number(settings.minFundingRate ?? 0);
+  const isCrossExchange = Boolean(
+    settings.crossExchangeMode || (settings as { cross_exchange_mode?: boolean }).cross_exchange_mode
+  );
 
-  let meetsMinFunding: typeof marketData;
+  let validCandidates: typeof marketData;
   if (isMockTriggered) {
-    meetsMinFunding = [...marketData];
+    validCandidates = [...marketData];
   } else {
-    meetsMinFunding = marketData.filter((candidate) => {
-      let isProfitable = false;
+    validCandidates = marketData.filter((c) => {
       if (isCrossExchange) {
-        isProfitable = Number((candidate as MarketTicker & { netSpread?: number }).netSpread ?? 0) >= minSpreadDec;
-      } else {
-        isProfitable = Math.abs(Number(candidate.fundingRate ?? 0)) >= minSpreadDec;
+        return Number((c as MarketTicker & { netSpread?: number }).netSpread ?? 0) >= minSpreadDec;
       }
-      if (isMockTriggered) isProfitable = true;
-      if (!isProfitable) {
-        if (debugSkip && marketData.indexOf(candidate) < 5 && entryTimeoutByCycle.size === 0) {
-          const val = isCrossExchange ? (candidate as MarketTicker & { netSpread?: number }).netSpread : candidate.fundingRate;
-          console.log(`[DEBUG] Skipping ${candidate.symbol}: ${isCrossExchange ? 'netSpread' : 'abs(fundingRate)'} ${Number(val).toFixed(6)} < minSpreadDec ${minSpreadDec}`);
-        }
-        return false;
-      }
-      return true;
+      return Math.abs(Number(c.fundingRate ?? 0)) >= minSpreadDec;
     });
+    if (debugSkip && validCandidates.length < marketData.length && entryTimeoutByCycle.size === 0) {
+      const skipped = marketData.find(
+        (c) =>
+          !validCandidates.includes(c) &&
+          (isCrossExchange
+            ? Number((c as MarketTicker & { netSpread?: number }).netSpread ?? 0) < minSpreadDec
+            : Math.abs(Number(c.fundingRate ?? 0)) < minSpreadDec)
+      );
+      if (skipped) {
+        const val = isCrossExchange ? (skipped as MarketTicker & { netSpread?: number }).netSpread : skipped.fundingRate;
+        console.log(`[DEBUG] Skipping ${skipped.symbol}: ${isCrossExchange ? 'netSpread' : 'abs(fundingRate)'} ${Number(val).toFixed(6)} < min ${minSpreadDec}`);
+      }
+    }
   }
+  let meetsMinFunding = validCandidates;
   let bannedSet: Set<string>;
   try {
     bannedSet = new Set(await getBannedTokens(userId));
