@@ -385,6 +385,7 @@ export async function closePosition(
       ...(exactNetPnl != null && { netPnl: exactNetPnl }),
       source: 'manual',
       exitReason,
+      exchange: 'Bybit Main',
     });
 
     res.status(200).json({ orderId });
@@ -421,7 +422,7 @@ function mapBybitClosedPnlToHistoryRow(
   r: { symbol?: string; side?: string; closedSize?: string; qty?: string; avgEntryPrice?: string; avgExitPrice?: string; closedPnl: string; openFee: string; closeFee: string; updatedTime: string },
   accountType: 'Main' | 'Sub',
   index: number
-): { id: string; symbol: string; side: string; qty: string; entry_price: string; exit_price: string; closed_at: string; fees: string; funding_received: string; gross_pnl: string; net_pnl: string; exit_reason: string | null; exitReason: string | null; accountType: 'Main' | 'Sub' } {
+): { id: string; symbol: string; side: string; qty: string; entry_price: string; exit_price: string; closed_at: string; fees: string; funding_received: string; gross_pnl: string; net_pnl: string; exit_reason: string | null; exitReason: string | null; accountType: 'Main' | 'Sub'; exchange: string } {
   const symbol = r.symbol ?? '';
   const side = r.side ?? '';
   const qty = r.closedSize ?? r.qty ?? '0';
@@ -449,6 +450,7 @@ function mapBybitClosedPnlToHistoryRow(
     exit_reason: null,
     exitReason: null,
     accountType,
+    exchange: accountType === 'Sub' ? 'Bybit Sub' : 'Bybit Main',
   };
 }
 
@@ -537,7 +539,8 @@ export async function getTradeHistory(
       side: r.direction,
       qty: r.quantity,
       closed_at: r.exit_time,
-      accountType: 'Main' as const,
+      accountType: r.exchange === 'Bybit Sub' ? 'Sub' as const : (r.exchange === 'Binance' ? undefined : 'Main' as const),
+      exchange: r.exchange ?? 'Bybit Main',
       exitReason: r.exit_reason,
     }));
     res.status(200).json(mapped);

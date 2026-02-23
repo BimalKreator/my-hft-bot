@@ -1,5 +1,7 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import * as XLSX from 'xlsx';
+
+const GROUP_WINDOW_MS = 60000;
 
 const TOKEN_KEY = 'hft_token';
 
@@ -23,6 +25,8 @@ export interface ClosedTradeRow {
   exitReason?: string | null;
   /** When subaccount hedging is active, backend returns Main/Sub per row. */
   accountType?: 'Main' | 'Sub';
+  /** Exchange label: 'Bybit Main', 'Bybit Sub', or 'Binance'. */
+  exchange?: string | null;
 }
 
 function tokenName(symbol: string): string {
@@ -142,11 +146,48 @@ export default function ClosedTradesTable() {
 
   const indexOfLastItem = currentPage * ITEMS_PER_PAGE;
   const indexOfFirstItem = indexOfLastItem - ITEMS_PER_PAGE;
-  const currentItems = rows.slice(indexOfFirstItem, indexOfLastItem);
+  const currentItems = useMemo(() => {
+    const slice = rows.slice(indexOfFirstItem, indexOfLastItem);
+    return [...slice].sort((a, b) => new Date(b.closed_at).getTime() - new Date(a.closed_at).getTime());
+  }, [rows, indexOfFirstItem, indexOfLastItem]);
+
+  type DisplayItem = { type: 'trade'; row: ClosedTradeRow } | { type: 'groupSummary'; netPnl: number; count: number };
+  const displayItems = useMemo((): DisplayItem[] => {
+    if (currentItems.length === 0) return [];
+    const list: DisplayItem[] = [];
+    let group: ClosedTradeRow[] = [currentItems[0]!];
+    for (let i = 1; i < currentItems.length; i++) {
+      const row = currentItems[i]!;
+      const lastInGroup = group[group.length - 1]!;
+      const lastTime = new Date(lastInGroup.closed_at).getTime();
+      const rowTime = new Date(row.closed_at).getTime();
+      if (row.symbol === lastInGroup.symbol && Math.abs(rowTime - lastTime) <= GROUP_WINDOW_MS) {
+        group.push(row);
+      } else {
+        if (group.length > 0) {
+          group.forEach((r) => list.push({ type: 'trade', row: r }));
+          if (group.length > 1) {
+            const netPnl = group.reduce((s, r) => s + (parseFloat(r.net_pnl) || 0), 0);
+            list.push({ type: 'groupSummary', netPnl, count: group.length });
+          }
+        }
+        group = [row];
+      }
+    }
+    if (group.length > 0) {
+      group.forEach((r) => list.push({ type: 'trade', row: r }));
+      if (group.length > 1) {
+        const netPnl = group.reduce((s, r) => s + (parseFloat(r.net_pnl) || 0), 0);
+        list.push({ type: 'groupSummary', netPnl, count: group.length });
+      }
+    }
+    return list;
+  }, [currentItems]);
 
   const handleDownloadExcel = () => {
     const headers = [
       'Token',
+      'Exchange',
       'Direction',
       'Trade Amount',
       'Entry Price',
@@ -159,6 +200,7 @@ export default function ClosedTradesTable() {
     ];
     const data = rows.map((r) => [
       tokenName(r.symbol),
+      r.exchange ?? (r.accountType === 'Sub' ? 'Bybit Sub' : 'Bybit Main'),
       r.side,
       ((parseFloat(r.qty) || 0) * (parseFloat(r.entry_price) || 0)).toFixed(2),
       parseFloat(r.entry_price) || 0,
@@ -264,6 +306,7 @@ export default function ClosedTradesTable() {
             <thead>
               <tr className="text-left text-gray-400" style={{ backgroundColor: 'rgba(0, 0, 0, 0.2)' }}>
                 <th className="px-4 py-2.5 font-medium">Token / Account</th>
+                <th className="px-4 py-2.5 font-medium">Exchange</th>
                 <th className="px-4 py-2.5 font-medium">Direction</th>
                 <th className="px-4 py-2.5 font-medium">Quantity</th>
                 <th className="px-4 py-2.5 font-medium">Trade Amount</th>
@@ -278,15 +321,33 @@ export default function ClosedTradesTable() {
             <tbody>
               {rows.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="px-4 py-8 text-center text-gray-400">
+                  <td colSpan={11} className="px-4 py-8 text-center text-gray-400">
                     No closed trades match the filters.
                   </td>
                 </tr>
               ) : (
-                currentItems.map((r) => {
+                displayItems.map((item, idx) => {
+                  if (item.type === 'groupSummary') {
+                    const isProfit = item.netPnl >= 0;
+                    return (
+                      <tr
+                        key={`summary-${idx}`}
+                        className="border-b border-gray-800/80 font-medium"
+                        style={{ backgroundColor: 'rgba(0, 123, 255, 0.08)', borderColor: 'rgba(0, 123, 255, 0.25)' }}
+                      >
+                        <td colSpan={11} className="px-4 py-2 text-right">
+                          <span style={isProfit ? { color: '#22c55e' } : { color: '#ef4444' }}>
+                            Group Net PnL ({item.count} legs): {isProfit ? '+' : ''}{formatUsdWithSign(item.netPnl)}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  }
+                  const r = item.row;
                   const netPnl = parseFloat(r.net_pnl) || 0;
                   const isProfit = netPnl >= 0;
                   const direction = r.side === 'Buy' ? 'LONG' : 'SHORT';
+                  const exchangeLabel = r.exchange ?? (r.accountType === 'Sub' ? 'Bybit Sub' : r.accountType === 'Main' ? 'Bybit Main' : 'Bybit Main');
                   return (
                     <tr
                       key={r.id}
@@ -310,6 +371,7 @@ export default function ClosedTradesTable() {
                           )}
                         </span>
                       </td>
+                      <td className="px-4 py-2.5 text-gray-300 text-xs">{exchangeLabel}</td>
                       <td className="px-4 py-2.5">
                         <span
                           className="inline-block rounded px-2 py-0.5 text-xs font-semibold"

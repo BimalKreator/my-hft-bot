@@ -199,7 +199,9 @@ export default function Dashboard() {
                 // TODO: Remove dummy +1500 later
                 const displayBinanceBalance = Number(stats.binanceBalance ?? 0) + 1500;
                 const displayBybitBalance = Number(stats.mainEquity ?? 0) + 1500;
-                const displayTotalCapital = Number(stats.capital ?? 0) + 3000;
+                const displayTotalCapital = stats.crossExchangeMode === true
+                  ? displayBinanceBalance + displayBybitBalance
+                  : displayBybitBalance + (Number(stats.subEquity ?? 0) + 1500);
                 return (
                   <>
               <div>

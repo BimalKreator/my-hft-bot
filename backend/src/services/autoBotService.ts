@@ -484,7 +484,8 @@ async function saveClosedTradeAfterExit(
   exitReason: 'Time Exit' | 'Stoploss Hit' | 'Pre-Funding Stoploss' | 'Post-Funding Stoploss' | 'Post-Funding Stoploss (L2 - 50% Funding)' | 'PnL Positive Exit' | 'Universal Stoploss' | 'Break-even' | 'Break-even (fallback)' | 'Next Trade Cleanup' | 'Post-Funding Profit' | '15m Pre-Next Funding' | 'Naked Mode Target Hit' | 'Naked Mode SL Hit' | 'Cross-Exchange Exit (SL/Breakeven)' | 'Cross-Exchange Orphan Exit',
   fundingReceived: number = 0,
   estimatedExitPrice?: number,
-  estimatedFeesWhenZero?: number
+  estimatedFeesWhenZero?: number,
+  exchange: 'Bybit Main' | 'Bybit Sub' = 'Bybit Main'
 ): Promise<void> {
   const ids = Array.isArray(orderIds) ? orderIds : [orderIds];
   try {
@@ -546,6 +547,7 @@ async function saveClosedTradeAfterExit(
       ...(exactNetPnl != null && { netPnl: exactNetPnl }),
       source: 'auto',
       exitReason,
+      exchange,
     });
   } catch (e) {
     console.error(`[autoBot] saveClosedTradeAfterExit failed ${symbol}:`, e);
@@ -1066,12 +1068,12 @@ async function monitorExits(): Promise<void> {
                 }
                 delete lockedFundingRates[pos.symbol];
                 if (mainOrderIds.length > 0) {
-                  saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, mainOrderIds, exitReason, 0, exitPrice).catch((e) =>
+                  saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, mainOrderIds, exitReason, 0, exitPrice, undefined, undefined, 'Bybit Main').catch((e) =>
                     console.error(`[autoBot] saveClosedTradeAfterExit (main) failed ${pos.symbol}:`, e)
                   );
                 }
                 if (subOrderIds.length > 0) {
-                  saveClosedTradeAfterExit(userId, subHedge.subApiKey, subHedge.subApiSecret, pos.symbol, subHedge.side, subPos ? parseFloat(subPos.avgPrice) || entry : entry, subQty, subOrderIds, exitReason, 0, exitPrice).catch((e) =>
+                  saveClosedTradeAfterExit(userId, subHedge.subApiKey, subHedge.subApiSecret, pos.symbol, subHedge.side, subPos ? parseFloat(subPos.avgPrice) || entry : entry, subQty, subOrderIds, exitReason, 0, exitPrice, undefined, undefined, 'Bybit Sub').catch((e) =>
                     console.error(`[autoBot] saveClosedTradeAfterExit (sub) failed ${pos.symbol}:`, e)
                   );
                 }
@@ -1159,7 +1161,7 @@ async function monitorExits(): Promise<void> {
                   positionFundingTime.delete(key);
                   mainOrphanFallbackKeys.delete(key);
                   if (orderIds.length > 0) {
-                    await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderIds, 'Break-even (fallback)', 0, exitPrice, estimatedMakerFee);
+                    await saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderIds, 'Break-even (fallback)', 0, exitPrice, estimatedMakerFee, undefined, 'Bybit Main');
                   }
                   console.log('[EXIT] Break-even (fallback) |', pos.symbol);
                 } catch (e) {
@@ -1190,7 +1192,7 @@ async function monitorExits(): Promise<void> {
                 const orderIds = await exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty);
                 positionFundingTime.delete(key);
                 if (orderIds.length > 0) {
-                  saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderIds, 'Cross-Exchange Orphan Exit', 0, exitPrice).catch((e) =>
+                  saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, orderIds, 'Cross-Exchange Orphan Exit', 0, exitPrice, undefined, undefined, 'Bybit Main').catch((e) =>
                     console.error(`[autoBot] saveClosedTradeAfterExit (orphan) failed ${pos.symbol}:`, e)
                   );
                 }
@@ -1210,11 +1212,11 @@ async function monitorExits(): Promise<void> {
                 const binanceOrderType = useIoc ? 'IOC' : 'MARKET';
                 const [mainOrderIds, _binanceClose] = await Promise.all([
                   exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty),
-                  closeBinancePosition(binanceApiKey, binanceApiSecret, pos.symbol, binancePosition!.positionAmt, binanceOrderType),
+                  closeBinancePositionWithRetry(binanceApiKey, binanceApiSecret, pos.symbol, binancePosition!.positionAmt, binanceOrderType),
                 ]);
                 positionFundingTime.delete(key);
                 if (mainOrderIds.length > 0) {
-                  saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, mainOrderIds, exitReason, 0, exitPrice).catch((e) =>
+                  saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, mainOrderIds, exitReason, 0, exitPrice, undefined, undefined, 'Bybit Main').catch((e) =>
                     console.error(`[autoBot] saveClosedTradeAfterExit (Bybit cross-exchange) failed ${pos.symbol}:`, e)
                   );
                 }
@@ -1233,6 +1235,7 @@ async function monitorExits(): Promise<void> {
                   fees: 0,
                   source: 'auto',
                   exitReason,
+                  exchange: 'Binance',
                 }).catch((e) => console.error(`[autoBot] insertClosedTrade (Binance cross-exchange) failed ${pos.symbol}:`, e));
                 console.log('[EXIT] Cross-Exchange Exit (SL/Breakeven) |', pos.symbol);
                 return true;
@@ -1555,16 +1558,43 @@ async function verifyCrossExchangeFill(userId: number, symbol: string): Promise<
       if (orderIds.length > 0) {
         const ob = await getOrderBookDepth(bybitApiKey, bybitApiSecret, symbol, ORDERBOOK_DEPTH_BEST).catch(() => null);
         const exitPrice = ob ? (side === 'Buy' ? ob.bidPrice : ob.askPrice) : entry;
-        await saveClosedTradeAfterExit(userId, bybitApiKey, bybitApiSecret, symbol, side, entry, qty, orderIds, 'Cross-Exchange Orphan Exit', 0, exitPrice);
+        await saveClosedTradeAfterExit(userId, bybitApiKey, bybitApiSecret, symbol, side, entry, qty, orderIds, 'Cross-Exchange Orphan Exit', 0, exitPrice, undefined, undefined, 'Bybit Main');
       }
     } else if (binanceHasPosition && !bybitHasPosition) {
-      console.log('[autoBot] Orphan detected in Cross-Exchange. Instantly exiting the filled side via IOC.');
-      await closeBinancePosition(binanceApiKey, binanceApiSecret, symbol, binancePosition!.positionAmt, 'IOC');
+      console.log('[autoBot] Orphan detected in Cross-Exchange. Instantly closing Binance via MARKET.');
+      await closeBinancePositionWithRetry(binanceApiKey, binanceApiSecret, symbol, binancePosition!.positionAmt, 'MARKET');
     }
   } catch (e) {
     console.error(`[autoBot] verifyCrossExchangeFill ${symbol} failed:`, e);
   }
 }
+
+/** Max 3 retries, 500ms apart, so exit failures (tick size/network) get another chance before falling back to orphan monitor. */
+async function closeBinancePositionWithRetry(
+  apiKey: string,
+  apiSecret: string,
+  symbol: string,
+  positionAmt: number,
+  orderType: 'MARKET' | 'IOC',
+  maxRetries = 3,
+  delayMs = 500
+): Promise<{ orderId: number }> {
+  let lastErr: Error | null = null;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await closeBinancePosition(apiKey, apiSecret, symbol, positionAmt, orderType);
+    } catch (e) {
+      lastErr = e instanceof Error ? e : new Error(String(e));
+      if (attempt < maxRetries) {
+        console.warn(`[autoBot] closeBinancePosition attempt ${attempt}/${maxRetries} failed ${symbol}, retrying in ${delayMs}ms:`, lastErr.message);
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
+    }
+  }
+  throw lastErr ?? new Error('closeBinancePosition failed');
+}
+
+export { verifyCrossExchangeFill as verifyAndCloseOrphan };
 
 async function executeBinanceEntry(
   userId: number,

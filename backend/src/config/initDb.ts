@@ -203,6 +203,9 @@ async function initDb() {
   await client.query(`
     ALTER TABLE closed_trades ADD COLUMN IF NOT EXISTS exit_reason TEXT;
   `).catch(() => {});
+  await client.query(`
+    ALTER TABLE closed_trades ADD COLUMN IF NOT EXISTS exchange TEXT;
+  `).catch(() => {});
 
   await client.query(`
     CREATE TABLE IF NOT EXISTS hedge_groups (

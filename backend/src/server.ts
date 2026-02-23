@@ -10,6 +10,7 @@ import { initSettingsTable } from './models/settingsModel.js';
 import { startMonitoring } from './services/autoBotService.js';
 import { startDailySnapshotCron } from './services/cronService.js';
 import { fetchBinanceFundingInfo } from './services/binanceService.js';
+import { startPositionStreamForOrphanExit } from './services/wsService.js';
 import authRoutes from './routes/authRoutes.js';
 import banRoutes from './routes/banRoutes.js';
 import dashboardRoutes from './routes/dashboardRoutes.js';
@@ -48,6 +49,7 @@ startDailySnapshotCron();
 
 initSettingsTable()
   .then(() => fetchBinanceFundingInfo())
+  .then(() => startPositionStreamForOrphanExit())
   .then(() => {
     app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);

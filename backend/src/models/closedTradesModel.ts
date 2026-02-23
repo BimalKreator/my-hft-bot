@@ -14,6 +14,8 @@ export interface InsertClosedTradeParams {
   netPnl?: number;
   source?: 'manual' | 'auto';
   exitReason?: string;
+  /** Exchange label: 'Bybit Main', 'Bybit Sub', or 'Binance'. */
+  exchange?: string;
 }
 
 /** Row shape from DB: closed_trades uses token, direction, quantity, entry_time, exit_time, funding_received, status, exit_reason. */
@@ -33,6 +35,7 @@ export interface ClosedTradeRow {
   net_pnl: string;
   status: string | null;
   exit_reason: string | null;
+  exchange: string | null;
 }
 
 export function netPnl(grossPnl: number, funding: number, fees: number): number {
@@ -49,8 +52,8 @@ export async function insertClosedTrade(params: InsertClosedTradeParams): Promis
   const entryPrice = Number(Number(params.entryPrice).toFixed(6));
   const exitPrice = Number(Number(params.exitPrice).toFixed(6));
   const result = await query<{ id: number }>(
-    `INSERT INTO closed_trades (user_id, token, direction, quantity, entry_price, exit_price, entry_time, exit_time, fees, funding_received, gross_pnl, net_pnl, status, exit_reason)
-     VALUES ($1, $2, $3, $4, $5, $6, NULL, NOW(), $7, $8, $9, $10, $11, $12)
+    `INSERT INTO closed_trades (user_id, token, direction, quantity, entry_price, exit_price, entry_time, exit_time, fees, funding_received, gross_pnl, net_pnl, status, exit_reason, exchange)
+     VALUES ($1, $2, $3, $4, $5, $6, NULL, NOW(), $7, $8, $9, $10, $11, $12, $13)
      RETURNING id`,
     [
       params.userId,
@@ -65,6 +68,7 @@ export async function insertClosedTrade(params: InsertClosedTradeParams): Promis
       net,
       params.source ?? null,
       params.exitReason ?? null,
+      params.exchange ?? null,
     ]
   );
   const row = result.rows[0];
@@ -109,7 +113,7 @@ export async function getClosedTrades(
     conditions.push('net_pnl < 0');
   }
 
-  const sql = `SELECT id, user_id, token, direction, quantity, entry_price, exit_price, entry_time, exit_time, fees, funding_received, gross_pnl, net_pnl, status, exit_reason
+  const sql = `SELECT id, user_id, token, direction, quantity, entry_price, exit_price, entry_time, exit_time, fees, funding_received, gross_pnl, net_pnl, status, exit_reason, exchange
                FROM closed_trades
                WHERE ${conditions.join(' AND ')}
                ORDER BY exit_time DESC`;
