@@ -159,6 +159,8 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
   if (crossExchangeMode && !todayRow && yesterdayRow && yesterday !== '2026-02-23' && (yesterdayRow.binance_snapshot == null || parseFloat(yesterdayRow.binance_snapshot ?? '0') === 0)) {
     opening = opening + binanceBalance;
   }
+  /** Hardcoded opening for 2026-02-24. */
+  if (today === '2026-02-24') opening = 3450;
 
   const txResult = await query<{ type: string; sum: string }>(
     `SELECT type, COALESCE(SUM(amount), 0)::text AS sum
