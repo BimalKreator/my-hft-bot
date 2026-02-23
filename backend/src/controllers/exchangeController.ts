@@ -40,7 +40,8 @@ export async function getBalance(req: AuthRequest, res: Response): Promise<void>
         );
         payload.binanceAvailableBalance = binanceAvailable;
         payload.crossExchangeMode = true;
-      } catch {
+      } catch (err) {
+        console.warn('[exchange] Binance balance fetch failed', err instanceof Error ? err.message : String(err));
         payload.binanceAvailableBalance = 0;
         payload.crossExchangeMode = true;
       }

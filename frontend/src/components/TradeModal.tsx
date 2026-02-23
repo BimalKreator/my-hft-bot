@@ -60,11 +60,14 @@ export default function TradeModal({
     })
       .then((res) => res.json().catch(() => ({})))
       .then((data) => {
+        console.log('Trade Modal Balance Data:', data);
         const bal = parseFloat(data?.totalAvailableBalance ?? '0');
         setAvailableBalance(Number.isNaN(bal) ? 0 : bal);
-        setCrossExchangeMode(data?.crossExchangeMode === true);
-        if (data?.crossExchangeMode === true && data?.binanceAvailableBalance != null) {
-          const binanceBal = parseFloat(String(data.binanceAvailableBalance));
+        const isCrossExchange = data?.crossExchangeMode === true || data?.cross_exchange_mode === true;
+        setCrossExchangeMode(isCrossExchange);
+        if (isCrossExchange) {
+          const raw = data?.binanceAvailableBalance ?? data?.binance_available_balance;
+          const binanceBal = raw != null ? parseFloat(String(raw)) : 0;
           setBinanceAvailableBalance(Number.isNaN(binanceBal) ? 0 : binanceBal);
         } else {
           setBinanceAvailableBalance(null);
@@ -482,8 +485,8 @@ export default function TradeModal({
           >
             {balanceLoading
               ? 'Loading balance…'
-              : crossExchangeMode && binanceAvailableBalance != null
-                ? `Bybit Available: $${availableBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · Binance Available: $${binanceAvailableBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+              : crossExchangeMode
+                ? `Bybit Available: $${availableBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · Binance Available: $${(binanceAvailableBalance ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
                 : `Available Balance: $${availableBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
           </p>
 

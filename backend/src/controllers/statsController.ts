@@ -20,7 +20,12 @@ export async function getStats(
       res.status(404).json({ error: 'No exchange keys. Add keys in Exchange Setup.' });
       return;
     }
-    res.status(200).json(stats);
+    const payload = {
+      ...stats,
+      crossExchangeMode: stats.crossExchangeMode === true,
+      binanceBalance: Number(stats.binanceBalance) || 0,
+    };
+    res.status(200).json(payload);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to load stats';
     res.status(500).json({ error: msg });

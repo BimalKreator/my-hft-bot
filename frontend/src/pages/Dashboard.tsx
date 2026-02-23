@@ -68,8 +68,13 @@ export default function Dashboard() {
         setStats(null);
         return;
       }
+      // Backend sends camelCase: capital, crossExchangeMode, binanceBalance (Total Capital = base + mainEquity + binanceBalance when cross-exchange)
+      console.log('Dashboard Stats Data:', data);
+      const crossExchangeMode = data.crossExchangeMode === true || data.cross_exchange_mode === true;
+      const binanceBalanceNum = Number(data.binanceBalance ?? data.binance_balance ?? 0) || 0;
+      const capitalNum = Number(data.capital ?? 0) || 0;
       setStats({
-        capital: Number(data.capital) ?? 0,
+        capital: capitalNum,
         opening: Number(data.opening ?? data.opening_balance) ?? 0,
         marginUsed: Number(data.marginUsed ?? data.margin_used) ?? 0,
         available: Number(data.available) ?? 0,
@@ -78,8 +83,8 @@ export default function Dashboard() {
         dailyRoi: Number(data.dailyRoi) ?? 0,
         mainEquity: Number(data.mainEquity) ?? 0,
         subEquity: Number(data.subEquity) ?? 0,
-        binanceBalance: data.binanceBalance != null ? Number(data.binanceBalance) : undefined,
-        crossExchangeMode: data.crossExchangeMode === true,
+        binanceBalance: binanceBalanceNum,
+        crossExchangeMode,
       });
     } catch {
       setError('Network error');
@@ -160,7 +165,7 @@ export default function Dashboard() {
                 </span>
               </div>
               <div className="flex flex-wrap gap-4 text-sm">
-                {stats.crossExchangeMode ? (
+                {stats.crossExchangeMode === true ? (
                   <>
                     <div>
                       <p className="text-gray-500">Bybit Main (UFA)</p>

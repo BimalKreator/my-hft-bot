@@ -182,10 +182,15 @@ function binanceSignedRequest(
 
 /** Get USDT available balance for Binance Futures (cross margin). Returns 0 on error or no USDT. */
 export async function getBinanceAvailableBalance(apiKey: string, apiSecret: string): Promise<number> {
-  const data = (await binanceSignedRequest(apiKey, apiSecret, 'GET', '/fapi/v2/balance', {})) as Array<{ asset: string; availableBalance: string }>;
+  const raw = await binanceSignedRequest(apiKey, apiSecret, 'GET', '/fapi/v2/balance', {});
+  const data = Array.isArray(raw)
+    ? raw
+    : (raw as { balances?: Array<{ asset?: string; availableBalance?: string }> }).balances;
   if (!Array.isArray(data)) return 0;
-  const usdt = data.find((r) => r.asset === 'USDT');
-  return usdt ? parseFloat(usdt.availableBalance) || 0 : 0;
+  const usdt = data.find((r: { asset?: string }) => r.asset === 'USDT');
+  const row = usdt as { availableBalance?: string; available_balance?: string };
+  const balanceStr = row?.availableBalance ?? row?.available_balance;
+  return balanceStr != null ? parseFloat(String(balanceStr)) || 0 : 0;
 }
 
 /**

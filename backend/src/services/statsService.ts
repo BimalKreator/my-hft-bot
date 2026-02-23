@@ -51,7 +51,10 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
   const apiSecret = decrypt(keys.api_secret);
 
   const settings = await getSettings(userId);
-  const crossExchangeMode = !!settings.crossExchangeMode;
+  const crossExchangeMode = !!(
+    settings.crossExchangeMode === true ||
+    (settings as { cross_exchange_mode?: boolean }).cross_exchange_mode === true
+  );
 
   let mainEquity = 0;
   const balance = await getWalletBalance(apiKey, apiSecret);
@@ -75,15 +78,17 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
   if (crossExchangeMode && settings.binanceApiKey && settings.binanceApiSecret) {
     try {
       binanceBalance = await getBinanceAvailableBalance(decrypt(settings.binanceApiKey), decrypt(settings.binanceApiSecret));
+      console.log('[statsService] Binance Balance API Result:', binanceBalance);
     } catch (err) {
-      console.warn('[statsService] Binance balance fetch failed:', err instanceof Error ? err.message : String(err));
+      console.warn('[stats] Binance balance fetch failed', err instanceof Error ? err.message : String(err));
+      binanceBalance = 0;
     }
   }
 
   /** Combined capital: cross-exchange = base + main + binance; else base + main + sub. */
   const walletBalance = crossExchangeMode ? mainEquity + binanceBalance : mainEquity + subEquity;
   const capital = BASE_CAPITAL + walletBalance;
-  if (crossExchangeMode && (mainEquity > 0 || binanceBalance > 0)) {
+  if (crossExchangeMode) {
     console.log('[statsService] Capital (cross-exchange):', { mainEquity, binanceBalance, walletBalance, capital });
   } else if (subHedgingActive && (subEquity > 0 || mainEquity > 0)) {
     console.log('[statsService] Capital (main+sub):', { mainEquity, subEquity, walletBalance, capital });
@@ -168,7 +173,7 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
     ? percents.reduce((a, b) => a + b, 0) / percents.length
     : 0;
 
-  return {
+  const result = {
     capital,
     opening,
     marginUsed,
@@ -178,6 +183,11 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
     dailyRoi,
     mainEquity,
     subEquity,
-    ...(crossExchangeMode && { binanceBalance, crossExchangeMode: true }),
+    binanceBalance,
+    crossExchangeMode,
   };
+  if (crossExchangeMode) {
+    console.log('[statsService] Returning stats (cross-exchange):', { capital, binanceBalance, crossExchangeMode: result.crossExchangeMode });
+  }
+  return result;
 }
