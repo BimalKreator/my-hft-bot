@@ -143,7 +143,7 @@ export async function getClosedTrades(
                FROM closed_trades
                WHERE ${conditions.join(' AND ')}
                ORDER BY exit_time DESC
-               LIMIT 100`;
+               LIMIT 200`;
   const result = await query<ClosedTradeRow>(sql, params);
   return result.rows;
 }

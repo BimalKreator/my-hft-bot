@@ -1222,16 +1222,17 @@ async function monitorExits(): Promise<void> {
                 ]);
                 positionFundingTime.delete(key);
                 if (mainOrderIds.length > 0) {
-                  saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, qty, mainOrderIds, exitReason, 0, exitPrice, undefined, undefined, 'Bybit Main').catch((e) =>
+                  const bybitQty = Math.abs(Number(qty));
+                  saveClosedTradeAfterExit(userId, apiKey, apiSecret, pos.symbol, pos.side, entry, bybitQty, mainOrderIds, exitReason, 0, exitPrice, undefined, undefined, 'Bybit Main').catch((e) =>
                     console.error(`[autoBot] saveClosedTradeAfterExit (Bybit cross-exchange) failed ${pos.symbol}:`, e)
                   );
                 }
-                const binancePosAmt = Number(binancePosition!.positionAmt);
-                const binanceDirection: 'Buy' | 'Sell' = binancePosAmt > 0 ? 'Buy' : 'Sell';
-                const binanceQty = Math.abs(binancePosAmt);
+                const binanceAmt = Number(binancePosition!.positionAmt);
+                const binanceDir: 'Buy' | 'Sell' = binanceAmt > 0 ? 'Buy' : 'Sell';
+                const binanceQty = Math.abs(binanceAmt);
                 const binancePnl = Number(binancePosition!.unRealizedProfit) || 0;
                 const binanceFee = 0;
-                await saveClosedTrade(userId, pos.symbol, binanceDirection, binanceQty, binancePnl, exitReason, binanceFee, 'Binance').catch((e) =>
+                await saveClosedTrade(userId, pos.symbol, binanceDir, binanceQty, binancePnl, exitReason, binanceFee, 'Binance').catch((e) =>
                   console.error(`[autoBot] saveClosedTrade (Binance cross-exchange) failed ${pos.symbol}:`, e)
                 );
                 console.log('[EXIT] Cross-Exchange Exit (SL/Breakeven) |', pos.symbol);

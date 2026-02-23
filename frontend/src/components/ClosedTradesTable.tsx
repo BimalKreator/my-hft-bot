@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import * as XLSX from 'xlsx';
 
 const GROUP_WINDOW_MS = 60000;
@@ -89,7 +89,9 @@ function buildQuery(params: {
   return q ? `?${q}` : '';
 }
 
-const ITEMS_PER_PAGE = 10;
+const ITEMS_PER_PAGE = 15;
+
+type GroupedItem = { isGroup: boolean; trades: ClosedTradeRow[] };
 
 export default function ClosedTradesTable() {
   const [rows, setRows] = useState<ClosedTradeRow[]>([]);
@@ -144,53 +146,44 @@ export default function ClosedTradesTable() {
     return () => clearInterval(interval);
   }, [fetchHistory]);
 
+  const sortedRows = useMemo(
+    () => [...rows].sort((a, b) => new Date(b.closed_at).getTime() - new Date(a.closed_at).getTime()),
+    [rows]
+  );
+
+  const groupedTrades = useMemo((): GroupedItem[] => {
+    const groups: GroupedItem[] = [];
+    let skipNext = false;
+    for (let i = 0; i < sortedRows.length; i++) {
+      if (skipNext) {
+        skipNext = false;
+        continue;
+      }
+      const current = sortedRows[i]!;
+      const next = sortedRows[i + 1];
+      const currentTime = new Date(current.closed_at).getTime();
+      const nextTime = next ? new Date(next.closed_at).getTime() : 0;
+      if (
+        next &&
+        (current.symbol || (current as { token?: string }).token) === (next.symbol || (next as { token?: string }).token) &&
+        Math.abs(currentTime - nextTime) < GROUP_WINDOW_MS
+      ) {
+        groups.push({ isGroup: true, trades: [current, next] });
+        skipNext = true;
+      } else {
+        groups.push({ isGroup: false, trades: [current] });
+      }
+    }
+    return groups;
+  }, [sortedRows]);
+
   const indexOfLastItem = currentPage * ITEMS_PER_PAGE;
   const indexOfFirstItem = indexOfLastItem - ITEMS_PER_PAGE;
-  const currentItems = useMemo(() => {
-    const slice = rows.slice(indexOfFirstItem, indexOfLastItem);
-    return [...slice].sort((a, b) => new Date(b.closed_at).getTime() - new Date(a.closed_at).getTime());
-  }, [rows, indexOfFirstItem, indexOfLastItem]);
-
-  type DisplayItem =
-    | { type: 'trade'; row: ClosedTradeRow; groupKey?: string; isFirstInGroup?: boolean }
-    | { type: 'groupSummary'; netPnl: number; count: number };
-  const displayItems = useMemo((): DisplayItem[] => {
-    if (currentItems.length === 0) return [];
-    const list: DisplayItem[] = [];
-    let group: ClosedTradeRow[] = [currentItems[0]!];
-    for (let i = 1; i < currentItems.length; i++) {
-      const row = currentItems[i]!;
-      const lastInGroup = group[group.length - 1]!;
-      const lastTime = new Date(lastInGroup.closed_at).getTime();
-      const rowTime = new Date(row.closed_at).getTime();
-      if (row.symbol === lastInGroup.symbol && Math.abs(rowTime - lastTime) <= GROUP_WINDOW_MS) {
-        group.push(row);
-      } else {
-        if (group.length > 0) {
-          const groupKey = group.length > 1 ? `${group[0]!.symbol}-${new Date(group[0]!.closed_at).getTime()}` : undefined;
-          group.forEach((r, idx) =>
-            list.push({ type: 'trade', row: r, groupKey, isFirstInGroup: group.length > 1 ? idx === 0 : false })
-          );
-          if (group.length > 1) {
-            const netPnl = group.reduce((s, r) => s + (parseFloat(r.net_pnl) || 0), 0);
-            list.push({ type: 'groupSummary', netPnl, count: group.length });
-          }
-        }
-        group = [row];
-      }
-    }
-    if (group.length > 0) {
-      const groupKey = group.length > 1 ? `${group[0]!.symbol}-${new Date(group[0]!.closed_at).getTime()}` : undefined;
-      group.forEach((r, idx) =>
-        list.push({ type: 'trade', row: r, groupKey, isFirstInGroup: group.length > 1 ? idx === 0 : false })
-      );
-      if (group.length > 1) {
-        const netPnl = group.reduce((s, r) => s + (parseFloat(r.net_pnl) || 0), 0);
-        list.push({ type: 'groupSummary', netPnl, count: group.length });
-      }
-    }
-    return list;
-  }, [currentItems]);
+  const currentItems = useMemo(
+    () => groupedTrades.slice(indexOfFirstItem, indexOfLastItem),
+    [groupedTrades, indexOfFirstItem, indexOfLastItem]
+  );
+  const totalPages = Math.max(1, Math.ceil(groupedTrades.length / ITEMS_PER_PAGE));
 
   const handleDownloadExcel = () => {
     const headers = [
@@ -310,170 +303,108 @@ export default function ClosedTradesTable() {
       ) : (
         <>
         <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+          <table className="w-full text-sm text-left border-collapse">
             <thead>
-              <tr className="text-left text-gray-400" style={{ backgroundColor: 'rgba(0, 0, 0, 0.2)' }}>
-                <th className="px-4 py-2.5 font-medium">Token / Account</th>
-                <th className="px-4 py-2.5 font-medium">Exchange</th>
-                <th className="px-4 py-2.5 font-medium">Direction</th>
-                <th className="px-4 py-2.5 font-medium">Quantity</th>
-                <th className="px-4 py-2.5 font-medium">Trade Amount</th>
-                <th className="px-4 py-2.5 font-medium">Entry / Exit Price</th>
-                <th className="px-4 py-2.5 font-medium">Time</th>
-                <th className="px-4 py-2.5 font-medium">Fees</th>
-                <th className="px-4 py-2.5 font-medium">Reason</th>
-                <th className="px-4 py-2.5 font-medium">Funding Earned</th>
-                <th className="px-4 py-2.5 font-medium">Net PnL</th>
+              <tr className="border-b border-gray-800 text-gray-400 text-sm" style={{ backgroundColor: 'rgba(0, 0, 0, 0.2)' }}>
+                <th className="p-3 font-medium">Symbol / Exchange</th>
+                <th className="p-3 font-medium">Direction</th>
+                <th className="p-3 font-medium">Quantity</th>
+                <th className="p-3 font-medium">PnL</th>
+                <th className="p-3 font-medium">Reason</th>
+                <th className="p-3 font-medium">Time</th>
               </tr>
             </thead>
             <tbody>
               {rows.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="px-4 py-8 text-center text-gray-400">
+                  <td colSpan={6} className="p-3 text-center text-gray-500">
                     No closed trades match the filters.
                   </td>
                 </tr>
+              ) : currentItems.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="p-3 text-center text-gray-500">
+                    No closed trades on this page.
+                  </td>
+                </tr>
               ) : (
-                displayItems.map((item, idx) => {
-                  if (item.type === 'groupSummary') {
-                    const isProfit = item.netPnl >= 0;
-                    return (
-                      <tr
-                        key={`summary-${idx}`}
-                        className="border-b border-gray-800/80 font-medium"
-                        style={{ backgroundColor: 'rgba(0, 123, 255, 0.08)', borderColor: 'rgba(0, 123, 255, 0.25)' }}
-                      >
-                        <td colSpan={11} className="px-4 py-2 text-right">
-                          <span style={isProfit ? { color: '#22c55e' } : { color: '#ef4444' }}>
-                            Group Net PnL ({item.count} legs): {isProfit ? '+' : ''}{formatUsdWithSign(item.netPnl)}
-                          </span>
+                currentItems.map((group, groupIdx) => (
+                  <React.Fragment key={groupIdx}>
+                    {group.trades.map((trade: ClosedTradeRow, idx: number) => {
+                      const sym = trade.symbol || (trade as { token?: string }).token || '—';
+                      const dir = (trade.side || (trade as { direction?: string }).direction || '').toLowerCase();
+                      const isLong = dir === 'buy';
+                      const dirLabel = isLong ? 'LONG' : 'SHORT';
+                      const dirClass = isLong ? 'text-green-500' : 'text-red-500';
+                      const qty = Math.abs(Number(trade.qty ?? (trade as { quantity?: string }).quantity ?? 0));
+                      const exchangeName = trade.exchange ?? (trade.accountType === 'Sub' ? 'Bybit Sub' : trade.accountType === 'Main' ? 'Bybit Main' : 'Bybit Main');
+                      const pnl = Number(trade.net_pnl ?? trade.gross_pnl ?? 0);
+                      const createdAt = trade.closed_at || (trade as { exit_time?: string }).exit_time || '';
+                      return (
+                        <tr
+                          key={trade.id ?? `${groupIdx}-${idx}`}
+                          className={`border-b border-gray-800 hover:bg-gray-800/50 ${group.isGroup ? 'bg-gray-800/20' : ''}`}
+                          style={{ borderColor: 'rgba(255,255,255,0.06)' }}
+                        >
+                          <td className="p-3 whitespace-nowrap">
+                            <div className="font-medium text-white">{tokenName(sym)}</div>
+                            <div className="text-xs text-gray-500">{exchangeName}</div>
+                          </td>
+                          <td className="p-3 whitespace-nowrap">
+                            <span className={`px-2 py-1 text-xs font-semibold rounded bg-gray-800/50 ${dirClass}`}>
+                              {dirLabel}
+                            </span>
+                          </td>
+                          <td className="p-3 whitespace-nowrap font-medium text-gray-300">{formatQty(qty)}</td>
+                          <td className="p-3 whitespace-nowrap">
+                            <span className={pnl >= 0 ? 'text-green-500' : 'text-red-500'}>
+                              ${pnl.toFixed(4)}
+                            </span>
+                          </td>
+                          <td className="p-3 whitespace-nowrap text-sm text-gray-400">{trade.exitReason ?? trade.exit_reason ?? 'Auto Exit'}</td>
+                          <td className="p-3 whitespace-nowrap text-sm text-gray-400">{createdAt ? formatTime(createdAt) : '—'}</td>
+                        </tr>
+                      );
+                    })}
+                    {group.isGroup && group.trades.length >= 2 && (
+                      <tr className="border-b-[3px] border-gray-700 bg-gray-900/50" style={{ borderColor: 'rgba(0, 123, 255, 0.25)' }}>
+                        <td colSpan={3} className="p-2 text-right text-xs text-gray-400 font-bold">Hedge Net PnL:</td>
+                        <td
+                          colSpan={3}
+                          className={`p-2 text-sm font-bold ${(Number(group.trades[0]?.net_pnl ?? 0) + Number(group.trades[1]?.net_pnl ?? 0)) >= 0 ? 'text-green-500' : 'text-red-500'}`}
+                        >
+                          $
+                          {(Number(group.trades[0]?.net_pnl ?? 0) + Number(group.trades[1]?.net_pnl ?? 0)).toFixed(4)}
                         </td>
                       </tr>
-                    );
-                  }
-                  const r = item.row;
-                  const netPnl = parseFloat(r.net_pnl) || 0;
-                  const isProfit = netPnl >= 0;
-                  const direction = (r.side === 'Buy' || r.side?.toLowerCase() === 'buy') ? 'LONG' : 'SHORT';
-                  const exchangeLabel = r.exchange ?? (r.accountType === 'Sub' ? 'Bybit Sub' : r.accountType === 'Main' ? 'Bybit Main' : 'Bybit Main');
-                  const qtyAbs = Math.abs(parseFloat(r.qty) || 0);
-                  const isFirstInGroup = item.type === 'trade' && item.isFirstInGroup && item.groupKey;
-                  const exchangeBadgeStyle =
-                    exchangeLabel === 'Binance'
-                      ? { backgroundColor: 'rgba(245, 158, 11, 0.25)', color: '#fbbf24' }
-                      : exchangeLabel === 'Bybit Sub'
-                        ? { backgroundColor: 'rgba(168, 85, 247, 0.25)', color: '#c4b5fd' }
-                        : { backgroundColor: 'rgba(59, 130, 246, 0.25)', color: '#93c5fd' };
-                  return (
-                    <tr
-                      key={r.id}
-                      className="border-b border-gray-800/80 hover:bg-white/5"
-                      style={{
-                        borderColor: 'rgba(255,255,255,0.06)',
-                        ...(isFirstInGroup ? { borderLeft: '4px solid rgba(0, 123, 255, 0.5)', backgroundColor: 'rgba(0, 123, 255, 0.04)' } : {}),
-                      }}
-                    >
-                      <td className="px-4 py-2.5 font-medium text-white">
-                        <span className="inline-flex items-center gap-1.5">
-                          {tokenName(r.symbol)}
-                          {r.accountType && (
-                            <span
-                              className="inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
-                              style={
-                                r.accountType === 'Main'
-                                  ? { backgroundColor: 'rgba(59, 130, 246, 0.25)', color: '#93c5fd' }
-                                  : { backgroundColor: 'rgba(168, 85, 247, 0.25)', color: '#c4b5fd' }
-                              }
-                            >
-                              {r.accountType}
-                            </span>
-                          )}
-                        </span>
-                      </td>
-                      <td className="px-4 py-2.5">
-                        <span className="inline-block rounded px-2 py-0.5 text-xs font-semibold" style={exchangeBadgeStyle}>
-                          {exchangeLabel}
-                        </span>
-                      </td>
-                      <td className="px-4 py-2.5">
-                        <span
-                          className="inline-block rounded px-2 py-0.5 text-xs font-semibold"
-                          style={
-                            direction === 'LONG'
-                              ? { backgroundColor: 'rgba(34, 197, 94, 0.2)', color: '#22c55e' }
-                              : { backgroundColor: 'rgba(239, 68, 68, 0.2)', color: '#ef4444' }
-                          }
-                        >
-                          {direction}
-                        </span>
-                      </td>
-                      <td className="px-4 py-2.5 text-gray-300">{formatQty(qtyAbs)}</td>
-                      <td className="px-4 py-2.5 text-gray-300">
-                        {formatUsdWithSign(qtyAbs * (parseFloat(r.entry_price) || 0))}
-                      </td>
-                      <td className="px-4 py-2.5 text-gray-400">
-                        {formatPrice(parseFloat(r.entry_price) || 0)} / {formatPrice(parseFloat(r.exit_price) || 0)}
-                      </td>
-                      <td className="px-4 py-2.5 text-gray-400">{formatTime(r.closed_at)}</td>
-                      <td className="px-4 py-2.5 text-gray-400">{formatUsdWithSign(parseFloat(r.fees) || 0)}</td>
-                      <td className="px-4 py-2.5">
-                        <span
-                          className="inline-block rounded px-2 py-0.5 text-xs font-medium"
-                          style={{
-                            backgroundColor: 'rgba(255, 255, 255, 0.08)',
-                            color: 'rgba(255, 255, 255, 0.85)',
-                            border: '1px solid rgba(255, 255, 255, 0.12)',
-                          }}
-                        >
-                          {r.exitReason ?? r.exit_reason ?? '—'}
-                        </span>
-                      </td>
-                      <td className="px-4 py-2.5">
-                        <span className="text-green-500 text-xs font-medium">
-                          {(parseFloat(r.funding_received ?? r.funding ?? '0') >= 0 ? '+' : '')}
-                          ${(parseFloat(r.funding_received ?? r.funding ?? '0') || 0).toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 4 })}
-                        </span>
-                      </td>
-                      <td className="px-4 py-2.5">
-                        <span
-                          className="inline-block rounded px-2 py-0.5 text-xs font-semibold"
-                          style={
-                            isProfit
-                              ? { backgroundColor: 'rgba(34, 197, 94, 0.2)', color: '#22c55e' }
-                              : { backgroundColor: 'rgba(239, 68, 68, 0.2)', color: '#ef4444' }
-                          }
-                        >
-                          {isProfit ? '+' : ''}{formatUsdWithSign(netPnl)}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })
+                    )}
+                  </React.Fragment>
+                ))
               )}
             </tbody>
           </table>
         </div>
-        {rows.length > 0 && (
-          <div className="px-4 py-3 border-t flex items-center justify-between gap-4" style={{ borderColor: 'rgba(0, 123, 255, 0.2)' }}>
+        {groupedTrades.length > 0 && (
+          <div className="px-4 py-3 border-t flex justify-between items-center gap-4" style={{ borderColor: 'rgba(0, 123, 255, 0.2)' }}>
             <span className="text-sm text-gray-400">
-              Page {currentPage} of {Math.max(1, Math.ceil(rows.length / ITEMS_PER_PAGE))} ({rows.length} trades)
+              Page {currentPage} of {totalPages} ({groupedTrades.length} groups / {rows.length} trades)
             </span>
             <div className="flex gap-2">
               <button
                 type="button"
                 onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
                 disabled={currentPage <= 1}
-                className="rounded-lg px-3 py-1.5 text-sm font-medium text-white border transition disabled:opacity-50 disabled:cursor-not-allowed"
-                style={{ backgroundColor: '#007BFF', borderColor: 'rgba(0, 123, 255, 0.5)' }}
+                className="px-3 py-1 bg-gray-800 rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed text-white border transition"
+                style={{ borderColor: 'rgba(255,255,255,0.2)' }}
               >
-                Previous
+                Prev
               </button>
               <button
                 type="button"
-                onClick={() => setCurrentPage((p) => p + 1)}
-                disabled={currentPage >= Math.ceil(rows.length / ITEMS_PER_PAGE)}
-                className="rounded-lg px-3 py-1.5 text-sm font-medium text-white border transition disabled:opacity-50 disabled:cursor-not-allowed"
-                style={{ backgroundColor: '#007BFF', borderColor: 'rgba(0, 123, 255, 0.5)' }}
+                onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                disabled={currentPage >= totalPages || totalPages === 0}
+                className="px-3 py-1 bg-gray-800 rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed text-white border transition"
+                style={{ borderColor: 'rgba(255,255,255,0.2)' }}
               >
                 Next
               </button>
