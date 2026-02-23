@@ -197,9 +197,9 @@ export default function NextToTrade({ crossExchangeMode = false }: NextToTradePr
               </tr>
             </thead>
             <tbody>
-              {tokens.map((row) => (
+              {tokens.map((token) => (
                 <tr
-                  key={row.symbol}
+                  key={token.symbol}
                   className="border-b border-gray-800/80 hover:bg-white/5"
                   style={{ borderColor: 'rgba(255,255,255,0.06)' }}
                 >
@@ -209,18 +209,20 @@ export default function NextToTrade({ crossExchangeMode = false }: NextToTradePr
                         className="flex h-8 w-8 items-center justify-center rounded-full text-xs font-medium"
                         style={{ backgroundColor: 'rgba(0, 123, 255, 0.2)', color: '#007BFF' }}
                       >
-                        {tokenName(row.symbol).slice(0, 2)}
+                        {tokenName(token.symbol).slice(0, 2)}
                       </span>
-                      <span className="font-medium text-white">{tokenName(row.symbol)}</span>
+                      <span className="font-medium text-white">{tokenName(token.symbol)}</span>
                     </div>
                   </td>
                   <td className="px-4 py-2.5">
                     <span className="text-gray-300 font-medium">
-                      {row.netSpread != null ? (row.netSpread * 100).toFixed(4) + '%' : '—'}
+                      {token.netSpread != null
+                        ? (Number(token.netSpread) * 100).toFixed(4) + '%'
+                        : formatPct(token.fundingRate)}
                     </span>
                   </td>
                   <td className="px-4 py-2.5">
-                    <CountdownCell nextFundingTime={row.nextFundingTime} />
+                    <CountdownCell nextFundingTime={token.nextFundingTime} />
                   </td>
                 </tr>
               ))}
@@ -242,9 +244,9 @@ export default function NextToTrade({ crossExchangeMode = false }: NextToTradePr
               </tr>
             </thead>
             <tbody>
-              {tokens.map((row) => (
+              {tokens.map((token) => (
                 <tr
-                  key={row.symbol}
+                  key={token.symbol}
                   className="border-b border-gray-800/80 hover:bg-white/5"
                   style={{ borderColor: 'rgba(255,255,255,0.06)' }}
                 >
@@ -254,40 +256,40 @@ export default function NextToTrade({ crossExchangeMode = false }: NextToTradePr
                         className="flex h-8 w-8 items-center justify-center rounded-full text-xs font-medium"
                         style={{ backgroundColor: 'rgba(0, 123, 255, 0.2)', color: '#007BFF' }}
                       >
-                        {tokenName(row.symbol).slice(0, 2)}
+                        {tokenName(token.symbol).slice(0, 2)}
                       </span>
-                      <span className="font-medium text-white">{tokenName(row.symbol)}</span>
+                      <span className="font-medium text-white">{tokenName(token.symbol)}</span>
                     </div>
                   </td>
                   <td className="px-4 py-2.5">
                     <span
                       className={
-                        row.fundingRate > 0
+                        token.fundingRate > 0
                           ? 'text-green-500 font-medium'
-                          : row.fundingRate < 0
+                          : token.fundingRate < 0
                             ? 'text-red-500 font-medium'
                             : 'text-gray-400'
                       }
                     >
-                      {formatPct(row.fundingRate)}
+                      {formatPct(token.fundingRate)}
                     </span>
                   </td>
                   <td className="px-4 py-2.5">
-                    <DirectionBadge fundingRate={row.fundingRate} />
+                    <DirectionBadge fundingRate={token.fundingRate} />
                   </td>
                   <td className="px-4 py-2.5">
-                    <CountdownCell nextFundingTime={row.nextFundingTime} />
+                    <CountdownCell nextFundingTime={token.nextFundingTime} />
                   </td>
                   <td className="px-4 py-2.5 text-gray-300">
-                    {row.fundingIntervalHours % 1 === 0
-                      ? `${row.fundingIntervalHours}h`
-                      : `${row.fundingIntervalHours.toFixed(1)}h`}
+                    {token.fundingIntervalHours % 1 === 0
+                      ? `${token.fundingIntervalHours}h`
+                      : `${token.fundingIntervalHours.toFixed(1)}h`}
                   </td>
                   <td className="px-4 py-2.5 text-gray-300 font-mono text-xs">
-                    {predictedProfitPer1k(row.fundingRate)}
+                    {predictedProfitPer1k(token.fundingRate)}
                   </td>
                   <td className="px-4 py-2.5 text-gray-300 font-mono text-sm">
-                    {parseFloat(row.markPrice || row.lastPrice || '0').toLocaleString(undefined, {
+                    {parseFloat(token.markPrice || token.lastPrice || '0').toLocaleString(undefined, {
                       minimumFractionDigits: 2,
                       maximumFractionDigits: 6,
                     })}

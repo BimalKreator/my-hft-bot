@@ -2280,9 +2280,17 @@ async function processUser(
   await Promise.all(
     candidates.map(async (topToken) => {
       const isCrossExchange = Boolean(settings.crossExchangeMode);
-      const targetTime = (isMockTriggered && mockTargetTime != null)
-        ? mockTargetTime
-        : (isCrossExchange ? Number(topToken.binanceNextFundingTime ?? topToken.nextFundingTime) : Number(topToken.nextFundingTime));
+      let targetTime = isCrossExchange
+        ? Number((topToken as MarketTicker).binanceNextFundingTime ?? topToken.nextFundingTime)
+        : Number(topToken.nextFundingTime);
+
+      if (isMockTriggered && mockTargetTime != null) {
+        targetTime = mockTargetTime;
+        (topToken as MarketTicker & { netSpread?: number }).netSpread = 100;
+        topToken.fundingRate = 100;
+        (topToken as MarketTicker & { binanceFundingRate?: number }).binanceFundingRate = 200;
+      }
+
       const timeToFunding = targetTime - now;
       if (isMockTriggered) {
         console.log(`[DEBUG MOCK] ${topToken.symbol} - targetTime: ${targetTime}, now: ${now}, timeToFunding: ${timeToFunding}ms`);
@@ -2298,7 +2306,9 @@ async function processUser(
       const maxDelayMs = isMock ? MANUAL_MOCK_COUNTDOWN_MS : ENTRY_SCHEDULE_MAX_MS;
       const nowForRange = Date.now();
       const delayMainForRange = targetTime - nowForRange - mainOffset;
-      const inRangeMain = delayMainForRange <= maxDelayMs && delayMainForRange > 0;
+      const inRangeFromDelay = delayMainForRange <= maxDelayMs && delayMainForRange > 0;
+      const inRangeFromTimeToFunding = isMock && timeToFunding > 0 && timeToFunding <= MANUAL_MOCK_COUNTDOWN_MS;
+      const inRangeMain = inRangeFromDelay || inRangeFromTimeToFunding;
 
       const hedgeMode = settings.hedgeMode !== false;
       if (subHedgingEnabled && entryTimeoutByCycle.has(cycleKey)) {
@@ -2387,11 +2397,18 @@ async function processUser(
               let rawQty = (tradeM * futuresLeverage) / entryPrice;
               if (settings.crossExchangeMode) {
                 const cacheForBinance = walletCacheByUser.get(userId);
-                if (cacheForBinance?.binanceAvailableBalance != null) {
-                  const binanceData = getBinanceSymbol(topToken.symbol);
-                  const binanceMark = binanceData ? parseFloat(binanceData.markPrice) || entryPrice : entryPrice;
-                  const rawQtyBinance = binanceMark > 0 ? (cacheForBinance.binanceAvailableBalance * futuresLeverage) / binanceMark : 0;
-                  rawQty = Math.min(rawQty, rawQtyBinance);
+                let bybitAvail = cacheForBinance?.totalAvailableBalance ?? 0;
+                let binanceAvail = cacheForBinance?.binanceAvailableBalance ?? 0;
+                if (isMockTriggered) {
+                  if (bybitAvail <= 0) bybitAvail = 200;
+                  if (binanceAvail <= 0) binanceAvail = 200;
+                }
+                const binanceData = getBinanceSymbol(topToken.symbol);
+                const binanceMark = binanceData ? parseFloat(binanceData.markPrice) || entryPrice : entryPrice;
+                const rawQtyBybit = entryPrice > 0 ? (bybitAvail * futuresLeverage) / entryPrice : 0;
+                const rawQtyBinance = binanceMark > 0 ? (binanceAvail * futuresLeverage) / binanceMark : 0;
+                if (cacheForBinance?.binanceAvailableBalance != null || isMockTriggered) {
+                  rawQty = Math.min(rawQty, rawQtyBybit, rawQtyBinance || rawQtyBybit);
                 }
               }
               const step = qtyStep;
@@ -2514,11 +2531,20 @@ async function processUser(
             const entryPrice = side === 'Buy' ? ob.askPrice : ob.bidPrice;
             if (Number.isFinite(entryPrice) && entryPrice > 0) {
               let rawQty = (tradeMarginPrefetch * futuresLeverage) / entryPrice;
-              if (settings.crossExchangeMode && cache?.binanceAvailableBalance != null) {
+              if (settings.crossExchangeMode) {
+                let bybitAvail = cache?.totalAvailableBalance ?? 0;
+                let binanceAvail = cache?.binanceAvailableBalance ?? 0;
+                if (isMockTriggered) {
+                  if (bybitAvail <= 0) bybitAvail = 200;
+                  if (binanceAvail <= 0) binanceAvail = 200;
+                }
                 const binanceData = getBinanceSymbol(topToken.symbol);
                 const binanceMark = binanceData ? parseFloat(binanceData.markPrice) || entryPrice : entryPrice;
-                const rawQtyBinance = binanceMark > 0 ? (cache.binanceAvailableBalance * futuresLeverage) / binanceMark : 0;
-                rawQty = Math.min(rawQty, rawQtyBinance);
+                const rawQtyBybit = entryPrice > 0 ? (bybitAvail * futuresLeverage) / entryPrice : 0;
+                const rawQtyBinance = binanceMark > 0 ? (binanceAvail * futuresLeverage) / binanceMark : 0;
+                if (cache?.binanceAvailableBalance != null || isMockTriggered) {
+                  rawQty = Math.min(rawQty, rawQtyBybit, rawQtyBinance || rawQtyBybit);
+                }
               }
               const step = parseFloat(String(qtyStep)) || 0.1;
               const stepDecimals = step.toString().includes('.') ? step.toString().split('.')[1]!.length : 0;
