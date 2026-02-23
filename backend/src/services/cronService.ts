@@ -1,8 +1,10 @@
 import cron from 'node-cron';
 import { query } from '../config/db.js';
 import { getExchangeKeys, getSubAccountKeys } from '../models/exchangeModel.js';
+import { getSettings } from '../models/settingsModel.js';
 import { decrypt } from '../utils/encryption.js';
 import { getWalletBalance } from './bybitService.js';
+import { getBinanceAvailableBalance } from './binanceService.js';
 
 /** Same as statsService: used for Closing Balance = BASE_CAPITAL + wallet equity. */
 const BASE_CAPITAL = 3000;
@@ -57,9 +59,12 @@ async function runDailySnapshot(): Promise<void> {
       const balance = await getWalletBalance(apiKey, apiSecret);
       mainEquity = parseFloat(balance.totalEquity ?? '0') || 0;
 
+      const settings = await getSettings(userId);
+      const crossExchangeMode = !!settings.crossExchangeMode;
+
       const subKeys = await getSubAccountKeys(userId);
       let subEquity = 0;
-      if (subKeys) {
+      if (!crossExchangeMode && subKeys) {
         try {
           const subBalance = await getWalletBalance(subKeys.subApiKey, subKeys.subApiSecret);
           subEquity = parseFloat(subBalance.totalEquity ?? '0') || 0;
@@ -68,9 +73,20 @@ async function runDailySnapshot(): Promise<void> {
         }
       }
 
-      const walletEquity = mainEquity + subEquity;
+      let binanceBalance = 0;
+      if (crossExchangeMode && settings.binanceApiKey && settings.binanceApiSecret) {
+        try {
+          binanceBalance = await getBinanceAvailableBalance(decrypt(settings.binanceApiKey), decrypt(settings.binanceApiSecret));
+        } catch (err) {
+          console.warn('[cron] Binance balance fetch failed for user', userId, err instanceof Error ? err.message : String(err));
+        }
+      }
+
+      const walletEquity = crossExchangeMode ? mainEquity + binanceBalance : mainEquity + subEquity;
       const closingBalance = BASE_CAPITAL + walletEquity;
-      if (subKeys && (mainEquity > 0 || subEquity > 0)) {
+      if (crossExchangeMode && (mainEquity > 0 || binanceBalance > 0)) {
+        console.log(`[cron] Daily snapshot user ${userId} capital (cross-exchange): mainEquity=${mainEquity} binanceBalance=${binanceBalance} closing=${closingBalance}`);
+      } else if (subKeys && (mainEquity > 0 || subEquity > 0)) {
         console.log(`[cron] Daily snapshot user ${userId} capital (main+sub): mainEquity=${mainEquity} subEquity=${subEquity} closing=${closingBalance}`);
       }
 

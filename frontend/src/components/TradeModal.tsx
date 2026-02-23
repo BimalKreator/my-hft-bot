@@ -39,6 +39,8 @@ export default function TradeModal({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [availableBalance, setAvailableBalance] = useState<number>(0);
+  const [binanceAvailableBalance, setBinanceAvailableBalance] = useState<number | null>(null);
+  const [crossExchangeMode, setCrossExchangeMode] = useState(false);
   const [balanceLoading, setBalanceLoading] = useState(false);
 
   const price = tokenData?.price ?? 0;
@@ -60,6 +62,13 @@ export default function TradeModal({
       .then((data) => {
         const bal = parseFloat(data?.totalAvailableBalance ?? '0');
         setAvailableBalance(Number.isNaN(bal) ? 0 : bal);
+        setCrossExchangeMode(data?.crossExchangeMode === true);
+        if (data?.crossExchangeMode === true && data?.binanceAvailableBalance != null) {
+          const binanceBal = parseFloat(String(data.binanceAvailableBalance));
+          setBinanceAvailableBalance(Number.isNaN(binanceBal) ? 0 : binanceBal);
+        } else {
+          setBinanceAvailableBalance(null);
+        }
       })
       .finally(() => setBalanceLoading(false));
   }, [isOpen]);
@@ -80,7 +89,10 @@ export default function TradeModal({
   const tradingFee = positionSizeUsdt * TRADING_FEE_RATE;
   const netProfitEst = estFunding - tradingFee;
 
-  const insufficientBalance = marginRequired > availableBalance && marginRequired > 0;
+  const effectiveAvailable = crossExchangeMode && binanceAvailableBalance != null
+    ? Math.min(availableBalance, binanceAvailableBalance)
+    : availableBalance;
+  const insufficientBalance = marginRequired > effectiveAvailable && marginRequired > 0;
 
   const resetForm = useCallback(() => {
     setView('form');
@@ -126,6 +138,7 @@ export default function TradeModal({
           qty: String(qty),
           leverage: mode === 'auto' ? 5 : leverage,
           type: mode === 'auto' ? 'Auto' : 'Manual',
+          ...(crossExchangeMode && { isCrossExchange: true }),
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -149,7 +162,7 @@ export default function TradeModal({
     } finally {
       setLoading(false);
     }
-  }, [tokenData, direction, quantityTokens, leverage, mode]);
+  }, [tokenData, direction, quantityTokens, leverage, mode, crossExchangeMode]);
 
   if (!isOpen) return null;
 
@@ -469,7 +482,9 @@ export default function TradeModal({
           >
             {balanceLoading
               ? 'Loading balance…'
-              : `Available Balance: $${availableBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+              : crossExchangeMode && binanceAvailableBalance != null
+                ? `Bybit Available: $${availableBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · Binance Available: $${binanceAvailableBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                : `Available Balance: $${availableBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
           </p>
 
           <button

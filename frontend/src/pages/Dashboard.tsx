@@ -16,6 +16,8 @@ interface DashboardStats {
   dailyRoi: number;
   mainEquity?: number;
   subEquity?: number;
+  binanceBalance?: number;
+  crossExchangeMode?: boolean;
 }
 
 function formatUsd(value: number): string {
@@ -76,6 +78,8 @@ export default function Dashboard() {
         dailyRoi: Number(data.dailyRoi) ?? 0,
         mainEquity: Number(data.mainEquity) ?? 0,
         subEquity: Number(data.subEquity) ?? 0,
+        binanceBalance: data.binanceBalance != null ? Number(data.binanceBalance) : undefined,
+        crossExchangeMode: data.crossExchangeMode === true,
       });
     } catch {
       setError('Network error');
@@ -156,15 +160,29 @@ export default function Dashboard() {
                 </span>
               </div>
               <div className="flex flex-wrap gap-4 text-sm">
-                {/* TODO: Remove temporary +1500 offset later */}
-                <div>
-                  <p className="text-gray-500">Main</p>
-                  <p className="font-medium text-white">${((stats.mainEquity ?? 0) + 1500).toFixed(2)}</p>
-                </div>
-                <div>
-                  <p className="text-gray-500">Sub</p>
-                  <p className="font-medium text-white">${((stats.subEquity ?? 0) + 1500).toFixed(2)}</p>
-                </div>
+                {stats.crossExchangeMode ? (
+                  <>
+                    <div>
+                      <p className="text-gray-500">Bybit Main (UFA)</p>
+                      <p className="font-medium text-white">{formatUsd(stats.mainEquity ?? 0)}</p>
+                    </div>
+                    <div>
+                      <p className="text-gray-500">Binance</p>
+                      <p className="font-medium text-white">{formatUsd(stats.binanceBalance ?? 0)}</p>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div>
+                      <p className="text-gray-500">Main</p>
+                      <p className="font-medium text-white">{formatUsd(stats.mainEquity ?? 0)}</p>
+                    </div>
+                    <div>
+                      <p className="text-gray-500">Sub</p>
+                      <p className="font-medium text-white">{formatUsd(stats.subEquity ?? 0)}</p>
+                    </div>
+                  </>
+                )}
               </div>
               <div>
                 <p className="text-xs text-gray-500">Opening Balance (today)</p>

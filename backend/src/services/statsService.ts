@@ -1,7 +1,9 @@
 import { query } from '../config/db.js';
 import { getExchangeKeys, getSubAccountKeys } from '../models/exchangeModel.js';
+import { getSettings } from '../models/settingsModel.js';
 import { decrypt } from '../utils/encryption.js';
 import { getWalletBalance } from './bybitService.js';
+import { getBinanceAvailableBalance } from './binanceService.js';
 
 const BASE_CAPITAL = 3000;
 const IST = 'Asia/Kolkata';
@@ -31,6 +33,10 @@ export interface DashboardStats {
   dailyRoi: number;
   mainEquity: number;
   subEquity: number;
+  /** When cross_exchange_mode: Binance USDT available balance. */
+  binanceBalance?: number;
+  /** When true, capital = mainEquity + binanceBalance (+ base). */
+  crossExchangeMode?: boolean;
 }
 
 /**
@@ -44,12 +50,15 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
   const apiKey = decrypt(keys.api_key);
   const apiSecret = decrypt(keys.api_secret);
 
+  const settings = await getSettings(userId);
+  const crossExchangeMode = !!settings.crossExchangeMode;
+
   let mainEquity = 0;
   const balance = await getWalletBalance(apiKey, apiSecret);
   mainEquity = parseFloat(balance.totalEquity ?? '0') || 0;
 
   const subKeys = await getSubAccountKeys(userId);
-  const subHedgingActive = !!subKeys;
+  const subHedgingActive = !crossExchangeMode && !!subKeys;
   let subEquity = 0;
   let subInitialMargin = 0;
   if (subHedgingActive && subKeys) {
@@ -62,10 +71,21 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
     }
   }
 
-  /** Combined capital = base + main equity + sub equity (same as midnight snapshot). */
-  const walletBalance = mainEquity + subEquity;
+  let binanceBalance = 0;
+  if (crossExchangeMode && settings.binanceApiKey && settings.binanceApiSecret) {
+    try {
+      binanceBalance = await getBinanceAvailableBalance(decrypt(settings.binanceApiKey), decrypt(settings.binanceApiSecret));
+    } catch (err) {
+      console.warn('[statsService] Binance balance fetch failed:', err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /** Combined capital: cross-exchange = base + main + binance; else base + main + sub. */
+  const walletBalance = crossExchangeMode ? mainEquity + binanceBalance : mainEquity + subEquity;
   const capital = BASE_CAPITAL + walletBalance;
-  if (subHedgingActive && (subEquity > 0 || mainEquity > 0)) {
+  if (crossExchangeMode && (mainEquity > 0 || binanceBalance > 0)) {
+    console.log('[statsService] Capital (cross-exchange):', { mainEquity, binanceBalance, walletBalance, capital });
+  } else if (subHedgingActive && (subEquity > 0 || mainEquity > 0)) {
     console.log('[statsService] Capital (main+sub):', { mainEquity, subEquity, walletBalance, capital });
   }
 
@@ -158,5 +178,6 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
     dailyRoi,
     mainEquity,
     subEquity,
+    ...(crossExchangeMode && { binanceBalance, crossExchangeMode: true }),
   };
 }

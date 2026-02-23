@@ -1,7 +1,9 @@
 import { Response } from 'express';
 import { addExchangeKeys, getExchangeKeys } from '../models/exchangeModel.js';
+import { getSettings } from '../models/settingsModel.js';
 import { decrypt } from '../utils/encryption.js';
 import { getWalletBalance } from '../services/bybitService.js';
+import { getBinanceAvailableBalance } from '../services/binanceService.js';
 import { AuthRequest } from '../middleware/authMiddleware.js';
 
 export async function getBalance(req: AuthRequest, res: Response): Promise<void> {
@@ -22,12 +24,29 @@ export async function getBalance(req: AuthRequest, res: Response): Promise<void>
     const apiSecret = decrypt(keys.api_secret);
     const balance = await getWalletBalance(apiKey, apiSecret);
 
-    res.json({
+    const payload: Record<string, unknown> = {
       totalEquity: balance.totalEquity,
       totalAvailableBalance: balance.totalAvailableBalance,
       totalPerpUPL: balance.totalPerpUPL,
       coins: balance.coins,
-    });
+    };
+
+    const settings = await getSettings(userId);
+    if (settings.crossExchangeMode && settings.binanceApiKey && settings.binanceApiSecret) {
+      try {
+        const binanceAvailable = await getBinanceAvailableBalance(
+          decrypt(settings.binanceApiKey),
+          decrypt(settings.binanceApiSecret)
+        );
+        payload.binanceAvailableBalance = binanceAvailable;
+        payload.crossExchangeMode = true;
+      } catch {
+        payload.binanceAvailableBalance = 0;
+        payload.crossExchangeMode = true;
+      }
+    }
+
+    res.json(payload);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to fetch balance';
     res.status(500).json({ error: msg });
