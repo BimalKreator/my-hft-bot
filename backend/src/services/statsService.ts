@@ -209,7 +209,12 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
     try {
       const list = await getCrossExchangeFundingData();
       const maxTrades = settings.maxTrades ?? 1;
-      const top = list.slice(0, maxTrades);
+      const minFundingRateProfit = Number((settings as { min_funding_rate_profit?: number }).min_funding_rate_profit ?? settings.minFundingRate ?? 0);
+      const minProfitPct = minFundingRateProfit / 100;
+      const validCandidates = list.filter((candidate) => {
+        return Number(candidate.netSpread ?? 0) >= minProfitPct;
+      });
+      const top = validCandidates.slice(0, maxTrades);
       nextToTrade = top.map((t) => ({
         symbol: t.symbol,
         netSpread: t.netSpread ?? 0,

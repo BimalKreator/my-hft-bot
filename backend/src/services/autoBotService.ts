@@ -2084,22 +2084,28 @@ async function processUser(
 
   // Auto Exit is handled by monitorExits (1s loop) with reduce-only orders and unified logging.
 
-  // Auto Entry: filter by min funding rate (compare % to % so negative/short-squeeze rates are not missed). Bypass when mock (TEST_MODE or manual).
+  // Auto Entry: filter by minimum profit (cross-exchange = netSpread, naked = abs funding rate). Bypass when mock.
   const minFundingRate = settings.minFundingRate ?? 0;
-  const minPct = minFundingRate > 0 && minFundingRate < 0.1 ? minFundingRate * 100 : minFundingRate;
+  const minFundingRateProfit = Number((settings as { min_funding_rate_profit?: number }).min_funding_rate_profit ?? minFundingRate);
+  const minRate = minFundingRateProfit / 100;
+  const isCrossExchange = Boolean(settings.crossExchangeMode);
 
   let meetsMinFunding: typeof marketData;
   if (isMockTriggered) {
-    // Mock bypass: take candidates regardless of rate for testing
     meetsMinFunding = [...marketData];
   } else {
     meetsMinFunding = marketData.filter((token) => {
-      const absRatePct = Math.abs(token.fundingRate * 100);
-      const passes = absRatePct >= minPct;
-      if (debugSkip && !passes && marketData.indexOf(token) < 5 && entryTimeoutByCycle.size === 0) {
-        console.log(`[DEBUG] Checking ${token.symbol}: Abs Rate ${absRatePct.toFixed(4)}% vs Min ${minPct}%`);
+      let isValidProfit: boolean;
+      if (isCrossExchange) {
+        isValidProfit = Number((token as MarketTicker & { netSpread?: number }).netSpread ?? 0) >= minRate;
+      } else {
+        isValidProfit = Math.abs(Number(token.fundingRate)) >= minRate;
       }
-      return passes;
+      if (debugSkip && !isValidProfit && marketData.indexOf(token) < 5 && entryTimeoutByCycle.size === 0) {
+        const netOrAbs = isCrossExchange ? (token as MarketTicker & { netSpread?: number }).netSpread : Math.abs(token.fundingRate);
+        console.log(`[DEBUG] Checking ${token.symbol}: ${isCrossExchange ? 'Net Spread' : 'Abs Rate'} ${Number(netOrAbs).toFixed(4)} vs Min ${minRate}`);
+      }
+      return isValidProfit;
     });
   }
   let bannedSet: Set<string>;
@@ -2121,6 +2127,11 @@ async function processUser(
     const intervalA = a.fundingIntervalHours ?? 0;
     const intervalB = b.fundingIntervalHours ?? 0;
     if (intervalA !== intervalB) return intervalA - intervalB;
+    if (isCrossExchange) {
+      const spreadA = (a as MarketTicker & { netSpread?: number }).netSpread ?? 0;
+      const spreadB = (b as MarketTicker & { netSpread?: number }).netSpread ?? 0;
+      return spreadB - spreadA;
+    }
     return Math.abs(b.fundingRate) - Math.abs(a.fundingRate);
   });
   const candidates = sorted.slice(0, maxTrades);
