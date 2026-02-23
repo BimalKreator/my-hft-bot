@@ -4,6 +4,16 @@ import { getExchangeKeys, getSubAccountKeys } from '../models/exchangeModel.js';
 import { getSettings } from '../models/settingsModel.js';
 import { decrypt } from '../utils/encryption.js';
 import { FundingScanner } from './scannerService.js';
+
+/** Decrypt if possible; if decrypt throws (e.g. value was saved as plain text), return raw string. */
+function tryDecrypt(val: string | null | undefined): string {
+  if (!val) return '';
+  try {
+    return decrypt(val);
+  } catch {
+    return val;
+  }
+}
 import { getHedgeGroupByPosition } from '../models/hedgeGroupModel.js';
 import { getBinanceAllPositions, getBinanceSymbol } from './binanceService.js';
 
@@ -113,8 +123,8 @@ export async function getEnrichedPositions(userId: number): Promise<EnrichedPosi
   const crossExchangeMode = !!settings.crossExchangeMode && !!settings.binanceApiKey && !!settings.binanceApiSecret;
   if (crossExchangeMode) {
     try {
-      const binanceApiKey = decrypt(settings.binanceApiKey!);
-      const binanceApiSecret = decrypt(settings.binanceApiSecret!);
+      const binanceApiKey = tryDecrypt(settings.binanceApiKey) || settings.binanceApiKey || '';
+      const binanceApiSecret = tryDecrypt(settings.binanceApiSecret) || settings.binanceApiSecret || '';
       binancePositions = await getBinanceAllPositions(binanceApiKey, binanceApiSecret);
     } catch (e) {
       console.warn('[vwapService] Binance positions fetch failed:', e);
