@@ -2327,9 +2327,10 @@ async function processUser(
         topToken.countdownMs = Math.max(0, mockTargetTime - now);
       }
 
-      const timeToFunding = targetTime - now;
-      if (isMockTriggered) {
-        console.log(`[DEBUG MOCK] ${topToken.symbol} - targetTime: ${targetTime}, now: ${now}, timeToFunding: ${timeToFunding}ms (must be mockTargetTime - now)`);
+      let timeToFunding = targetTime - now;
+      if (isMockTriggered && mockTargetTime != null) {
+        timeToFunding = mockTargetTime - now;
+        console.log(`[DEBUG MOCK] ${topToken.symbol} timeToFunding overridden to: ${timeToFunding}ms`);
       }
       const fundingTimeMs = targetTime;
       const exactEntryTimeMs = fundingTimeMs - entryOffsetMs;
@@ -2350,6 +2351,9 @@ async function processUser(
       if (subHedgingEnabled && entryTimeoutByCycle.has(cycleKey)) {
         return;
       }
+
+      const inPrefetchByTimeToFunding = timeToFunding > 0 && timeToFunding <= PREFETCH_WINDOW_MS;
+      const shouldEnterPrefetch = inPrefetchWindow || (isMockTriggered && inPrefetchByTimeToFunding);
 
       if (inRangeMain && !entryTimeoutByCycle.has(cycleKey)) {
         if (isMockTriggered) {
@@ -2521,7 +2525,10 @@ async function processUser(
         return;
       }
 
-      if (inPrefetchWindow) {
+      if (shouldEnterPrefetch) {
+        if (isMockTriggered && inPrefetchByTimeToFunding) {
+          console.log(`[DEBUG MOCK] ${topToken.symbol} entering prefetch (timeToFunding ${timeToFunding}ms <= PREFETCH_WINDOW_MS ${PREFETCH_WINDOW_MS})`);
+        }
         try {
           const userLeverage = settings.leverage ?? 5;
           const spotHedgingEnabled = Boolean(settings.spotHedgingEnabled);
@@ -2626,7 +2633,7 @@ async function processUser(
         } catch (err) {
           console.error('Prep Error:', err);
         }
-        if (settings.spotHedgingEnabled) {
+        if (settings.spotHedgingEnabled && !isMockTriggered) {
           const entryOffsetSec = Math.floor(entryOffsetMs / 1000);
           const countdownSecPrefetch = Math.floor(topToken.countdownMs / 1000);
           const inWindowPrefetch = countdownSecPrefetch <= entryOffsetSec && countdownSecPrefetch > Math.max(0, entryOffsetSec - 10);
