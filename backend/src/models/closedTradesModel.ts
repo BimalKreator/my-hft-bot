@@ -42,6 +42,31 @@ export function netPnl(grossPnl: number, funding: number, fees: number): number 
   return grossPnl + funding - fees;
 }
 
+/**
+ * Strict 8-param save for closed trades. Forces absolute quantity. Inserts into closed_trades.
+ * Use for simple exit logging (e.g. Binance leg) when full entry/exit prices are not needed.
+ */
+export async function saveClosedTrade(
+  userId: number,
+  symbol: string,
+  direction: string,
+  quantity: number | string,
+  pnl: number | string,
+  exitReason: string,
+  fees: number | string,
+  exchange: string = 'Bybit Main'
+): Promise<void> {
+  const absQty = Math.abs(Number(quantity));
+  const pnlNum = Number(pnl);
+  const feesNum = Number(fees);
+  const netPnlVal = pnlNum - feesNum;
+  await query(
+    `INSERT INTO closed_trades (user_id, token, direction, quantity, entry_price, exit_price, entry_time, exit_time, fees, funding_received, gross_pnl, net_pnl, status, exit_reason, exchange)
+     VALUES ($1, $2, $3, $4, $5, $6, NULL, NOW(), $7, $8, $9, $10, $11, $12, $13)`,
+    [userId, symbol, direction, absQty, 0, 0, feesNum, 0, pnlNum, netPnlVal, 'auto', exitReason, exchange]
+  );
+}
+
 export async function insertClosedTrade(params: InsertClosedTradeParams): Promise<number> {
   const funding = params.funding ?? 0;
   const fees = params.fees ?? 0;
@@ -51,6 +76,7 @@ export async function insertClosedTrade(params: InsertClosedTradeParams): Promis
   // Store crypto prices with at least 6 decimal places; never round to 2
   const entryPrice = Number(Number(params.entryPrice).toFixed(6));
   const exitPrice = Number(Number(params.exitPrice).toFixed(6));
+  const absQty = Math.abs(Number(params.qty));
   const result = await query<{ id: number }>(
     `INSERT INTO closed_trades (user_id, token, direction, quantity, entry_price, exit_price, entry_time, exit_time, fees, funding_received, gross_pnl, net_pnl, status, exit_reason, exchange)
      VALUES ($1, $2, $3, $4, $5, $6, NULL, NOW(), $7, $8, $9, $10, $11, $12, $13)
@@ -59,7 +85,7 @@ export async function insertClosedTrade(params: InsertClosedTradeParams): Promis
       params.userId,
       params.symbol,
       params.side,
-      params.qty,
+      absQty,
       entryPrice,
       exitPrice,
       fees,
@@ -116,7 +142,8 @@ export async function getClosedTrades(
   const sql = `SELECT id, user_id, token, direction, quantity, entry_price, exit_price, entry_time, exit_time, fees, funding_received, gross_pnl, net_pnl, status, exit_reason, exchange
                FROM closed_trades
                WHERE ${conditions.join(' AND ')}
-               ORDER BY exit_time DESC`;
+               ORDER BY exit_time DESC
+               LIMIT 100`;
   const result = await query<ClosedTradeRow>(sql, params);
   return result.rows;
 }

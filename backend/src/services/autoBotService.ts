@@ -41,7 +41,7 @@ import {
   placeBinanceOrder,
   formatBinanceOrderParams,
 } from './binanceService.js';
-import { insertClosedTrade } from '../models/closedTradesModel.js';
+import { insertClosedTrade, saveClosedTrade } from '../models/closedTradesModel.js';
 import {
   createHedgeGroup,
   getHedgeGroupByPosition,
@@ -1229,22 +1229,11 @@ async function monitorExits(): Promise<void> {
                 const binancePosAmt = Number(binancePosition!.positionAmt);
                 const binanceDirection: 'Buy' | 'Sell' = binancePosAmt > 0 ? 'Buy' : 'Sell';
                 const binanceQty = Math.abs(binancePosAmt);
-                const binanceEntry = Number(binancePosition!.entryPrice) || 0;
                 const binancePnl = Number(binancePosition!.unRealizedProfit) || 0;
-                await insertClosedTrade({
-                  userId,
-                  symbol: pos.symbol,
-                  side: binanceDirection,
-                  entryPrice: binanceEntry,
-                  exitPrice: binanceEntry,
-                  qty: binanceQty,
-                  grossPnl: binancePnl,
-                  funding: 0,
-                  fees: 0,
-                  source: 'auto',
-                  exitReason,
-                  exchange: 'Binance',
-                }).catch((e) => console.error(`[autoBot] insertClosedTrade (Binance cross-exchange) failed ${pos.symbol}:`, e));
+                const binanceFee = 0;
+                await saveClosedTrade(userId, pos.symbol, binanceDirection, binanceQty, binancePnl, exitReason, binanceFee, 'Binance').catch((e) =>
+                  console.error(`[autoBot] saveClosedTrade (Binance cross-exchange) failed ${pos.symbol}:`, e)
+                );
                 console.log('[EXIT] Cross-Exchange Exit (SL/Breakeven) |', pos.symbol);
                 return true;
               } catch (e) {
