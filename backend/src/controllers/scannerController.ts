@@ -1,7 +1,5 @@
 import { Request, Response } from 'express';
-import { FundingScanner } from '../services/scannerService.js';
-
-const scanner = new FundingScanner();
+import { getCrossExchangeFundingData } from '../services/marketService.js';
 
 export async function getFundingOpportunities(
   req: Request,
@@ -23,7 +21,7 @@ export async function getFundingOpportunities(
         ? { minFundingRate, minVolume, type }
         : undefined;
 
-    const data = await scanner.getCrossExchangeFundingData(filters);
+    const data = await getCrossExchangeFundingData(filters);
     res.json(data);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to fetch funding data';

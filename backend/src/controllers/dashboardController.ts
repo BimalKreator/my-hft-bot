@@ -4,6 +4,7 @@ import { AuthRequest } from '../middleware/authMiddleware.js';
 import { getSettings } from '../models/settingsModel.js';
 import { getBannedTokens } from '../models/bannedTokensModel.js';
 import { FundingScanner } from '../services/scannerService.js';
+import { getCrossExchangeFundingData } from '../services/marketService.js';
 
 const fundingScanner = new FundingScanner();
 
@@ -34,7 +35,7 @@ export async function getNextToTrade(req: AuthRequest, res: Response): Promise<v
       (settings as { crossExchangeMode?: unknown }).crossExchangeMode === 1;
 
     const marketData = isCrossExchange
-      ? await fundingScanner.getCrossExchangeFundingData()
+      ? await getCrossExchangeFundingData()
       : await fundingScanner.getFundingData();
 
     const minFundingRate = settings.minFundingRate ?? 0;

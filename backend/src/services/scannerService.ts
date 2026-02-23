@@ -141,35 +141,37 @@ export class FundingScanner {
   }
 
   /**
-   * Cross-exchange scanner: merge Bybit + Binance. Include every token that exists on both exchanges.
-   * We trust Bybit's nextFundingTime for both legs (funding cycles align globally). No time-match filter.
-   * Uses Bybit's funding interval for display (binanceIntervalHours = row.fundingIntervalHours).
-   * Sort by interval asc then netSpread desc.
+   * Cross-exchange scanner: single source of truth. Iterate Bybit tokens; keep only symbols in binanceDataMap.
+   * netSpread = Math.abs(Number(binance.fundingRate) - Number(bybit.fundingRate)).
+   * hedgeDirection: BinanceFR > BybitFR -> 'Short Binance / Long Bybit', else 'Short Bybit / Long Binance'.
+   * Trust Bybit's fundingInterval and nextFundingTime as primary time source.
+   * CRITICAL SORT: fundingInterval ASC (e.g. 1h before 4h), then netSpread DESC (highest first).
    */
   async getCrossExchangeFundingData(filters?: FundingDataFilters): Promise<FundingDataItem[]> {
-    const [bybitItems, binanceMap] = await Promise.all([
+    const [bybitItems, binanceDataMap] = await Promise.all([
       this.getFundingData(filters),
       getBinanceDataMap(),
     ]);
 
     const merged: FundingDataItem[] = [];
 
-    for (const row of bybitItems) {
-      const binance = binanceMap.get(row.symbol);
-      if (!binance) continue;
+    for (const bybitToken of bybitItems) {
+      const binanceData = binanceDataMap.get(bybitToken.symbol);
+      if (!binanceData) continue;
 
-      const bybitNextMs = Number(row.nextFundingTime) || 0;
-      const netSpread = Math.abs(binance.fundingRate - row.fundingRate);
+      const bybitFr = Number(bybitToken.fundingRate);
+      const binanceFr = Number(binanceData.fundingRate);
+      const netSpread = Math.abs(binanceFr - bybitFr);
       const hedgeDirection =
-        binance.fundingRate > row.fundingRate
-          ? 'Short Binance / Long Bybit'
-          : 'Short Bybit / Long Binance';
+        binanceFr > bybitFr ? 'Short Binance / Long Bybit' : 'Short Bybit / Long Binance';
+
+      const bybitNextMs = Number(bybitToken.nextFundingTime) || 0;
 
       merged.push({
-        ...row,
-        binanceFundingRate: binance.fundingRate,
-        binanceIntervalHours: row.fundingIntervalHours,
-        binanceMarkPrice: parseFloat(binance.markPrice) || undefined,
+        ...bybitToken,
+        binanceFundingRate: binanceFr,
+        binanceIntervalHours: bybitToken.fundingIntervalHours,
+        binanceMarkPrice: parseFloat(binanceData.markPrice) || undefined,
         binanceNextFundingTime: bybitNextMs || undefined,
         netSpread,
         hedgeDirection,
@@ -177,8 +179,8 @@ export class FundingScanner {
     }
 
     merged.sort((a, b) => {
-      const intervalA = a.fundingIntervalHours;
-      const intervalB = b.fundingIntervalHours;
+      const intervalA = a.fundingIntervalHours ?? 0;
+      const intervalB = b.fundingIntervalHours ?? 0;
       if (intervalA !== intervalB) return intervalA - intervalB;
       return (b.netSpread ?? 0) - (a.netSpread ?? 0);
     });

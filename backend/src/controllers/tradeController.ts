@@ -12,6 +12,7 @@ import {
 } from '../services/bybitService.js';
 import { getBinanceSymbol, getBinanceAvailableBalance, placeBinanceOrder } from '../services/binanceService.js';
 import { FundingScanner } from '../services/scannerService.js';
+import { getCrossExchangeFundingData } from '../services/marketService.js';
 import { getEnrichedPositions } from '../services/vwapService.js';
 import { getLastEntryReport } from '../services/autoBotService.js';
 import { AuthRequest } from '../middleware/authMiddleware.js';
@@ -91,7 +92,7 @@ export async function executeTrade(
       const binanceSecret = decrypt(settings.binanceApiSecret!);
       const binanceAvailable = await getBinanceAvailableBalance(binanceKey, binanceSecret);
       const binanceData = getBinanceSymbol(symbol);
-      const marketData = await fundingScanner.getCrossExchangeFundingData();
+      const marketData = await getCrossExchangeFundingData();
       const bybitToken = marketData.find((m) => m.symbol === symbol);
       const bybitFundingRate = bybitToken?.fundingRate ?? 0;
       const binanceFundingRate = binanceData?.fundingRate ?? bybitToken?.binanceFundingRate ?? 0;

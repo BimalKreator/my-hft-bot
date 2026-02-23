@@ -32,6 +32,7 @@ import {
 import type { OrderbookResult } from './bybitService.js';
 import type { MarketTicker } from '../models/marketModel.js';
 import { FundingScanner } from './scannerService.js';
+import { getCrossExchangeFundingData } from './marketService.js';
 import {
   getBinanceAvailableBalance,
   getBinanceSymbol,
@@ -699,7 +700,7 @@ async function runTick(): Promise<number> {
     if (isManualMockActive && manualMockFundingTimeMs != null && manualMockEndMs != null && now < manualMockEndMs) {
       try {
         marketData = (await Promise.race([
-          fundingScanner.getCrossExchangeFundingData(),
+          getCrossExchangeFundingData(),
           new Promise<never>((_, rej) => setTimeout(() => rej(new Error('getFundingData timeout')), 5000)),
         ])) as MarketTicker[];
       } catch {
@@ -730,7 +731,14 @@ async function runTick(): Promise<number> {
           console.log('[autoBot] Manual mock state cleared (missing times); resuming live sync.');
         }
       }
-      marketData = (await fundingScanner.getCrossExchangeFundingData()) as MarketTicker[];
+      marketData = (await getCrossExchangeFundingData()) as MarketTicker[];
+    }
+
+    const topCandidates = marketData;
+    if (topCandidates.length > 0) {
+      console.log(`[DEBUG] Bot Targeting Top Candidate: ${topCandidates[0]!.symbol} | Spread: ${(topCandidates[0] as MarketTicker & { netSpread?: number }).netSpread ?? 'N/A'}`);
+    } else {
+      console.log('[DEBUG] topCandidates list is EMPTY!');
     }
 
     if (process.env.TEST_MODE === 'true') {
@@ -773,10 +781,6 @@ async function runTick(): Promise<number> {
       (first as MarketTicker & { netSpread?: number }).netSpread = 100;
       first.countdownMs = Math.max(0, mockTargetTime! - now);
     }
-    if (marketData.length === 0) {
-      console.log('[DEBUG] topCandidates is EMPTY! Check scanner mapping.');
-    }
-
     const minCountdownSec =
       marketData.length > 0
         ? Math.min(...marketData.map((m) => Math.floor(m.countdownMs / 1000)))

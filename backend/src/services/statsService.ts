@@ -4,6 +4,7 @@ import { getSettings } from '../models/settingsModel.js';
 import { decrypt } from '../utils/encryption.js';
 import { getWalletBalance } from './bybitService.js';
 import { getBinanceAvailableBalance } from './binanceService.js';
+import { getCrossExchangeFundingData } from './marketService.js';
 
 /** Decrypt if possible; if decrypt throws (e.g. value was saved as plain text), return raw string. */
 function tryDecrypt(value: string): string {
@@ -35,6 +36,12 @@ function yesterdayIST(): string {
   return d2.toLocaleDateString('en-CA');
 }
 
+export interface NextToTradeItem {
+  symbol: string;
+  netSpread: number;
+  fundingRate: number;
+}
+
 export interface DashboardStats {
   capital: number;
   opening: number;
@@ -49,6 +56,8 @@ export interface DashboardStats {
   binanceBalance?: number;
   /** When true, capital = mainEquity + binanceBalance (+ base). */
   crossExchangeMode?: boolean;
+  /** When cross-exchange: top tokens from getCrossExchangeFundingData (symbol, netSpread, fundingRate). */
+  nextToTrade?: NextToTradeItem[];
 }
 
 /**
@@ -63,10 +72,13 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
   const apiSecret = decrypt(keys.api_secret);
 
   const settings = await getSettings(userId);
-  const crossExchangeMode =
+  const isCrossExchange =
+    (settings as { cross_exchange_mode?: unknown }).cross_exchange_mode === true ||
+    (settings as { cross_exchange_mode?: unknown }).cross_exchange_mode === 1 ||
     settings.crossExchangeMode === true ||
-    (settings as { cross_exchange_mode?: boolean }).cross_exchange_mode === true;
-  const isCrossExchange = crossExchangeMode === true;
+    (settings as { crossExchangeMode?: unknown }).crossExchangeMode === 'true' ||
+    (settings as { crossExchangeMode?: unknown }).crossExchangeMode === 1;
+  const crossExchangeMode = Boolean(isCrossExchange);
 
   let mainEquity = 0;
   const balance = await getWalletBalance(apiKey, apiSecret);
@@ -192,6 +204,22 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
     ? percents.reduce((a, b) => a + b, 0) / percents.length
     : 0;
 
+  let nextToTrade: NextToTradeItem[] | undefined;
+  if (isCrossExchange) {
+    try {
+      const list = await getCrossExchangeFundingData();
+      const maxTrades = settings.maxTrades ?? 1;
+      const top = list.slice(0, maxTrades);
+      nextToTrade = top.map((t) => ({
+        symbol: t.symbol,
+        netSpread: t.netSpread ?? 0,
+        fundingRate: t.fundingRate,
+      }));
+    } catch (e) {
+      console.warn('[statsService] getCrossExchangeFundingData failed for nextToTrade:', e instanceof Error ? e.message : String(e));
+    }
+  }
+
   const result = {
     capital,
     opening,
@@ -203,7 +231,8 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
     mainEquity,
     subEquity,
     binanceBalance,
-    crossExchangeMode: isCrossExchange,
+    crossExchangeMode,
+    ...(nextToTrade != null && { nextToTrade }),
   };
   if (isCrossExchange) {
     console.log('[statsService] Returning stats (cross-exchange):', { capital, binanceBalance, crossExchangeMode: result.crossExchangeMode });
