@@ -58,6 +58,8 @@ const lastAutoEqualizeByUser = new Map<number, number>();
 /** Prefetch window: fetch wallet when countdown 20–60s; never call getWalletBalance when countdown <= 15. */
 const WALLET_PREFETCH_MIN_SEC = 20;
 const WALLET_PREFETCH_MAX_SEC = 60;
+/** Mock/prefetch: treat as "in prefetch" when timeToFunding is within this window (ms). */
+const PREFETCH_WINDOW_MS = 60_000;
 const CRITICAL_COUNTDOWN_SEC = 15; // below this: use cache only, no DB/heavy API except orderbook + place order
 /** Schedule precise entry timeout when we are this many ms before exact entry time (5–10s window). */
 const ENTRY_SCHEDULE_MIN_MS = 5_000;
@@ -2124,6 +2126,8 @@ async function processUser(
   }
 
   const entryOffsetMs = settings.entryOffsetMs ?? 300000;
+  const mockTimeToFundingMs =
+    (isMockTriggered && mockTargetTime != null) ? mockTargetTime - now : 0;
   const minCountdownSec =
     Math.min(...candidates.map((c) => Math.floor(c.countdownMs / 1000))) ?? 9999;
   const minDelayToEntry = Math.min(
@@ -2133,13 +2137,18 @@ async function processUser(
     })
   );
   const inEntryWindow = minDelayToEntry > 0 && minDelayToEntry <= ENTRY_SCHEDULE_MAX_MS + 5000;
-  const inPrefetchWindow = minCountdownSec >= WALLET_PREFETCH_MIN_SEC && minCountdownSec <= WALLET_PREFETCH_MAX_SEC;
+  const inPrefetchFromCountdown = minCountdownSec >= WALLET_PREFETCH_MIN_SEC && minCountdownSec <= WALLET_PREFETCH_MAX_SEC;
+  const inPrefetchFromMock = isMockTriggered && mockTimeToFundingMs > 0 && mockTimeToFundingMs <= PREFETCH_WINDOW_MS;
+  const inPrefetchWindow = inPrefetchFromCountdown || inPrefetchFromMock;
 
   const subKeys = await getSubAccountKeys(userId);
   const subHedgingEnabled = !!settings.hedgeMode && !!subKeys && !settings.crossExchangeMode;
 
   // Pre-fetch wallet when countdown 20–60s; never call getWalletBalance when countdown <= 15 (critical path uses cache only). Sub-hedge: also fetch sub balance.
   if (inPrefetchWindow) {
+    if (inPrefetchFromMock) {
+      console.log(`[DEBUG MOCK] Entered prefetch setup (timeToFunding ${mockTimeToFundingMs}ms <= PREFETCH_WINDOW_MS ${PREFETCH_WINDOW_MS})`);
+    }
     try {
       const [wallet, subWallet] = subHedgingEnabled && subKeys
         ? await Promise.all([
@@ -2289,11 +2298,12 @@ async function processUser(
         (topToken as MarketTicker & { netSpread?: number }).netSpread = 100;
         topToken.fundingRate = 100;
         (topToken as MarketTicker & { binanceFundingRate?: number }).binanceFundingRate = 200;
+        topToken.countdownMs = Math.max(0, mockTargetTime - now);
       }
 
       const timeToFunding = targetTime - now;
       if (isMockTriggered) {
-        console.log(`[DEBUG MOCK] ${topToken.symbol} - targetTime: ${targetTime}, now: ${now}, timeToFunding: ${timeToFunding}ms`);
+        console.log(`[DEBUG MOCK] ${topToken.symbol} - targetTime: ${targetTime}, now: ${now}, timeToFunding: ${timeToFunding}ms (must be mockTargetTime - now)`);
       }
       const fundingTimeMs = targetTime;
       const exactEntryTimeMs = fundingTimeMs - entryOffsetMs;
@@ -2302,7 +2312,7 @@ async function processUser(
       const cycleKey = entryCycleKey(userId, topToken.symbol, topToken.nextFundingTime);
 
       const isMock = isMockTriggered && mockTargetTime != null && mockTargetTime > 0;
-      const mainOffset = entryOffsetMs;
+      const mainOffset = isMock ? 0 : entryOffsetMs;
       const maxDelayMs = isMock ? MANUAL_MOCK_COUNTDOWN_MS : ENTRY_SCHEDULE_MAX_MS;
       const nowForRange = Date.now();
       const delayMainForRange = targetTime - nowForRange - mainOffset;
@@ -2316,9 +2326,12 @@ async function processUser(
       }
 
       if (inRangeMain && !entryTimeoutByCycle.has(cycleKey)) {
+        if (isMockTriggered) {
+          console.log(`[DEBUG MOCK] Entered execution setup: ${topToken.symbol} (timeToFunding: ${timeToFunding}ms <= ${MANUAL_MOCK_COUNTDOWN_MS}ms)`);
+        }
         if (processedTokens.has(processedKey(userId, topToken.symbol, topToken.nextFundingTime))) return;
         if (enteredThisCycle.has(cycleKey)) return;
-        if (Number.isNaN(delayMs) || delayMs < 0) return;
+        if (!isMockTriggered && (Number.isNaN(delayMs) || delayMs < 0)) return;
         const prepForPayload = entryPrepCacheByUser.get(userId);
         const cForPayload = prepForPayload?.candidates.find((x) => x.symbol === topToken.symbol && x.nextFundingTime === topToken.nextFundingTime);
         const binanceFr = (topToken as MarketTicker).binanceFundingRate;
@@ -2418,6 +2431,12 @@ async function processUser(
               if (q >= minOrderQty) fixedQty = q;
             }
           } catch { /* ignore */ }
+          if (isMockTriggered && (fixedQty == null || fixedQty === 0)) {
+            fixedQty = 10;
+            if (settings.crossExchangeMode) {
+              console.log(`[DEBUG MOCK] Cross-Exchange: hardcoded targetQty=10 (balance API skipped or returned 0)`);
+            }
+          }
           if (settings.crossExchangeMode) {
             const cacheForLog = walletCacheByUser.get(userId);
             const bybitAvail = cacheForLog?.totalAvailableBalance ?? 'N/A';
@@ -2554,6 +2573,12 @@ async function processUser(
             }
           } catch {
             /* ignore */
+          }
+          if (isMockTriggered && (fixedQty == null || fixedQty === 0)) {
+            fixedQty = 10;
+            if (settings.crossExchangeMode) {
+              console.log(`[DEBUG MOCK] Prefetch: hardcoded targetQty=10 for cross-exchange mock`);
+            }
           }
           if (settings.crossExchangeMode) {
             const bybitAvail = cache?.totalAvailableBalance ?? 'N/A';
