@@ -5,6 +5,7 @@ import { decrypt } from '../utils/encryption.js';
 import { getWalletBalance } from './bybitService.js';
 import { getBinanceAvailableBalance } from './binanceService.js';
 import { getCrossExchangeFundingData } from './marketService.js';
+import { getBannedTokens } from '../models/bannedTokensModel.js';
 
 /** Decrypt if possible; if decrypt throws (e.g. value was saved as plain text), return raw string. */
 function tryDecrypt(value: string): string {
@@ -207,12 +208,24 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
   let nextToTrade: NextToTradeItem[] | undefined;
   if (isCrossExchange) {
     try {
-      const list = await getCrossExchangeFundingData();
+      const allCandidates = await getCrossExchangeFundingData();
       const maxTrades = settings.maxTrades ?? 1;
-      const minFundingRateProfit = Number((settings as { min_funding_rate_profit?: number }).min_funding_rate_profit ?? settings.minFundingRate ?? 0);
-      const minProfitPct = minFundingRateProfit / 100;
-      const validCandidates = list.filter((candidate) => {
-        return Number(candidate.netSpread ?? 0) >= minProfitPct;
+      const minProfitDec = Number((settings as { min_funding_rate_profit?: number }).min_funding_rate_profit ?? settings.minFundingRate ?? 0) / 100;
+      let bannedTokens: string[] = [];
+      try {
+        bannedTokens = await getBannedTokens(userId);
+      } catch {
+        /* ignore */
+      }
+      const validCandidates = allCandidates.filter((c) => {
+        const isBanned = bannedTokens.includes(c.symbol);
+        if (isBanned) return false;
+        const spread = Number(c.netSpread ?? 0);
+        const passes = spread >= minProfitDec;
+        if (!passes) {
+          console.log(`[DEBUG Filter] Symbol: ${c.symbol}, Spread: ${spread}, MinRequired: ${minProfitDec}`);
+        }
+        return passes;
       });
       const top = validCandidates.slice(0, maxTrades);
       nextToTrade = top.map((t) => ({

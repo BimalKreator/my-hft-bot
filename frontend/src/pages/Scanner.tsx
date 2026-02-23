@@ -113,6 +113,7 @@ export default function Scanner() {
   const [selectedToken, setSelectedToken] = useState<TokenData | null>(null);
   const [bannedTokens, setBannedTokens] = useState<string[]>([]);
   const [banActionLoading, setBanActionLoading] = useState<string | null>(null);
+  const [crossExchangeMode, setCrossExchangeMode] = useState<boolean>(false);
   const saveMinFundingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fetchBanned = useCallback(async () => {
@@ -145,9 +146,12 @@ export default function Scanner() {
         headers: { Authorization: `Bearer ${token}` },
       });
       const json = await res.json().catch(() => ({}));
-      if (res.ok && json != null && typeof json.minFundingRate === 'number') {
-        const pct = json.minFundingRate * 100;
-        setMinFundingPct(pct > 0 ? String(pct) : '');
+      if (res.ok && json != null) {
+        if (typeof json.minFundingRate === 'number') {
+          const pct = json.minFundingRate * 100;
+          setMinFundingPct(pct > 0 ? String(pct) : '');
+        }
+        setCrossExchangeMode(json.crossExchangeMode === true || json.cross_exchange_mode === true);
       }
     } catch {
       // ignore
@@ -236,16 +240,19 @@ export default function Scanner() {
       result = result.filter((item) => tokenName(item.symbol).toLowerCase().includes(q));
     }
     if (minFundingPct !== '') {
-      const minRate = parseFloat(minFundingPct);
-      if (!Number.isNaN(minRate)) {
-        const threshold = minRate / 100;
-        result = result.filter((item) => Math.abs(item.fundingRate) >= threshold);
+      const filterValue = parseFloat(minFundingPct);
+      if (!Number.isNaN(filterValue)) {
+        if (crossExchangeMode) {
+          result = result.filter((item) => Number(item.netSpread ?? 0) * 100 >= filterValue);
+        } else {
+          result = result.filter((item) => Math.abs(Number(item.fundingRate ?? 0)) * 100 >= filterValue);
+        }
       }
     }
     if (filterType === 'positive') result = result.filter((item) => item.fundingRate > 0);
     if (filterType === 'negative') result = result.filter((item) => item.fundingRate < 0);
     return result;
-  }, [data, searchQuery, minFundingPct, filterType, bannedSet]);
+  }, [data, searchQuery, minFundingPct, filterType, bannedSet, crossExchangeMode]);
 
   const bannedDisplayTokens = useMemo(
     () => data.filter((item) => bannedSet.has(item.symbol)),
@@ -335,7 +342,9 @@ export default function Scanner() {
           />
         </div>
         <div>
-          <label className="block text-xs font-medium text-gray-400 mb-1">Min Funding %</label>
+          <label className="block text-xs font-medium text-gray-400 mb-1">
+            {crossExchangeMode ? 'Min Spread %' : 'Min Funding %'}
+          </label>
           <input
             type="number"
             step="0.001"

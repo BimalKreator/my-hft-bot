@@ -161,7 +161,7 @@ export class FundingScanner {
 
       const bybitFr = Number(bybitToken.fundingRate);
       const binanceFr = Number(binanceData.fundingRate);
-      const netSpread = Math.abs(binanceFr - bybitFr);
+      const calculatedSpread = Math.abs(binanceFr - bybitFr);
       const hedgeDirection =
         binanceFr > bybitFr ? 'Short Binance / Long Bybit' : 'Short Bybit / Long Binance';
 
@@ -173,7 +173,7 @@ export class FundingScanner {
         binanceIntervalHours: bybitToken.fundingIntervalHours,
         binanceMarkPrice: parseFloat(binanceData.markPrice) || undefined,
         binanceNextFundingTime: bybitNextMs || undefined,
-        netSpread,
+        netSpread: calculatedSpread,
         hedgeDirection,
       });
     }

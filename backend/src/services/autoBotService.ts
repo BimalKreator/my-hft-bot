@@ -2084,28 +2084,30 @@ async function processUser(
 
   // Auto Exit is handled by monitorExits (1s loop) with reduce-only orders and unified logging.
 
-  // Auto Entry: filter by minimum profit (cross-exchange = netSpread, naked = abs funding rate). Bypass when mock.
-  const minFundingRate = settings.minFundingRate ?? 0;
-  const minFundingRateProfit = Number((settings as { min_funding_rate_profit?: number }).min_funding_rate_profit ?? minFundingRate);
-  const minRate = minFundingRateProfit / 100;
+  // Auto Entry: filter by minimum profit (same logic as Scanner UI). Cross-exchange = netSpread, naked = abs funding rate. ALWAYS bypass when mock.
+  const minSpreadDec = Number((settings as { min_funding_rate_profit?: number }).min_funding_rate_profit ?? settings.minFundingRate ?? 0) / 100;
   const isCrossExchange = Boolean(settings.crossExchangeMode);
 
   let meetsMinFunding: typeof marketData;
   if (isMockTriggered) {
     meetsMinFunding = [...marketData];
   } else {
-    meetsMinFunding = marketData.filter((token) => {
-      let isValidProfit: boolean;
+    meetsMinFunding = marketData.filter((candidate) => {
+      let isProfitable = false;
       if (isCrossExchange) {
-        isValidProfit = Number((token as MarketTicker & { netSpread?: number }).netSpread ?? 0) >= minRate;
+        isProfitable = Number((candidate as MarketTicker & { netSpread?: number }).netSpread ?? 0) >= minSpreadDec;
       } else {
-        isValidProfit = Math.abs(Number(token.fundingRate)) >= minRate;
+        isProfitable = Math.abs(Number(candidate.fundingRate ?? 0)) >= minSpreadDec;
       }
-      if (debugSkip && !isValidProfit && marketData.indexOf(token) < 5 && entryTimeoutByCycle.size === 0) {
-        const netOrAbs = isCrossExchange ? (token as MarketTicker & { netSpread?: number }).netSpread : Math.abs(token.fundingRate);
-        console.log(`[DEBUG] Checking ${token.symbol}: ${isCrossExchange ? 'Net Spread' : 'Abs Rate'} ${Number(netOrAbs).toFixed(4)} vs Min ${minRate}`);
+      if (isMockTriggered) isProfitable = true;
+      if (!isProfitable) {
+        if (debugSkip && marketData.indexOf(candidate) < 5 && entryTimeoutByCycle.size === 0) {
+          const val = isCrossExchange ? (candidate as MarketTicker & { netSpread?: number }).netSpread : candidate.fundingRate;
+          console.log(`[DEBUG] Skipping ${candidate.symbol}: ${isCrossExchange ? 'netSpread' : 'abs(fundingRate)'} ${Number(val).toFixed(6)} < minSpreadDec ${minSpreadDec}`);
+        }
+        return false;
       }
-      return isValidProfit;
+      return true;
     });
   }
   let bannedSet: Set<string>;
@@ -2117,8 +2119,8 @@ async function processUser(
   }
   meetsMinFunding = meetsMinFunding.filter((token) => !bannedSet.has(token.symbol));
   if (meetsMinFunding.length === 0) {
-    const pctStr = minPct.toFixed(4);
-    if (debugSkip) console.log('[DEBUG] Trade Skipped Reason: No tokens meet Min Funding or all banned', 'minFundingRate%:', pctStr);
+    const pctStr = (minSpreadDec * 100).toFixed(4);
+    if (debugSkip) console.log('[DEBUG] Trade Skipped Reason: No tokens meet Min Funding or all banned', 'minSpreadDec:', minSpreadDec);
     console.log(`[autoBot] No tokens meet Min Funding criteria (>= ${pctStr}%) or all are banned`);
     return;
   }

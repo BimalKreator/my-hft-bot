@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import ActivePositions from '../components/ActivePositions';
 import ClosedTradesTable from '../components/ClosedTradesTable';
-import NextToTrade from '../components/NextToTrade';
+// import NextToTrade from '../components/NextToTrade';
 import { TRANSACTIONS_UPDATED_EVENT } from './Settings';
 
 const TOKEN_KEY = 'hft_token';
@@ -249,7 +249,9 @@ export default function Dashboard() {
 
       <ActivePositions />
 
+      {/* Next To Trade panel commented out while core logic is fixed
       <NextToTrade crossExchangeMode={stats?.crossExchangeMode === true} />
+      */}
 
       <ClosedTradesTable />
     </div>
