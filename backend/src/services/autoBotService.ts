@@ -2076,11 +2076,17 @@ async function processUser(
     console.error('[autoBot] getPositionList failed for user', userId, e);
     return;
   }
-  const maxTrades = settings.maxTrades ?? 1;
-  if (positions.length >= maxTrades) {
-    if (debugSkip) console.log('[DEBUG] Trade Skipped Reason: Max concurrent positions reached', 'positions:', positions.length, 'maxTrades:', maxTrades);
+  const maxTradesAllowed = Number(settings.maxTrades ?? (settings as { max_concurrent_trades?: number }).max_concurrent_trades ?? 1);
+  const maxTrades = maxTradesAllowed;
+  const activeTradesCount = positions.length;
+  const availableSlots = maxTradesAllowed - activeTradesCount;
+
+  if (availableSlots <= 0 && !isMockTriggered) {
+    if (debugSkip) console.log('[DEBUG] Trade Skipped Reason: Max concurrent positions reached', 'positions:', activeTradesCount, 'maxTrades:', maxTradesAllowed);
     return;
   }
+
+  const slotsToFill = isMockTriggered ? 1 : availableSlots;
 
   // Auto Exit is handled by monitorExits (1s loop) with reduce-only orders and unified logging.
 
@@ -2136,7 +2142,10 @@ async function processUser(
     }
     return Math.abs(b.fundingRate) - Math.abs(a.fundingRate);
   });
-  const candidates = sorted.slice(0, maxTrades);
+
+  console.log(`[DEBUG] Bot evaluating Top Token: ${sorted[0]?.symbol ?? 'N/A'} | Active Trades: ${activeTradesCount}/${maxTradesAllowed} | Slots to fill: ${slotsToFill}`);
+
+  const candidates = sorted.slice(0, Math.min(maxTradesAllowed, Math.max(1, slotsToFill)));
   if (candidates.length === 0) {
     if (debugSkip) console.log('[DEBUG] Trade Skipped Reason: No candidates after sort/slice');
     return;
