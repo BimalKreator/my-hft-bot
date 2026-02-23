@@ -734,6 +734,7 @@ async function runTick(): Promise<number> {
       marketData = (await getCrossExchangeFundingData()) as MarketTicker[];
     }
 
+    // Bot and Scanner share the same source (getCrossExchangeFundingData) and sort (interval asc, netSpread desc). Top token here = Scanner top.
     const topCandidates = marketData;
     if (topCandidates.length > 0) {
       console.log(`[DEBUG] Bot Targeting Top Candidate: ${topCandidates[0]!.symbol} | Spread: ${(topCandidates[0] as MarketTicker & { netSpread?: number }).netSpread ?? 'N/A'}`);
@@ -797,7 +798,12 @@ async function runTick(): Promise<number> {
       return minCountdownSec >= 0 ? minCountdownSec : -1;
     }
     if (!isCritical) entryUserIdsCache = userIds;
-    if (userIds.length === 0) return minCountdownSec;
+    if (userIds.length === 0) {
+      if (isMockTriggered) {
+        console.log('[autoBot] Mock triggered but no users have Auto Entry enabled. Enable Auto Entry in Settings for at least one user to run the 30s mock.');
+      }
+      return minCountdownSec;
+    }
 
     for (const userId of userIds) {
       try {
@@ -2041,7 +2047,7 @@ async function processUser(
 ): Promise<void> {
   const globalMinCountdownSec =
     marketData.length > 0 ? Math.min(...marketData.map((m) => Math.floor(m.countdownMs / 1000))) : 9999;
-  const debugSkip = globalMinCountdownSec <= 15;
+  const debugSkip = globalMinCountdownSec <= 15 || Boolean(isMockTriggered);
 
   let settings: Awaited<ReturnType<typeof getSettings>>;
   try {
@@ -2307,7 +2313,13 @@ async function processUser(
     } catch (e) {
       if (debugSkip) console.log('[DEBUG] Trade Skipped Reason: getWalletBalance failed');
       console.error('[autoBot] getWalletBalance failed:', e);
-      return;
+      if (isMockTriggered) {
+        const dummy = { totalEquity: 200, totalAvailableBalance: 200, binanceAvailableBalance: 200 };
+        walletCacheByUser.set(userId, dummy);
+        console.log('[autoBot] Mock: using dummy wallet cache so entry can be scheduled (real orders still need valid balance).');
+      } else {
+        return;
+      }
     }
   }
 
