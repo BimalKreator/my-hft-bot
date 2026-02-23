@@ -17,6 +17,10 @@ interface FundingItem {
   maxOrderQty?: string;
   spotPrice?: string;
   spreadPct?: number;
+  binanceFundingRate?: number;
+  binanceIntervalHours?: number;
+  netSpread?: number;
+  hedgeDirection?: string;
 }
 
 type FilterType = 'all' | 'positive' | 'negative';
@@ -255,7 +259,9 @@ export default function Scanner() {
         const intervalA = a.fundingIntervalHours;
         const intervalB = b.fundingIntervalHours;
         if (intervalA !== intervalB) return intervalA - intervalB;
-        return Math.abs(b.fundingRate) - Math.abs(a.fundingRate);
+        const spreadA = a.netSpread ?? Math.abs(a.fundingRate);
+        const spreadB = b.netSpread ?? Math.abs(b.fundingRate);
+        return spreadB - spreadA;
       });
       return arr;
     }
@@ -419,17 +425,14 @@ export default function Scanner() {
                 >
                   <th className="px-4 py-3">Token</th>
                   <th className="px-4 py-3">Price</th>
-                  <th className="px-4 py-3">Spot Price</th>
-                  <th className="px-4 py-3">Spread (%)</th>
-                  <th className="px-4 py-3">Funding Rate</th>
-                  <th className="px-4 py-3">Direction</th>
-                  <th className="px-4 py-3">Countdown</th>
+                  <th className="px-4 py-3">Bybit FR (%)</th>
+                  <th className="px-4 py-3">Binance FR (%)</th>
                   <th
                     className={`px-4 py-3 ${sortBy === 'smart' ? 'text-[#007BFF]' : ''}`}
                     title={sortBy === 'smart' ? 'Primary sort: shortest interval first' : undefined}
                   >
                     <span className="inline-flex items-center gap-1">
-                      Interval
+                      Interval (BIN)
                       {sortBy === 'smart' && (
                         <span
                           className="rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase"
@@ -443,6 +446,9 @@ export default function Scanner() {
                       )}
                     </span>
                   </th>
+                  <th className="px-4 py-3">Net Spread (%)</th>
+                  <th className="px-4 py-3">Direction</th>
+                  <th className="px-4 py-3">Countdown</th>
                   <th className="px-4 py-3">Max Lev</th>
                   <th className="px-4 py-3">Max Qty Limit</th>
                   <th className="px-4 py-3">Max Margin (USDT)</th>
@@ -452,7 +458,7 @@ export default function Scanner() {
               <tbody>
                 {sortedData.length === 0 && !loading ? (
                   <tr>
-                    <td colSpan={12} className="px-4 py-8 text-center text-gray-500">
+                    <td colSpan={11} className="px-4 py-8 text-center text-gray-500">
                       {searchQuery || minFundingPct
                         ? 'No tokens match your filters.'
                         : 'No results yet.'}
@@ -482,28 +488,6 @@ export default function Scanner() {
                           maximumFractionDigits: 6,
                         })}
                       </td>
-                      <td className="px-4 py-3 text-gray-300 font-mono text-sm">
-                        {row.spotPrice != null && row.spotPrice !== ''
-                          ? parseFloat(row.spotPrice).toLocaleString(undefined, {
-                              minimumFractionDigits: 2,
-                              maximumFractionDigits: 6,
-                            })
-                          : '—'}
-                      </td>
-                      <td className="px-4 py-3">
-                        {row.spreadPct != null ? (
-                          <span
-                            className="font-mono font-medium"
-                            style={{
-                              color: row.spreadPct > 0 ? '#22c55e' : row.spreadPct < 0 ? '#ef4444' : 'rgb(156, 163, 175)',
-                            }}
-                          >
-                            {row.spreadPct > 0 ? '+' : ''}{row.spreadPct.toFixed(3)}%
-                          </span>
-                        ) : (
-                          <span className="text-gray-500">—</span>
-                        )}
-                      </td>
                       <td className="px-4 py-3">
                         <span
                           className={
@@ -518,15 +502,51 @@ export default function Scanner() {
                         </span>
                       </td>
                       <td className="px-4 py-3">
-                        <DirectionBadge fundingRate={row.fundingRate} />
+                        {row.binanceFundingRate != null ? (
+                          <span
+                            className={
+                              row.binanceFundingRate > 0
+                                ? 'text-green-500 font-medium'
+                                : row.binanceFundingRate < 0
+                                  ? 'text-red-500 font-medium'
+                                  : 'text-gray-400'
+                            }
+                          >
+                            {formatPct(row.binanceFundingRate)}
+                          </span>
+                        ) : (
+                          <span className="text-gray-500">—</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-gray-300">
+                        {row.binanceIntervalHours != null
+                          ? row.binanceIntervalHours % 1 === 0
+                            ? `${row.binanceIntervalHours}h`
+                            : `${row.binanceIntervalHours.toFixed(1)}h`
+                          : row.fundingIntervalHours % 1 === 0
+                            ? `${row.fundingIntervalHours}h`
+                            : `${row.fundingIntervalHours.toFixed(1)}h`}
+                      </td>
+                      <td className="px-4 py-3">
+                        {row.netSpread != null ? (
+                          <span className="font-mono font-medium text-amber-400">
+                            {formatPct(row.netSpread)}
+                          </span>
+                        ) : (
+                          <span className="text-gray-500">—</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        {row.hedgeDirection ? (
+                          <span className="text-xs text-gray-300" title={row.hedgeDirection}>
+                            {row.hedgeDirection}
+                          </span>
+                        ) : (
+                          <DirectionBadge fundingRate={row.fundingRate} />
+                        )}
                       </td>
                       <td className="px-4 py-3">
                         <CountdownCell nextFundingTime={row.nextFundingTime} />
-                      </td>
-                      <td className="px-4 py-3 text-gray-300">
-                        {row.fundingIntervalHours % 1 === 0
-                          ? `${row.fundingIntervalHours}h`
-                          : `${row.fundingIntervalHours.toFixed(1)}h`}
                       </td>
                       <td className="px-4 py-3">
                         <span
@@ -625,12 +645,12 @@ export default function Scanner() {
               >
                 <th className="px-4 py-3">Token</th>
                 <th className="px-4 py-3">Price</th>
-                <th className="px-4 py-3">Spot Price</th>
-                <th className="px-4 py-3">Spread (%)</th>
-                <th className="px-4 py-3">Funding Rate</th>
+                <th className="px-4 py-3">Bybit FR (%)</th>
+                <th className="px-4 py-3">Binance FR (%)</th>
+                <th className="px-4 py-3">Interval (BIN)</th>
+                <th className="px-4 py-3">Net Spread (%)</th>
                 <th className="px-4 py-3">Direction</th>
                 <th className="px-4 py-3">Countdown</th>
-                <th className="px-4 py-3">Interval</th>
                 <th className="px-4 py-3">Max Lev</th>
                 <th className="px-4 py-3">Max Qty Limit</th>
                 <th className="px-4 py-3">Max Margin (USDT)</th>
@@ -640,7 +660,7 @@ export default function Scanner() {
             <tbody>
               {bannedDisplayTokens.length === 0 ? (
                 <tr>
-                  <td colSpan={12} className="px-4 py-6 text-center text-gray-500">
+                  <td colSpan={11} className="px-4 py-6 text-center text-gray-500">
                     No banned tokens in current scan.
                   </td>
                 </tr>
@@ -668,28 +688,6 @@ export default function Scanner() {
                         maximumFractionDigits: 6,
                       })}
                     </td>
-                    <td className="px-4 py-3 text-gray-300 font-mono text-sm">
-                      {row.spotPrice != null && row.spotPrice !== ''
-                        ? parseFloat(row.spotPrice).toLocaleString(undefined, {
-                            minimumFractionDigits: 2,
-                            maximumFractionDigits: 6,
-                          })
-                        : '—'}
-                    </td>
-                    <td className="px-4 py-3">
-                      {row.spreadPct != null ? (
-                        <span
-                          className="font-mono font-medium"
-                          style={{
-                            color: row.spreadPct > 0 ? '#22c55e' : row.spreadPct < 0 ? '#ef4444' : 'rgb(156, 163, 175)',
-                          }}
-                        >
-                          {row.spreadPct > 0 ? '+' : ''}{row.spreadPct.toFixed(3)}%
-                        </span>
-                      ) : (
-                        <span className="text-gray-500">—</span>
-                      )}
-                    </td>
                     <td className="px-4 py-3">
                       <span
                         className={
@@ -704,15 +702,51 @@ export default function Scanner() {
                       </span>
                     </td>
                     <td className="px-4 py-3">
-                      <DirectionBadge fundingRate={row.fundingRate} />
+                      {row.binanceFundingRate != null ? (
+                        <span
+                          className={
+                            row.binanceFundingRate > 0
+                              ? 'text-green-500 font-medium'
+                              : row.binanceFundingRate < 0
+                                ? 'text-red-500 font-medium'
+                                : 'text-gray-400'
+                          }
+                        >
+                          {formatPct(row.binanceFundingRate)}
+                        </span>
+                      ) : (
+                        <span className="text-gray-500">—</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-gray-300">
+                      {row.binanceIntervalHours != null
+                        ? row.binanceIntervalHours % 1 === 0
+                          ? `${row.binanceIntervalHours}h`
+                          : `${row.binanceIntervalHours.toFixed(1)}h`
+                        : row.fundingIntervalHours % 1 === 0
+                          ? `${row.fundingIntervalHours}h`
+                          : `${row.fundingIntervalHours.toFixed(1)}h`}
+                    </td>
+                    <td className="px-4 py-3">
+                      {row.netSpread != null ? (
+                        <span className="font-mono font-medium text-amber-400">
+                          {formatPct(row.netSpread)}
+                        </span>
+                      ) : (
+                        <span className="text-gray-500">—</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      {row.hedgeDirection ? (
+                        <span className="text-xs text-gray-300" title={row.hedgeDirection}>
+                          {row.hedgeDirection}
+                        </span>
+                      ) : (
+                        <DirectionBadge fundingRate={row.fundingRate} />
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       <CountdownCell nextFundingTime={row.nextFundingTime} />
-                    </td>
-                    <td className="px-4 py-3 text-gray-300">
-                      {row.fundingIntervalHours % 1 === 0
-                        ? `${row.fundingIntervalHours}h`
-                        : `${row.fundingIntervalHours.toFixed(1)}h`}
                     </td>
                     <td className="px-4 py-3">
                       <span

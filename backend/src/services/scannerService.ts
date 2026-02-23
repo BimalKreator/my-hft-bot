@@ -1,5 +1,6 @@
 import { RestClientV5 } from 'bybit-api';
 import { getInstrumentsCache, type CachedInstrumentRow } from './bybitService.js';
+import { getBinanceDataMap } from './binanceService.js';
 
 export interface FundingDataFilters {
   minFundingRate?: number;
@@ -22,6 +23,14 @@ export interface FundingDataItem {
   spotPrice?: string;
   /** (futuresMarkPrice - spotPrice) / spotPrice * 100. */
   spreadPct?: number;
+  /** Cross-exchange: Binance funding rate (decimal). */
+  binanceFundingRate?: number;
+  /** Cross-exchange: Binance funding interval in hours. */
+  binanceIntervalHours?: number;
+  /** Cross-exchange: |binanceFundingRate - fundingRate|. */
+  netSpread?: number;
+  /** Cross-exchange: "Short Binance / Long Bybit" or "Short Bybit / Long Binance". */
+  hedgeDirection?: string;
 }
 
 export class FundingScanner {
@@ -125,6 +134,48 @@ export class FundingScanner {
       return Math.abs(b.fundingRate) - Math.abs(a.fundingRate);
     });
     return items;
+  }
+
+  /**
+   * Cross-exchange scanner: merge Bybit + Binance, keep only symbols on both with same funding interval,
+   * add netSpread and hedgeDirection; sort by interval asc then netSpread desc.
+   */
+  async getCrossExchangeFundingData(filters?: FundingDataFilters): Promise<FundingDataItem[]> {
+    const [bybitItems, binanceMap] = await Promise.all([
+      this.getFundingData(filters),
+      getBinanceDataMap(),
+    ]);
+
+    const merged: FundingDataItem[] = [];
+
+    for (const row of bybitItems) {
+      const binance = binanceMap.get(row.symbol);
+      if (!binance) continue;
+      if (row.fundingIntervalHours !== binance.fundingIntervalHours) continue;
+
+      const netSpread = Math.abs(binance.fundingRate - row.fundingRate);
+      const hedgeDirection =
+        binance.fundingRate > row.fundingRate
+          ? 'Short Binance / Long Bybit'
+          : 'Short Bybit / Long Binance';
+
+      merged.push({
+        ...row,
+        binanceFundingRate: binance.fundingRate,
+        binanceIntervalHours: binance.fundingIntervalHours,
+        netSpread,
+        hedgeDirection,
+      });
+    }
+
+    merged.sort((a, b) => {
+      const intervalA = a.fundingIntervalHours;
+      const intervalB = b.fundingIntervalHours;
+      if (intervalA !== intervalB) return intervalA - intervalB;
+      return (b.netSpread ?? 0) - (a.netSpread ?? 0);
+    });
+
+    return merged;
   }
 }
 

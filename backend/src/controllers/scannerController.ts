@@ -23,7 +23,7 @@ export async function getFundingOpportunities(
         ? { minFundingRate, minVolume, type }
         : undefined;
 
-    const data = await scanner.getFundingData(filters);
+    const data = await scanner.getCrossExchangeFundingData(filters);
     res.json(data);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to fetch funding data';
