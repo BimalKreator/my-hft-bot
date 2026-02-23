@@ -49,6 +49,16 @@ import {
 } from '../models/hedgeGroupModel.js';
 import { insertTradeHistoryEntry } from '../models/tradeHistoryModel.js';
 
+/** Decrypt if possible; if decrypt throws (e.g. malformed UTF-8 or value saved as plain text), return raw string. Used for Binance keys so execution does not crash. */
+function tryDecrypt(val: string | undefined | null): string {
+  if (!val) return '';
+  try {
+    return decrypt(val);
+  } catch {
+    return val;
+  }
+}
+
 const INTERVAL_MS = 5_000;
 const ENTRY_FAST_INTERVAL_MS = 500; // when countdown <= 15s (zero latency in final seconds)
 const EXIT_INTERVAL_MS = 2_000; // Fallback if WebSocket settlement event doesn't fire
@@ -1139,14 +1149,9 @@ async function monitorExits(): Promise<void> {
 
           // Cross-Exchange (Bybit + Binance): combined PnL exits and orphan fallback
           if (settings.crossExchangeMode === true && settings.binanceApiKey && settings.binanceApiSecret) {
-            let binanceApiKey: string;
-            let binanceApiSecret: string;
-            try {
-              binanceApiKey = decrypt(settings.binanceApiKey);
-              binanceApiSecret = decrypt(settings.binanceApiSecret);
-            } catch {
-              continue;
-            }
+            const binanceApiKey = tryDecrypt(settings.binanceApiKey) || settings.binanceApiKey || '';
+            const binanceApiSecret = tryDecrypt(settings.binanceApiSecret) || settings.binanceApiSecret || '';
+            if (!binanceApiKey || !binanceApiSecret) continue;
             let binancePosition: Awaited<ReturnType<typeof getBinancePositions>> = null;
             try {
               binancePosition = await getBinancePositions(binanceApiKey, binanceApiSecret, pos.symbol);
@@ -1486,8 +1491,9 @@ async function verifyCrossExchangeFill(userId: number, symbol: string): Promise<
     if (!keys) return;
     const bybitApiKey = decrypt(keys.api_key);
     const bybitApiSecret = decrypt(keys.api_secret);
-    const binanceApiKey = decrypt(settings.binanceApiKey);
-    const binanceApiSecret = decrypt(settings.binanceApiSecret);
+    const binanceApiKey = tryDecrypt(settings.binanceApiKey) || settings.binanceApiKey || '';
+    const binanceApiSecret = tryDecrypt(settings.binanceApiSecret) || settings.binanceApiSecret || '';
+    if (!binanceApiKey || !binanceApiSecret) return;
 
     let bybitPos: Awaited<ReturnType<typeof getPositionList>>[number] | undefined;
     let binancePosition: Awaited<ReturnType<typeof getBinancePositions>> = null;
@@ -1538,8 +1544,9 @@ async function executeBinanceEntry(
   try {
     const settings = await getSettings(userId);
     if (!settings.crossExchangeMode || !settings.binanceApiKey || !settings.binanceApiSecret) return;
-    const apiKey = decrypt(settings.binanceApiKey);
-    const apiSecret = decrypt(settings.binanceApiSecret);
+    const apiKey = tryDecrypt(settings.binanceApiKey) || settings.binanceApiKey || '';
+    const apiSecret = tryDecrypt(settings.binanceApiSecret) || settings.binanceApiSecret || '';
+    if (!apiKey || !apiSecret) return;
     const c = passedData?.candidate;
     const qty = c?.fixedQty;
     if (qty == null || qty <= 0) return;
@@ -2200,11 +2207,11 @@ async function processUser(
       };
       if (settings.crossExchangeMode && settings.binanceApiKey && settings.binanceApiSecret) {
         try {
-          const binanceBal = await getBinanceAvailableBalance(
-            decrypt(settings.binanceApiKey),
-            decrypt(settings.binanceApiSecret)
-          );
-          cacheEntry.binanceAvailableBalance = binanceBal;
+          const binanceApiKey = tryDecrypt(settings.binanceApiKey) || settings.binanceApiKey || '';
+          const binanceApiSecret = tryDecrypt(settings.binanceApiSecret) || settings.binanceApiSecret || '';
+          if (binanceApiKey && binanceApiSecret) {
+            cacheEntry.binanceAvailableBalance = await getBinanceAvailableBalance(binanceApiKey, binanceApiSecret);
+          }
         } catch (e) {
           console.error('[autoBot] getBinanceAvailableBalance (prefetch) failed:', e);
         }
@@ -2266,8 +2273,12 @@ async function processUser(
         };
         if (settings.crossExchangeMode && settings.binanceApiKey && settings.binanceApiSecret) {
           try {
-            cacheEntry.binanceAvailableBalance = await getBinanceAvailableBalance(decrypt(settings.binanceApiKey), decrypt(settings.binanceApiSecret));
-            cachedAvailableMargin = Math.min(cachedAvailableMargin, cacheEntry.binanceAvailableBalance);
+            const binanceApiKey = tryDecrypt(settings.binanceApiKey) || settings.binanceApiKey || '';
+            const binanceApiSecret = tryDecrypt(settings.binanceApiSecret) || settings.binanceApiSecret || '';
+            if (binanceApiKey && binanceApiSecret) {
+              cacheEntry.binanceAvailableBalance = await getBinanceAvailableBalance(binanceApiKey, binanceApiSecret);
+              cachedAvailableMargin = Math.min(cachedAvailableMargin, cacheEntry.binanceAvailableBalance);
+            }
           } catch { /* ignore */ }
         }
         walletCacheByUser.set(userId, cacheEntry);
@@ -2306,7 +2317,11 @@ async function processUser(
       };
       if (settings.crossExchangeMode && settings.binanceApiKey && settings.binanceApiSecret) {
         try {
-          cacheEntryOuter.binanceAvailableBalance = await getBinanceAvailableBalance(decrypt(settings.binanceApiKey), decrypt(settings.binanceApiSecret));
+          const binanceApiKey = tryDecrypt(settings.binanceApiKey) || settings.binanceApiKey || '';
+          const binanceApiSecret = tryDecrypt(settings.binanceApiSecret) || settings.binanceApiSecret || '';
+          if (binanceApiKey && binanceApiSecret) {
+            cacheEntryOuter.binanceAvailableBalance = await getBinanceAvailableBalance(binanceApiKey, binanceApiSecret);
+          }
         } catch { /* ignore */ }
       }
       walletCacheByUser.set(userId, cacheEntryOuter);
