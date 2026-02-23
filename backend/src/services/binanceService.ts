@@ -1,11 +1,21 @@
 /**
  * Binance Futures (USDT-M) data: REST + WebSocket cache for mark price and funding rate.
- * Used by the cross-exchange scanner to match with Bybit symbols.
+ * Used by the cross-exchange scanner and cross-exchange execution (order placement, balance).
  */
 
+import crypto from 'crypto';
+import https from 'https';
 import WebSocket from 'ws';
 
-const PREMIUM_INDEX_URL = 'https://fapi.binance.com/fapi/v1/premiumIndex';
+const BINANCE_BASE = 'fapi.binance.com';
+const PREMIUM_INDEX_URL = `https://${BINANCE_BASE}/fapi/v1/premiumIndex`;
+
+/** Keep-alive agent for low-latency signed REST (order/balance). */
+const keepAliveAgent = new https.Agent({
+  keepAlive: true,
+  scheduling: 'fifo',
+  maxSockets: 8,
+});
 const WS_BASE = 'wss://fstream.binance.com';
 /** Combined stream: all symbols mark price + funding rate, 1s updates */
 const WS_STREAM = '!markPrice@arr@1s';
@@ -113,6 +123,94 @@ export async function getBinanceDataMap(): Promise<Map<string, BinanceSymbolData
 /** Get data for one symbol (from cache; may be stale if WS not yet received). */
 export function getBinanceSymbol(symbol: string): BinanceSymbolData | undefined {
   return cache.get(symbol);
+}
+
+/** Build query string from params (keys sorted), then append &signature=HMAC_SHA256(query, secret). */
+function signParams(apiSecret: string, params: Record<string, string | number>): string {
+  const keys = Object.keys(params).sort();
+  const query = keys.map((k) => `${k}=${encodeURIComponent(String(params[k]))}`).join('&');
+  const sig = crypto.createHmac('sha256', apiSecret).update(query).digest('hex');
+  return `${query}&signature=${sig}`;
+}
+
+/** Signed REST request to Binance Futures (uses keepAlive agent). */
+function binanceSignedRequest(
+  apiKey: string,
+  apiSecret: string,
+  method: 'GET' | 'POST',
+  path: string,
+  bodyParams: Record<string, string | number>
+): Promise<unknown> {
+  const params = { ...bodyParams, timestamp: Date.now() };
+  const query = signParams(apiSecret, params);
+  return new Promise((resolve, reject) => {
+    const pathWithQuery = method === 'GET' ? `${path}?${query}` : path;
+    const req = https.request(
+      {
+        hostname: BINANCE_BASE,
+        path: pathWithQuery,
+        method,
+        agent: keepAliveAgent,
+        headers: {
+          'X-MBX-APIKEY': apiKey,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          const raw = Buffer.concat(chunks).toString('utf8');
+          try {
+            const data = JSON.parse(raw);
+            if (data.code != null && data.code !== 0) {
+              reject(new Error(data.msg ?? `Binance error ${data.code}`));
+              return;
+            }
+            resolve(data);
+          } catch {
+            reject(new Error(raw || 'Binance request failed'));
+          }
+        });
+      }
+    );
+    req.on('error', reject);
+    if (method === 'POST') req.write(query);
+    req.end();
+  });
+}
+
+/** Get USDT available balance for Binance Futures (cross margin). Returns 0 on error or no USDT. */
+export async function getBinanceAvailableBalance(apiKey: string, apiSecret: string): Promise<number> {
+  const data = (await binanceSignedRequest(apiKey, apiSecret, 'GET', '/fapi/v2/balance', {})) as Array<{ asset: string; availableBalance: string }>;
+  if (!Array.isArray(data)) return 0;
+  const usdt = data.find((r) => r.asset === 'USDT');
+  return usdt ? parseFloat(usdt.availableBalance) || 0 : 0;
+}
+
+/**
+ * Place a LIMIT IOC order on Binance Futures. Optimized for 5–10ms latency (keepAlive + built-in crypto).
+ * @returns orderId (number)
+ */
+export async function placeBinanceOrder(
+  apiKey: string,
+  apiSecret: string,
+  symbol: string,
+  side: 'BUY' | 'SELL',
+  qty: number,
+  price: number
+): Promise<{ orderId: number }> {
+  const qtyStr = String(qty);
+  const priceStr = String(price);
+  const data = (await binanceSignedRequest(apiKey, apiSecret, 'POST', '/fapi/v1/order', {
+    symbol,
+    side,
+    type: 'LIMIT',
+    timeInForce: 'IOC',
+    quantity: qtyStr,
+    price: priceStr,
+  })) as { orderId: number };
+  return { orderId: data.orderId };
 }
 
 interface PremiumIndexRow {

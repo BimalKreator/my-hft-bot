@@ -31,6 +31,11 @@ import {
 } from './bybitService.js';
 import type { OrderbookResult } from './bybitService.js';
 import { FundingScanner } from './scannerService.js';
+import {
+  getBinanceAvailableBalance,
+  getBinanceSymbol,
+  placeBinanceOrder,
+} from './binanceService.js';
 import { insertClosedTrade } from '../models/closedTradesModel.js';
 import {
   createHedgeGroup,
@@ -55,8 +60,8 @@ const CRITICAL_COUNTDOWN_SEC = 15; // below this: use cache only, no DB/heavy AP
 const ENTRY_SCHEDULE_MIN_MS = 5_000;
 const ENTRY_SCHEDULE_MAX_MS = 10_000;
 
-/** Cached wallet when countdown was 20–60s; used in entry window so we never call getWalletBalance when countdown <= 15. Sub-hedge: optional subEquity/subAvailableBalance for min(main,sub) sizing. */
-const walletCacheByUser = new Map<number, { totalEquity: number; totalAvailableBalance: number; subEquity?: number; subAvailableBalance?: number }>();
+/** Cached wallet when countdown was 20–60s; used in entry window so we never call getWalletBalance when countdown <= 15. Sub-hedge: optional subEquity/subAvailableBalance. Cross-exchange: optional binanceAvailableBalance for min(Bybit,Binance) sizing. */
+const walletCacheByUser = new Map<number, { totalEquity: number; totalAvailableBalance: number; subEquity?: number; subAvailableBalance?: number; binanceAvailableBalance?: number }>();
 
 /** Entry prep cache: populated when 20s <= countdown <= 60s; used in critical path (countdown <= 15) so no DB/heavy API. */
 interface EntryPrepCandidate {
@@ -112,8 +117,8 @@ const lockedFundingRates: Record<string, number> = {};
 const enteredThisCycle = new Set<string>();
 /** Retry prevention: once we attempt order for this key, do not retry even if order fails. */
 const processedTokens = new Set<string>();
-/** Precise entry timeouts: key = entryCycleKey(userId, symbol, nextFundingTime). Value single timeout (naked) or { main, sub } for subaccount hedging. */
-const entryTimeoutByCycle = new Map<string, ReturnType<typeof setTimeout> | { main: ReturnType<typeof setTimeout>; sub: ReturnType<typeof setTimeout> }>();
+/** Precise entry timeouts: key = entryCycleKey(userId, symbol, nextFundingTime). Value single timeout (naked), { main, sub } for sub-hedge, or { main, binance } for cross-exchange. */
+const entryTimeoutByCycle = new Map<string, ReturnType<typeof setTimeout> | { main?: ReturnType<typeof setTimeout>; sub?: ReturnType<typeof setTimeout>; binance?: ReturnType<typeof setTimeout> }>();
 /** Track funding time per (userId, symbol, side) for auto exit: close at fundingTime + exitTimeMs. */
 const positionFundingTime = new Map<string, number>();
 
@@ -684,12 +689,12 @@ async function runTick(): Promise<number> {
   }
   try {
     const now = Date.now();
-    let marketData: Array<{ symbol: string; fundingRate: number; nextFundingTime: string; countdownMs: number; markPrice?: string; lastPrice?: string; fundingIntervalHours?: number }>;
+    let marketData: Array<{ symbol: string; fundingRate: number; nextFundingTime: string; countdownMs: number; markPrice?: string; lastPrice?: string; fundingIntervalHours?: number; binanceFundingRate?: number }>;
 
     if (isManualMockActive && manualMockFundingTimeMs != null && manualMockEndMs != null && now < manualMockEndMs) {
       try {
         marketData = await Promise.race([
-          fundingScanner.getFundingData(),
+          fundingScanner.getCrossExchangeFundingData(),
           new Promise<never>((_, rej) => setTimeout(() => rej(new Error('getFundingData timeout')), 5000)),
         ]);
       } catch {
@@ -720,7 +725,7 @@ async function runTick(): Promise<number> {
           console.log('[autoBot] Manual mock state cleared (missing times); resuming live sync.');
         }
       }
-      marketData = await fundingScanner.getFundingData();
+      marketData = await fundingScanner.getCrossExchangeFundingData();
     }
 
     if (process.env.TEST_MODE === 'true') {
@@ -771,9 +776,10 @@ async function runTick(): Promise<number> {
       const nextFundingTimeStr = parts.length >= 3 ? parts[parts.length - 1]! : '';
       const nextMs = parseInt(nextFundingTimeStr, 10) || 0;
       if (nextMs > 0 && now > nextMs + 60_000) {
-        if (typeof t === 'object' && t != null && 'main' in t) {
-          clearTimeout(t.main);
-          clearTimeout(t.sub);
+        if (typeof t === 'object' && t != null) {
+          if (t.main) clearTimeout(t.main);
+          if (t.sub) clearTimeout(t.sub);
+          if (t.binance) clearTimeout(t.binance);
         } else {
           clearTimeout(t as ReturnType<typeof setTimeout>);
         }
@@ -1313,6 +1319,44 @@ async function monitorExits(): Promise<void> {
 type ExecuteEntryPrepData = { prep: EntryPrep; candidate: EntryPrepCandidate };
 
 /**
+ * Execute Binance Futures LIMIT IOC order at scheduled time (cross-exchange mode).
+ * Uses passedData.candidate.fixedQty and Bybit side to derive Binance side (opposite for hedge).
+ */
+async function executeBinanceEntry(
+  userId: number,
+  symbol: string,
+  nextFundingTime: string,
+  passedData?: ExecuteEntryPrepData
+): Promise<void> {
+  try {
+    const settings = await getSettings(userId);
+    if (!settings.crossExchangeMode || !settings.binanceApiKey || !settings.binanceApiSecret) return;
+    const apiKey = decrypt(settings.binanceApiKey);
+    const apiSecret = decrypt(settings.binanceApiSecret);
+    const c = passedData?.candidate;
+    const qty = c?.fixedQty;
+    if (qty == null || qty <= 0) return;
+    const bybitSide = c?.side ?? 'Buy';
+    const binanceSide: 'BUY' | 'SELL' = bybitSide === 'Buy' ? 'SELL' : 'BUY';
+    const binanceData = getBinanceSymbol(symbol);
+    const markPrice = binanceData ? parseFloat(binanceData.markPrice) : 0;
+    if (!Number.isFinite(markPrice) || markPrice <= 0) return;
+    const slippagePct = passedData?.prep?.settings.slippageBufferPct ?? settings.slippageBufferPct ?? 2;
+    const mult = binanceSide === 'BUY' ? 1 + slippagePct / 100 : 1 - slippagePct / 100;
+    const price = markPrice * mult;
+    await placeBinanceOrder(apiKey, apiSecret, symbol, binanceSide, qty, price);
+    console.log(`[autoBot] Binance entry executed | ${symbol} ${binanceSide} qty=${qty} price=${price.toFixed(4)}`);
+    const cycleKey = entryCycleKey(userId, symbol, nextFundingTime);
+    const existing = entryTimeoutByCycle.get(cycleKey);
+    if (existing && typeof existing === 'object' && existing.binance) {
+      entryTimeoutByCycle.delete(cycleKey);
+    }
+  } catch (e) {
+    console.error(`[autoBot] executeBinanceEntry ${symbol} failed:`, e);
+  }
+}
+
+/**
  * Run entry at exact timestamp (called from precise setTimeout). Uses prepData when provided; otherwise falls back to cache.
  * For subaccount hedging: account 'main' fires at funding - entry_offset_ms, 'sub' at funding - sub_entry_offset_ms; both use same Q from min(balances).
  */
@@ -1332,11 +1376,17 @@ async function executeEntry(
     const procKey = processedKey(userId, symbol, nextFundingTime);
     const existing = entryTimeoutByCycle.get(cycleKey);
     if (existing) {
-      if (typeof existing === 'object' && existing != null && 'main' in existing) {
+      if (typeof existing === 'object' && existing != null) {
         if (account === 'main') {
-          clearTimeout(existing.main);
+          if (existing.main) clearTimeout(existing.main);
+          if (existing.binance) {
+            entryTimeoutByCycle.set(cycleKey, { binance: existing.binance });
+          } else {
+            if (existing.sub) clearTimeout(existing.sub);
+            entryTimeoutByCycle.delete(cycleKey);
+          }
         } else if (account === 'sub') {
-          clearTimeout(existing.sub);
+          if (existing.sub) clearTimeout(existing.sub);
           entryTimeoutByCycle.delete(cycleKey);
         }
       } else {
@@ -1896,7 +1946,7 @@ async function processUser(
   const inPrefetchWindow = minCountdownSec >= WALLET_PREFETCH_MIN_SEC && minCountdownSec <= WALLET_PREFETCH_MAX_SEC;
 
   const subKeys = await getSubAccountKeys(userId);
-  const subHedgingEnabled = !!settings.hedgeMode && !!subKeys;
+  const subHedgingEnabled = !!settings.hedgeMode && !!subKeys && !settings.crossExchangeMode;
 
   // Pre-fetch wallet when countdown 20–60s; never call getWalletBalance when countdown <= 15 (critical path uses cache only). Sub-hedge: also fetch sub balance.
   if (inPrefetchWindow) {
@@ -1911,12 +1961,24 @@ async function processUser(
       const totalAvailableBalance = parseFloat(wallet.totalAvailableBalance) || 0;
       const subEquity = subWallet ? parseFloat(subWallet.totalEquity) || 0 : undefined;
       const subAvailableBalance = subWallet ? parseFloat(subWallet.totalAvailableBalance) || 0 : undefined;
-      walletCacheByUser.set(userId, {
+      const cacheEntry: { totalEquity: number; totalAvailableBalance: number; subEquity?: number; subAvailableBalance?: number; binanceAvailableBalance?: number } = {
         totalEquity,
         totalAvailableBalance,
         ...(subEquity !== undefined && { subEquity }),
         ...(subAvailableBalance !== undefined && { subAvailableBalance }),
-      });
+      };
+      if (settings.crossExchangeMode && settings.binanceApiKey && settings.binanceApiSecret) {
+        try {
+          const binanceBal = await getBinanceAvailableBalance(
+            decrypt(settings.binanceApiKey),
+            decrypt(settings.binanceApiSecret)
+          );
+          cacheEntry.binanceAvailableBalance = binanceBal;
+        } catch (e) {
+          console.error('[autoBot] getBinanceAvailableBalance (prefetch) failed:', e);
+        }
+      }
+      walletCacheByUser.set(userId, cacheEntry);
       if (subHedgingEnabled && subEquity !== undefined) {
         const minBal = Math.min(totalEquity, subEquity);
         console.log(`[autoBot] Balances synced - Main: $${totalEquity.toFixed(2)}, Sub: $${subEquity.toFixed(2)}. Using Min: $${minBal.toFixed(2)} for quantity calculation.`);
@@ -1945,6 +2007,9 @@ async function processUser(
         cachedAvailableMargin = Math.min(cache.totalAvailableBalance, cache.subAvailableBalance ?? cache.totalAvailableBalance);
       } else {
         tradeMargin = totalWalletBalance * capPct;
+        if (settings.crossExchangeMode && cache.binanceAvailableBalance != null) {
+          cachedAvailableMargin = Math.min(cache.totalAvailableBalance, cache.binanceAvailableBalance);
+        }
       }
     } else if (subHasScheduledTimers) {
       // Sub-hedging with precision timers already scheduled: fetch balances instead of skipping so timers have data when they fire
@@ -1963,13 +2028,18 @@ async function processUser(
         }
         totalWalletBalance = mainEquity;
         cachedAvailableMargin = subEquity != null ? Math.min(mainAvailable, subAvailable ?? mainAvailable) : mainAvailable;
-        const minBalance = subEquity != null ? Math.min(mainEquity, subEquity) : mainEquity;
-        tradeMargin = minBalance * ((settings.capitalPercent ?? 0) / 100);
-        walletCacheByUser.set(userId, {
+        const cacheEntry: { totalEquity: number; totalAvailableBalance: number; subEquity?: number; subAvailableBalance?: number; binanceAvailableBalance?: number } = {
           totalEquity: mainEquity,
           totalAvailableBalance: mainAvailable,
           ...(subEquity != null && { subEquity, subAvailableBalance: subAvailable ?? 0 }),
-        });
+        };
+        if (settings.crossExchangeMode && settings.binanceApiKey && settings.binanceApiSecret) {
+          try {
+            cacheEntry.binanceAvailableBalance = await getBinanceAvailableBalance(decrypt(settings.binanceApiKey), decrypt(settings.binanceApiSecret));
+            cachedAvailableMargin = Math.min(cachedAvailableMargin, cacheEntry.binanceAvailableBalance);
+          } catch { /* ignore */ }
+        }
+        walletCacheByUser.set(userId, cacheEntry);
       } catch (e) {
         if (debugSkip) console.log('[DEBUG] Trade Skipped Reason: Entry window but no wallet cache (critical path)');
         console.warn('[autoBot] Entry window but no wallet cache; fetch failed:', e);
@@ -1998,11 +2068,17 @@ async function processUser(
       cachedAvailableMargin = subEquity != null ? Math.min(mainAvailable, subAvailable ?? mainAvailable) : mainAvailable;
       const minBalance = subEquity != null ? Math.min(mainEquity, subEquity) : mainEquity;
       tradeMargin = minBalance * ((settings.capitalPercent ?? 0) / 100);
-      walletCacheByUser.set(userId, {
+      const cacheEntryOuter: { totalEquity: number; totalAvailableBalance: number; subEquity?: number; subAvailableBalance?: number; binanceAvailableBalance?: number } = {
         totalEquity: mainEquity,
         totalAvailableBalance: mainAvailable,
         ...(subEquity != null && { subEquity, subAvailableBalance: subAvailable ?? 0 }),
-      });
+      };
+      if (settings.crossExchangeMode && settings.binanceApiKey && settings.binanceApiSecret) {
+        try {
+          cacheEntryOuter.binanceAvailableBalance = await getBinanceAvailableBalance(decrypt(settings.binanceApiKey), decrypt(settings.binanceApiSecret));
+        } catch { /* ignore */ }
+      }
+      walletCacheByUser.set(userId, cacheEntryOuter);
     } catch (e) {
       if (debugSkip) console.log('[DEBUG] Trade Skipped Reason: getWalletBalance failed');
       console.error('[autoBot] getWalletBalance failed:', e);
@@ -2039,7 +2115,10 @@ async function processUser(
         if (Number.isNaN(delayMs) || delayMs < 0) return;
         const prepForPayload = entryPrepCacheByUser.get(userId);
         const cForPayload = prepForPayload?.candidates.find((x) => x.symbol === topToken.symbol && x.nextFundingTime === topToken.nextFundingTime);
-        const side: 'Buy' | 'Sell' = topToken.fundingRate < 0 ? 'Buy' : 'Sell';
+        const side: 'Buy' | 'Sell' =
+          settings.crossExchangeMode && topToken.binanceFundingRate != null
+            ? (topToken.binanceFundingRate > topToken.fundingRate ? 'Buy' : 'Sell')
+            : (topToken.fundingRate < 0 ? 'Buy' : 'Sell');
         if (hedgeMode && subKeys && prepForPayload && cForPayload && cForPayload.fixedQty != null && prepForPayload.subApiKey && prepForPayload.subApiSecret) {
           try {
             const orderbook = await getOrderbook(topToken.symbol, ORDERBOOK_SWEEP_LIMIT);
@@ -2108,7 +2187,16 @@ async function processUser(
             const ob = await getOrderBookDepth(apiKey, apiSecret, topToken.symbol, settings.orderBookDepth ?? 2);
             const entryPrice = side === 'Buy' ? ob.askPrice : ob.bidPrice;
             if (Number.isFinite(entryPrice) && entryPrice > 0) {
-              const rawQty = (tradeM * futuresLeverage) / entryPrice;
+              let rawQty = (tradeM * futuresLeverage) / entryPrice;
+              if (settings.crossExchangeMode) {
+                const cacheForBinance = walletCacheByUser.get(userId);
+                if (cacheForBinance?.binanceAvailableBalance != null) {
+                  const binanceData = getBinanceSymbol(topToken.symbol);
+                  const binanceMark = binanceData ? parseFloat(binanceData.markPrice) || entryPrice : entryPrice;
+                  const rawQtyBinance = binanceMark > 0 ? (cacheForBinance.binanceAvailableBalance * futuresLeverage) / binanceMark : 0;
+                  rawQty = Math.min(rawQty, rawQtyBinance);
+                }
+              }
               const step = qtyStep;
               const stepDecimals = step.toString().includes('.') ? step.toString().split('.')[1]!.length : 0;
               let q = parseFloat((Math.floor(rawQty / step) * step).toFixed(stepDecimals));
@@ -2151,6 +2239,16 @@ async function processUser(
           }, Math.max(0, delaySub));
           console.log(`[autoBot] Sub-hedge entry scheduled: main in ${delayMain}ms, sub in ${delaySub}ms.`);
           entryTimeoutByCycle.set(cycleKey, { main: tMain, sub: tSub });
+        } else if (settings.crossExchangeMode && passedData?.candidate?.fixedQty != null) {
+          const binanceEntryOffsetMs = settings.binanceEntryOffsetMs ?? 0;
+          const delayBinance = targetTime - scheduleNow - binanceEntryOffsetMs;
+          const tBinance = setTimeout(() => {
+            executeBinanceEntry(userId, topToken.symbol, topToken.nextFundingTime, passedData).catch((e) =>
+              console.error('[autoBot] executeBinanceEntry failed', e)
+            );
+          }, Math.max(0, delayBinance));
+          console.log(`[autoBot] Cross-exchange entry scheduled: Main in ${delayMain}ms, Binance in ${delayBinance}ms.`);
+          entryTimeoutByCycle.set(cycleKey, { main: tMain, binance: tBinance });
         } else {
           console.log(`[autoBot] Entry scheduled for Main (hedge_mode: false) in ${delayMain}ms.`);
           entryTimeoutByCycle.set(cycleKey, tMain);
@@ -2184,7 +2282,10 @@ async function processUser(
               /* ignore */
             }
           }
-          const side: 'Buy' | 'Sell' = topToken.fundingRate < 0 ? 'Buy' : 'Sell';
+          const side: 'Buy' | 'Sell' =
+            settings.crossExchangeMode && topToken.binanceFundingRate != null
+              ? (topToken.binanceFundingRate > topToken.fundingRate ? 'Buy' : 'Sell')
+              : (topToken.fundingRate < 0 ? 'Buy' : 'Sell');
           let qtyStep = 0.1;
           let minOrderQty = 0;
           let maxOrderQty = 999999;
@@ -2208,7 +2309,13 @@ async function processUser(
             const ob = await getOrderBookDepth(apiKey, apiSecret, topToken.symbol, settings.orderBookDepth ?? 2);
             const entryPrice = side === 'Buy' ? ob.askPrice : ob.bidPrice;
             if (Number.isFinite(entryPrice) && entryPrice > 0) {
-              const rawQty = (tradeMarginPrefetch * futuresLeverage) / entryPrice;
+              let rawQty = (tradeMarginPrefetch * futuresLeverage) / entryPrice;
+              if (settings.crossExchangeMode && cache?.binanceAvailableBalance != null) {
+                const binanceData = getBinanceSymbol(topToken.symbol);
+                const binanceMark = binanceData ? parseFloat(binanceData.markPrice) || entryPrice : entryPrice;
+                const rawQtyBinance = binanceMark > 0 ? (cache.binanceAvailableBalance * futuresLeverage) / binanceMark : 0;
+                rawQty = Math.min(rawQty, rawQtyBinance);
+              }
               const step = parseFloat(String(qtyStep)) || 0.1;
               const stepDecimals = step.toString().includes('.') ? step.toString().split('.')[1]!.length : 0;
               let q = parseFloat((Math.floor(rawQty / step) * step).toFixed(stepDecimals));
