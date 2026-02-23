@@ -52,8 +52,8 @@ export interface DashboardStats {
   binanceBalance?: number;
   /** When true, capital = mainEquity + binanceBalance (+ base). */
   crossExchangeMode?: boolean;
-  /** When cross-exchange: top 1 candidate from getCrossExchangeFundingData (full scanner row: symbol, spread, funding times, etc.). */
-  nextToTrade?: FundingDataItem[];
+  /** When cross-exchange: top 1 candidate meeting Min Spread %, or null if none (frontend can show "No eligible tokens"). */
+  nextToTrade?: FundingDataItem[] | null;
 }
 
 /**
@@ -209,11 +209,12 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
     ? percents.reduce((a, b) => a + b, 0) / percents.length
     : 0;
 
-  let nextToTrade: FundingDataItem[] | undefined;
+  // Min Spread % filter: same as dashboard (minFundingRate is decimal, e.g. 0.01 = 1%)
+  const minSpreadDec = Number(settings.minFundingRate ?? 0);
+  let nextToTrade: FundingDataItem[] | null = null;
   if (isCrossExchange) {
     try {
       const allCandidates = await getCrossExchangeFundingData();
-      const minProfitDec = Number((settings as { min_funding_rate_profit?: number }).min_funding_rate_profit ?? settings.minFundingRate ?? 0) / 100;
       let bannedTokens: string[] = [];
       try {
         bannedTokens = await getBannedTokens(userId);
@@ -221,13 +222,11 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
         /* ignore */
       }
       const validCandidates = allCandidates.filter((c) => {
-        const isBanned = bannedTokens.includes(c.symbol);
-        if (isBanned) return false;
+        if (bannedTokens.includes(c.symbol)) return false;
         const spread = Number(c.netSpread ?? 0);
-        return spread >= minProfitDec;
+        return spread >= minSpreadDec;
       });
-      // Top 1 candidate only; return full token object (scanner columns: symbol, spread, funding times, etc.)
-      nextToTrade = validCandidates.slice(0, 1);
+      nextToTrade = validCandidates.length > 0 ? validCandidates.slice(0, 1) : null;
     } catch (e) {
       console.warn('[statsService] getCrossExchangeFundingData failed for nextToTrade:', e instanceof Error ? e.message : String(e));
     }
@@ -245,7 +244,7 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
     subEquity,
     binanceBalance,
     crossExchangeMode,
-    ...(nextToTrade != null && { nextToTrade }),
+    nextToTrade,
   };
   if (isCrossExchange) {
     console.log('[statsService] Returning stats (cross-exchange):', { capital, binanceBalance, crossExchangeMode: result.crossExchangeMode });
