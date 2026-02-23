@@ -1546,7 +1546,12 @@ async function executeBinanceEntry(
     if (!settings.crossExchangeMode || !settings.binanceApiKey || !settings.binanceApiSecret) return;
     const apiKey = tryDecrypt(settings.binanceApiKey) || settings.binanceApiKey || '';
     const apiSecret = tryDecrypt(settings.binanceApiSecret) || settings.binanceApiSecret || '';
-    if (!apiKey || !apiSecret) return;
+    const cleanKey = String(apiKey).replace(/[\r\n\s]/g, '');
+    const cleanSecret = String(apiSecret).replace(/[\r\n\s]/g, '');
+    if (!cleanKey || !cleanSecret || cleanKey.length < 10) {
+      console.log('[DEBUG] Invalid Binance key detected, aborting binance order execution.');
+      return;
+    }
     const c = passedData?.candidate;
     const qty = c?.fixedQty;
     if (qty == null || qty <= 0) return;
@@ -1558,7 +1563,7 @@ async function executeBinanceEntry(
     const slippagePct = passedData?.prep?.settings.slippageBufferPct ?? settings.slippageBufferPct ?? 2;
     const mult = binanceSide === 'BUY' ? 1 + slippagePct / 100 : 1 - slippagePct / 100;
     const price = markPrice * mult;
-    await placeBinanceOrder(apiKey, apiSecret, symbol, binanceSide, qty, price);
+    await placeBinanceOrder(cleanKey, cleanSecret, symbol, binanceSide, qty, price);
     console.log(`[autoBot] Binance entry executed | ${symbol} ${binanceSide} qty=${qty} price=${price.toFixed(4)}`);
     const cycleKey = entryCycleKey(userId, symbol, nextFundingTime);
     const existing = entryTimeoutByCycle.get(cycleKey);

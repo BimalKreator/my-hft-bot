@@ -140,6 +140,11 @@ function signParams(apiSecret: string, params: Record<string, string | number>):
   return `${query}&signature=${sig}`;
 }
 
+/** Strip newlines, carriage returns, and spaces so headers/signature don't get invalid characters. */
+function cleanBinanceKey(val: string): string {
+  return String(val).replace(/[\r\n\s]/g, '');
+}
+
 /** Signed REST request to Binance Futures (uses keepAlive agent). */
 function binanceSignedRequest(
   apiKey: string,
@@ -148,8 +153,13 @@ function binanceSignedRequest(
   path: string,
   bodyParams: Record<string, string | number>
 ): Promise<unknown> {
+  const cleanKey = cleanBinanceKey(apiKey);
+  const cleanSecret = cleanBinanceKey(apiSecret);
+  if (!cleanKey || !cleanSecret || cleanKey.length < 10) {
+    return Promise.reject(new Error('Invalid Binance API key or secret (missing or too short after cleanup)'));
+  }
   const params = { ...bodyParams, timestamp: Date.now() };
-  const query = signParams(apiSecret, params);
+  const query = signParams(cleanSecret, params);
   return new Promise((resolve, reject) => {
     const pathWithQuery = method === 'GET' ? `${path}?${query}` : path;
     const req = https.request(
@@ -159,7 +169,7 @@ function binanceSignedRequest(
         method,
         agent: keepAliveAgent,
         headers: {
-          'X-MBX-APIKEY': apiKey,
+          'X-MBX-APIKEY': cleanKey,
           'Content-Type': 'application/x-www-form-urlencoded',
         },
       },
