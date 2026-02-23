@@ -28,6 +28,18 @@ export interface PositionRow {
   exchange?: ExchangeLabel;
   /** True when cross-exchange funding spread has reversed against the position */
   isFundingFlipped?: boolean;
+  /** Position open time (ms) if available */
+  entryTime?: number;
+  /** Leverage used */
+  leverage?: number;
+  /** Margin used = positionValue / leverage */
+  marginUsed?: number;
+  /** Current funding rate (raw numeric) */
+  currentFundingRate?: number;
+  /** Next funding fee: qty * entryPrice * currentFundingRate */
+  nextFundingAmount?: number;
+  /** Current market price (Long = ask, Short = bid; fallback mark) */
+  currentMarketPrice?: number;
 }
 
 function tokenName(symbol: string | undefined | null): string {
@@ -76,9 +88,11 @@ function CrossHedgeGroupCard({ symbol, bybitPos, binancePos, closingId, onCloseH
   const hedgeClosingId = `hedge_${safeSymbol}`;
   const isClosing = closingId === hedgeClosingId;
   const isFundingFlipped = !!(bybitPos?.isFundingFlipped || binancePos?.isFundingFlipped);
-  const qty = bybitPos?.size ?? binancePos?.size ?? '—';
-  const bybitEntry = parseFloat(bybitPos?.avgPrice ?? '') || 0;
-  const binanceEntry = parseFloat(binancePos?.avgPrice ?? '') || 0;
+
+  const rows: { label: string; pos: PositionRow }[] = [
+    { label: 'Bybit', pos: bybitPos! },
+    { label: 'Binance', pos: binancePos! },
+  ];
 
   return (
     <div
@@ -91,12 +105,6 @@ function CrossHedgeGroupCard({ symbol, bybitPos, binancePos, closingId, onCloseH
       <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
         <div className="flex flex-wrap items-center gap-3">
           <span className="font-semibold text-white">{tokenName(safeSymbol)}</span>
-          <span className="inline-block rounded px-1.5 py-0.5 text-xs font-medium" style={{ backgroundColor: 'rgba(0, 123, 255, 0.2)', color: '#007BFF' }}>
-            Bybit
-          </span>
-          <span className="inline-block rounded px-1.5 py-0.5 text-xs font-medium" style={{ backgroundColor: 'rgba(234, 179, 8, 0.25)', color: '#eab308' }}>
-            Binance
-          </span>
           <span
             className="inline-block rounded px-2 py-0.5 text-xs font-semibold"
             style={
@@ -137,27 +145,54 @@ function CrossHedgeGroupCard({ symbol, bybitPos, binancePos, closingId, onCloseH
           </button>
         </div>
       </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
-        <div className="rounded-lg p-3 flex flex-wrap items-center justify-between gap-2" style={{ backgroundColor: 'rgba(0,0,0,0.2)' }}>
-          <div>
-            <div className="text-gray-400 text-xs font-medium uppercase tracking-wide">Bybit</div>
-            <div className="text-white">Side: {bybitPos?.side ?? '—'} · Qty: {qty}</div>
-            <div className="text-gray-300">Entry: {formatNum(bybitEntry)}</div>
-            <div className="text-xs mt-0.5 font-medium" style={{ color: (bybitPos?.pnl ?? 0) >= 0 ? '#22c55e' : '#ef4444' }}>
-              PnL: {(bybitPos?.pnl ?? 0) >= 0 ? '+' : ''}{formatNum(bybitPos?.pnl ?? 0)}
-            </div>
-          </div>
-        </div>
-        <div className="rounded-lg p-3 flex flex-wrap items-center justify-between gap-2" style={{ backgroundColor: 'rgba(0,0,0,0.2)' }}>
-          <div>
-            <div className="text-gray-400 text-xs font-medium uppercase tracking-wide">Binance</div>
-            <div className="text-white">Side: {binancePos?.side ?? '—'} · Qty: {qty}</div>
-            <div className="text-gray-300">Entry: {formatNum(binanceEntry)}</div>
-            <div className="text-xs mt-0.5 font-medium" style={{ color: (binancePos?.pnl ?? 0) >= 0 ? '#22c55e' : '#ef4444' }}>
-              PnL: {(binancePos?.pnl ?? 0) >= 0 ? '+' : ''}{formatNum(binancePos?.pnl ?? 0)}
-            </div>
-          </div>
-        </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-gray-400" style={{ backgroundColor: 'rgba(0, 0, 0, 0.2)' }}>
+              <th className="px-3 py-2 font-medium">Exchange</th>
+              <th className="px-3 py-2 font-medium">Side</th>
+              <th className="px-3 py-2 font-medium">Entry Price</th>
+              <th className="px-3 py-2 font-medium">Qty</th>
+              <th className="px-3 py-2 font-medium">Margin (Lev)</th>
+              <th className="px-3 py-2 font-medium">Current Price</th>
+              <th className="px-3 py-2 font-medium">Current FR%</th>
+              <th className="px-3 py-2 font-medium">Next FR Amt</th>
+              <th className="px-3 py-2 font-medium">UPL</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(({ label, pos }) => {
+              if (!pos) return null;
+              const marginUsed = pos.marginUsed ?? 0;
+              const lev = pos.leverage ?? 0;
+              const marginLev = lev > 0 ? `$${formatNum(marginUsed)} (${lev}x)` : formatNum(marginUsed);
+              const nextFrAmt = pos.nextFundingAmount ?? 0;
+              const upl = pos.pnl ?? 0;
+              return (
+                <tr key={label} className="border-b border-gray-700/60" style={{ borderColor: 'rgba(255,255,255,0.06)' }}>
+                  <td className="px-3 py-2 font-medium text-white">
+                    <span
+                      className="inline-block rounded px-1.5 py-0.5 text-xs"
+                      style={label === 'Binance' ? { backgroundColor: 'rgba(234, 179, 8, 0.25)', color: '#eab308' } : { backgroundColor: 'rgba(0, 123, 255, 0.2)', color: '#007BFF' }}
+                    >
+                      {label}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2 text-gray-300">{pos.side ?? '—'}</td>
+                  <td className="px-3 py-2 text-gray-300">{formatNum(parseFloat(pos.avgPrice ?? '') || 0)}</td>
+                  <td className="px-3 py-2 text-gray-300">{pos.size ?? '—'}</td>
+                  <td className="px-3 py-2 text-gray-300">{marginLev}</td>
+                  <td className="px-3 py-2 text-gray-300">{pos.currentMarketPrice != null ? formatNum(pos.currentMarketPrice) : (pos.markPrice ? formatNum(parseFloat(pos.markPrice) || 0) : '—')}</td>
+                  <td className="px-3 py-2 text-gray-300">{formatPct(pos.currentFundingRate ?? pos.fundingRate ?? 0)}</td>
+                  <td className="px-3 py-2 text-gray-300">{formatNum(nextFrAmt)} USDT</td>
+                  <td className="px-3 py-2 font-medium" style={{ color: upl >= 0 ? '#22c55e' : '#ef4444' }}>
+                    {upl >= 0 ? '+' : ''}{formatNum(upl)}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   );

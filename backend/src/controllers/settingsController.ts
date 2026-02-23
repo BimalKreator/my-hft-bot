@@ -182,6 +182,13 @@ export async function updateSettingsHandler(
       const parsed = parseInt(binanceEntryOffsetRaw, 10);
       if (!Number.isNaN(parsed)) input.binanceEntryOffsetMs = parsed;
     }
+    const targetProfitMultiplierRaw = body.targetProfitMultiplier ?? body.target_profit_multiplier;
+    if (typeof targetProfitMultiplierRaw === 'number' && !Number.isNaN(targetProfitMultiplierRaw) && targetProfitMultiplierRaw > 0) {
+      input.targetProfitMultiplier = targetProfitMultiplierRaw;
+    } else if (typeof targetProfitMultiplierRaw === 'string') {
+      const parsed = parseFloat(targetProfitMultiplierRaw);
+      if (!Number.isNaN(parsed) && parsed > 0) input.targetProfitMultiplier = parsed;
+    }
     let settings = await updateSettings(userId, input);
     if (settings.subApiSecret) {
       settings = { ...settings, subApiSecret: '********' };

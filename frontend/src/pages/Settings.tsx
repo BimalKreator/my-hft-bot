@@ -36,6 +36,8 @@ interface BotSettings {
   binanceApiKey: string;
   binanceApiSecret: string;
   binanceEntryOffsetMs: number;
+  /** Target profit multiplier for cross-exchange exit (default 1.0). */
+  targetProfitMultiplier: number;
 }
 
 const defaultSettings: Omit<BotSettings, 'userId'> = {
@@ -60,6 +62,7 @@ const defaultSettings: Omit<BotSettings, 'userId'> = {
   binanceApiKey: '',
   binanceApiSecret: '',
   binanceEntryOffsetMs: 0,
+  targetProfitMultiplier: 1,
 };
 
 export default function Settings() {
@@ -126,6 +129,7 @@ export default function Settings() {
         binanceApiKey: typeof data.binanceApiKey === 'string' ? data.binanceApiKey : '',
         binanceApiSecret: typeof data.binanceApiSecret === 'string' ? data.binanceApiSecret : '',
         binanceEntryOffsetMs: Number(data.binanceEntryOffsetMs ?? data.binance_entry_offset_ms) || 0,
+        targetProfitMultiplier: Math.max(0.1, Number(data.targetProfitMultiplier ?? data.target_profit_multiplier) || 1),
       });
     } catch {
       setError('Network error. Edit below and click Save to retry.');
@@ -183,6 +187,7 @@ export default function Settings() {
           binanceApiKey: typeof data.binanceApiKey === 'string' ? data.binanceApiKey : settings.binanceApiKey ?? '',
           binanceApiSecret: typeof data.binanceApiSecret === 'string' ? data.binanceApiSecret : settings.binanceApiSecret ?? '',
           binanceEntryOffsetMs: Number(data.binanceEntryOffsetMs ?? data.binance_entry_offset_ms) ?? settings.binanceEntryOffsetMs ?? 0,
+          targetProfitMultiplier: Math.max(0.1, Number(data.targetProfitMultiplier ?? data.target_profit_multiplier) ?? settings.targetProfitMultiplier ?? 1),
         });
         setSuccessMessage('Success — bot updated.');
         setTimeout(() => setSuccessMessage(null), 3000);
@@ -217,6 +222,7 @@ export default function Settings() {
       fallbackSlMultiplier: Math.max(0.1, Number(settings.fallbackSlMultiplier) ?? 1),
       crossExchangeMode: Boolean(settings.crossExchangeMode),
       binanceEntryOffsetMs: Math.round(Number(settings.binanceEntryOffsetMs) ?? 0),
+      targetProfitMultiplier: Math.max(0.1, Number(settings.targetProfitMultiplier) ?? 1),
     });
   }, [settings, saveSettings]);
 
@@ -797,6 +803,26 @@ export default function Settings() {
                 style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
               />
               <p className="text-xs text-gray-500 mt-1">Multiplier for Funding Rate to calculate Main Fallback Stoploss (e.g., 0.5 = Half of Funding Rate, 2.0 = Double)</p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-1">Target Profit Multiplier (Cross-Exchange)</label>
+              <select
+                value={String(settings.targetProfitMultiplier ?? 1)}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  if (!Number.isNaN(v) && v >= 0.1) {
+                    setSettings((s) => (s ? { ...s, targetProfitMultiplier: v } : s));
+                    debouncedSave({ targetProfitMultiplier: v });
+                  }
+                }}
+                className="w-full rounded-lg border bg-black/50 px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-[#007BFF]"
+                style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
+              >
+                {[0.5, 0.8, 1.0, 1.2, 1.5, 2.0].map((n) => (
+                  <option key={n} value={String(n)}>{n}</option>
+                ))}
+              </select>
+              <p className="text-xs text-gray-500 mt-1">Multiplier for target PnL exit: targetPnL = positionValue × |BinanceFR − BybitFR| × multiplier (default 1.0)</p>
             </div>
             {balanceStats != null && (
               <div className="flex flex-wrap gap-4 text-sm">

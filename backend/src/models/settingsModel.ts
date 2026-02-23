@@ -44,6 +44,8 @@ export interface BotSettings {
   binanceApiSecret: string;
   /** Binance entry offset in milliseconds before funding (default 0). */
   binanceEntryOffsetMs: number;
+  /** Target profit multiplier for cross-exchange exit (default 1.0). targetPnL = positionValue * |binanceFR - bybitFR| * multiplier. */
+  targetProfitMultiplier: number;
 }
 
 interface SettingsRow {
@@ -78,6 +80,7 @@ interface SettingsRow {
   binance_api_key?: string | null;
   binance_api_secret?: string | null;
   binance_entry_offset_ms?: string | number | null;
+  target_profit_multiplier?: string | number | null;
 }
 
 function rowToSettings(row: SettingsRow): BotSettings {
@@ -119,6 +122,7 @@ function rowToSettings(row: SettingsRow): BotSettings {
     binanceApiKey: row.binance_api_key ?? '',
     binanceApiSecret: row.binance_api_secret ?? '',
     binanceEntryOffsetMs: row.binance_entry_offset_ms != null ? parseInt(String(row.binance_entry_offset_ms), 10) || 0 : 0,
+    targetProfitMultiplier: row.target_profit_multiplier != null ? parseFloat(String(row.target_profit_multiplier)) : 1,
   };
 }
 
@@ -151,6 +155,7 @@ const DEFAULTS: Omit<BotSettings, 'userId'> = {
   binanceApiKey: '',
   binanceApiSecret: '',
   binanceEntryOffsetMs: 0,
+  targetProfitMultiplier: 1,
 };
 
 export async function getUsersWithAutoEntryEnabled(): Promise<number[]> {
@@ -160,12 +165,12 @@ export async function getUsersWithAutoEntryEnabled(): Promise<number[]> {
   return result.rows.map((r) => r.user_id);
 }
 
-export async function getSettings(userId: number): Promise<BotSettings> {
+export async function   getSettings(userId: number): Promise<BotSettings> {
   const result = await query<SettingsRow>(
     `SELECT user_id, auto_entry_enabled, auto_exit_enabled, capital_percent, max_trades, entry_time_sec, entry_offset_ms, exit_time_sec, exit_time_ms, min_funding_rate, leverage,
             sl_pre_funding_enabled, sl_pre_multiplier, sl_post_funding_enabled, order_book_depth, spot_hedging_enabled,
             hedge_target_pct, hedge_stoploss_pct, hedge_pnl_depth, sub_api_key, sub_api_secret, sub_entry_offset_ms, universal_stoploss_percent, hedge_mode, slippage_buffer_pct, auto_equalize_funds, fallback_sl_multiplier,
-            cross_exchange_mode, binance_api_key, binance_api_secret, binance_entry_offset_ms
+            cross_exchange_mode, binance_api_key, binance_api_secret, binance_entry_offset_ms, target_profit_multiplier
      FROM bot_settings WHERE user_id = $1`,
     [userId]
   );
@@ -205,6 +210,7 @@ export interface UpdateSettingsInput {
   binanceApiKey?: string;
   binanceApiSecret?: string;
   binanceEntryOffsetMs?: number;
+  targetProfitMultiplier?: number;
 }
 
 export async function updateSettings(
@@ -242,6 +248,7 @@ export async function updateSettings(
     binanceApiKey: input.binanceApiKey !== undefined ? input.binanceApiKey : current.binanceApiKey,
     binanceApiSecret: input.binanceApiSecret !== undefined ? input.binanceApiSecret : current.binanceApiSecret,
     binanceEntryOffsetMs: input.binanceEntryOffsetMs ?? current.binanceEntryOffsetMs,
+    targetProfitMultiplier: input.targetProfitMultiplier ?? current.targetProfitMultiplier,
   };
   const depthInt = Math.max(1, Math.min(50, Math.round(merged.orderBookDepth) || 2));
   const exitTimeMsInt = Math.max(0, Math.round(merged.exitTimeMs));
@@ -254,9 +261,10 @@ export async function updateSettings(
   const slippageBufferNum = Math.max(0, Number(merged.slippageBufferPct ?? 2));
   const fallbackSlMultiplierNum = Math.max(0.1, Number(merged.fallbackSlMultiplier ?? 1));
   const binanceEntryOffsetMsInt = Math.round(merged.binanceEntryOffsetMs ?? 0);
+  const targetProfitMultiplierNum = Math.max(0.1, Number(merged.targetProfitMultiplier ?? 1));
   await query(
-    `INSERT INTO bot_settings (user_id, auto_entry_enabled, auto_exit_enabled, capital_percent, max_trades, entry_time_sec, entry_offset_ms, exit_time_sec, exit_time_ms, min_funding_rate, leverage, sl_pre_funding_enabled, sl_pre_multiplier, sl_post_funding_enabled, order_book_depth, spot_hedging_enabled, hedge_target_pct, hedge_stoploss_pct, hedge_pnl_depth, sub_api_key, sub_api_secret, sub_entry_offset_ms, universal_stoploss_percent, hedge_mode, slippage_buffer_pct, auto_equalize_funds, fallback_sl_multiplier, cross_exchange_mode, binance_api_key, binance_api_secret, binance_entry_offset_ms)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)
+    `INSERT INTO bot_settings (user_id, auto_entry_enabled, auto_exit_enabled, capital_percent, max_trades, entry_time_sec, entry_offset_ms, exit_time_sec, exit_time_ms, min_funding_rate, leverage, sl_pre_funding_enabled, sl_pre_multiplier, sl_post_funding_enabled, order_book_depth, spot_hedging_enabled, hedge_target_pct, hedge_stoploss_pct, hedge_pnl_depth, sub_api_key, sub_api_secret, sub_entry_offset_ms, universal_stoploss_percent, hedge_mode, slippage_buffer_pct, auto_equalize_funds, fallback_sl_multiplier, cross_exchange_mode, binance_api_key, binance_api_secret, binance_entry_offset_ms, target_profit_multiplier)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32)
      ON CONFLICT (user_id) DO UPDATE SET
        auto_entry_enabled = EXCLUDED.auto_entry_enabled,
        auto_exit_enabled = EXCLUDED.auto_exit_enabled,
@@ -287,7 +295,8 @@ export async function updateSettings(
        cross_exchange_mode = EXCLUDED.cross_exchange_mode,
        binance_api_key = EXCLUDED.binance_api_key,
        binance_api_secret = EXCLUDED.binance_api_secret,
-       binance_entry_offset_ms = EXCLUDED.binance_entry_offset_ms`,
+       binance_entry_offset_ms = EXCLUDED.binance_entry_offset_ms,
+       target_profit_multiplier = EXCLUDED.target_profit_multiplier`,
     [
       userId,
       merged.autoEntryEnabled,
@@ -320,6 +329,7 @@ export async function updateSettings(
       merged.binanceApiKey ?? null,
       merged.binanceApiSecret ?? null,
       binanceEntryOffsetMsInt,
+      targetProfitMultiplierNum,
     ]
   );
   return getSettings(userId);

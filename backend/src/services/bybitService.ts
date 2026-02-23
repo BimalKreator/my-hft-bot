@@ -764,6 +764,8 @@ export interface LinearPosition {
   size: string;
   avgPrice: string;
   markPrice?: string;
+  /** Position update time in ms (from API) if available */
+  updatedTime?: string;
 }
 
 /**
@@ -781,10 +783,10 @@ export async function getPositionList(
   if (res.retCode !== 0) {
     throw new Error(res.retMsg ?? 'Bybit get position list failed');
   }
-  const list = (res.result as { list?: Array<{ symbol: string; side: 'Buy' | 'Sell'; size: string; avgPrice?: string; markPrice?: string }> })?.list ?? [];
+  const list = (res.result as { list?: Array<{ symbol: string; side: 'Buy' | 'Sell'; size: string; avgPrice?: string; markPrice?: string; updatedTime?: string }> })?.list ?? [];
   return list
     .filter((p) => parseFloat(p.size) > 0)
-    .map((p) => ({ symbol: p.symbol, side: p.side, size: p.size, avgPrice: p.avgPrice ?? '0', markPrice: p.markPrice }));
+    .map((p) => ({ symbol: p.symbol, side: p.side, size: p.size, avgPrice: p.avgPrice ?? '0', markPrice: p.markPrice, ...(p.updatedTime != null && { updatedTime: String(p.updatedTime) }) }));
 }
 
 export interface OrderbookLevel {

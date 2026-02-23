@@ -1251,7 +1251,8 @@ async function monitorExits(): Promise<void> {
             const currentBybitFR = fundingRate;
             const currentBinanceFR = binanceSymbolData?.fundingRate ?? 0;
             const positionValue = qty * entry;
-            const targetPnL = positionValue * Math.abs(currentBinanceFR - currentBybitFR);
+            const multiplier = Number((settings as { targetProfitMultiplier?: number }).targetProfitMultiplier ?? 1);
+            const targetPnL = positionValue * Math.abs(currentBinanceFR - currentBybitFR) * multiplier;
             if (combinedPnL >= targetPnL && targetPnL > 0) {
               await runCrossExchangeExit('Cross-Exchange Exit (SL/Breakeven)', true);
               continue;

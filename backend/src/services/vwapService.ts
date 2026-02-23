@@ -81,6 +81,18 @@ export interface EnrichedPosition extends LinearPosition {
   exchange?: ExchangeLabel;
   /** True when cross-exchange funding spread has reversed against the open positions */
   isFundingFlipped?: boolean;
+  /** Position open time (ms) if available from exchange */
+  entryTime?: number;
+  /** Leverage used (from settings or exchange) */
+  leverage?: number;
+  /** Margin used = positionValue / leverage */
+  marginUsed?: number;
+  /** Explicit current funding rate (same as fundingRate, for UI) */
+  currentFundingRate?: number;
+  /** Next funding fee amount: qty * entryPrice * currentFundingRate */
+  nextFundingAmount?: number;
+  /** Current market price: Long = ask1, Short = bid1; fallback markPrice */
+  currentMarketPrice?: number;
 }
 
 /**
@@ -179,6 +191,13 @@ export async function getEnrichedPositions(userId: number): Promise<EnrichedPosi
           ? entry * (1 + fundingRate)
           : entry * (1 - fundingRate);
 
+      const positionValue = entry * qty;
+      const leverageNum = settings.leverage ?? 10;
+      const marginUsed = leverageNum > 0 ? positionValue / leverageNum : positionValue;
+      const currentFundingRate = fundingRate;
+      const nextFundingAmount = positionValue * currentFundingRate;
+      const entryTime = (pos as { updatedTime?: string }).updatedTime != null ? parseInt(String((pos as { updatedTime?: string }).updatedTime), 10) : undefined;
+
       enriched.push({
         ...pos,
         vwapPrice,
@@ -188,6 +207,12 @@ export async function getEnrichedPositions(userId: number): Promise<EnrichedPosi
         fundingRate,
         accountType,
         exchange: 'Bybit',
+        leverage: leverageNum,
+        marginUsed,
+        currentFundingRate,
+        nextFundingAmount,
+        currentMarketPrice: vwapPrice,
+        ...(entryTime != null && Number.isFinite(entryTime) && { entryTime }),
         ...(isFundingFlipped && { isFundingFlipped: true }),
         ...(hedgeGroup != null && {
           hedgeGroupId: hedgeGroup.hedgeGroupId,
@@ -224,6 +249,10 @@ export async function getEnrichedPositions(userId: number): Promise<EnrichedPosi
     const pnl = bp.unRealizedProfit;
     const slPrice = binanceSide === 'Buy' ? entry * (1 - binanceFR) : entry * (1 + binanceFR);
     const targetPrice = binanceSide === 'Buy' ? entry * (1 + binanceFR) : entry * (1 - binanceFR);
+    const positionValue = entry * qty;
+    const leverageNum = settings.leverage ?? 10;
+    const marginUsed = leverageNum > 0 ? positionValue / leverageNum : positionValue;
+    const nextFundingAmount = positionValue * binanceFR;
     enriched.push({
       symbol: bp.symbol,
       side: binanceSide,
@@ -236,6 +265,11 @@ export async function getEnrichedPositions(userId: number): Promise<EnrichedPosi
       targetPrice,
       fundingRate: binanceFR,
       exchange: 'Binance',
+      leverage: leverageNum,
+      marginUsed,
+      currentFundingRate: binanceFR,
+      nextFundingAmount,
+      currentMarketPrice: vwapPrice,
       ...(isFundingFlipped && { isFundingFlipped: true }),
     });
   }
