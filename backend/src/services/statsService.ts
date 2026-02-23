@@ -5,8 +5,11 @@ import { decrypt } from '../utils/encryption.js';
 import { getWalletBalance } from './bybitService.js';
 import { getBinanceEquity } from './binanceService.js';
 import { getCrossExchangeFundingData } from './marketService.js';
+import { FundingScanner } from './scannerService.js';
 import { getBannedTokens } from '../models/bannedTokensModel.js';
 import type { FundingDataItem } from './scannerService.js';
+
+const fundingScanner = new FundingScanner();
 
 /** Decrypt if possible; if decrypt throws (e.g. value was saved as plain text), return raw string. */
 function tryDecrypt(value: string): string {
@@ -54,6 +57,8 @@ export interface DashboardStats {
   crossExchangeMode?: boolean;
   /** When cross-exchange: top 1 candidate meeting Min Spread %, or null if none (frontend can show "No eligible tokens"). */
   nextToTrade?: FundingDataItem[] | null;
+  /** Percentage of tokens with net spread > 0.5% (cross-exchange) or |fundingRate| > 0.5% (single). 0–100. */
+  volatilityIndex?: number;
 }
 
 /**
@@ -212,9 +217,10 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
   // Min Spread % filter: same as dashboard (minFundingRate is decimal, e.g. 0.01 = 1%)
   const minSpreadDec = Number(settings.minFundingRate ?? 0);
   let nextToTrade: FundingDataItem[] | null = null;
+  let allCandidates: FundingDataItem[] = [];
   if (isCrossExchange) {
     try {
-      const allCandidates = await getCrossExchangeFundingData();
+      allCandidates = await getCrossExchangeFundingData();
       let bannedTokens: string[] = [];
       try {
         bannedTokens = await getBannedTokens(userId);
@@ -230,7 +236,19 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
     } catch (e) {
       console.warn('[statsService] getCrossExchangeFundingData failed for nextToTrade:', e instanceof Error ? e.message : String(e));
     }
+  } else {
+    try {
+      allCandidates = await fundingScanner.getFundingData();
+    } catch (e) {
+      console.warn('[statsService] getFundingData failed for volatility:', e instanceof Error ? e.message : String(e));
+    }
   }
+
+  const totalTokens = allCandidates.length;
+  const highSpreadTokens = isCrossExchange
+    ? allCandidates.filter((c: FundingDataItem) => Number(c.netSpread ?? 0) > 0.005).length
+    : allCandidates.filter((c: FundingDataItem) => Math.abs(Number(c.fundingRate ?? 0)) > 0.005).length;
+  const volatilityIndex = totalTokens > 0 ? Math.round((highSpreadTokens / totalTokens) * 100) : 0;
 
   const result = {
     capital,
@@ -245,6 +263,7 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
     binanceBalance,
     crossExchangeMode,
     nextToTrade,
+    volatilityIndex,
   };
   if (isCrossExchange) {
     console.log('[statsService] Returning stats (cross-exchange):', { capital, binanceBalance, crossExchangeMode: result.crossExchangeMode });

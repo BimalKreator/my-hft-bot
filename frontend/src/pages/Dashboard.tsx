@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import ActivePositions from '../components/ActivePositions';
 import ClosedTradesTable from '../components/ClosedTradesTable';
+import VolatilityMeter from '../components/VolatilityMeter';
 // import NextToTrade from '../components/NextToTrade';
 import { TRANSACTIONS_UPDATED_EVENT } from './Settings';
 
@@ -28,6 +29,8 @@ interface DashboardStats {
   binanceBalance?: number;
   crossExchangeMode?: boolean;
   nextToTrade?: NextToTradeItem[];
+  /** Market volatility index 0–100 (share of tokens with spread / |funding| > 0.5%). */
+  volatilityIndex?: number;
 }
 
 function formatUsd(value: number): string {
@@ -124,6 +127,7 @@ export default function Dashboard() {
         binanceBalance: binanceBalanceNum,
         crossExchangeMode,
         nextToTrade: nextToTradeList,
+        volatilityIndex: Number(data.volatilityIndex) || 0,
       });
     } catch {
       setError('Network error');
@@ -181,8 +185,8 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Top section: two cards */}
-      <div className="grid gap-4 sm:grid-cols-1 md:grid-cols-2">
+      {/* Top section: Capital, Performance, Market Volatility */}
+      <div className="grid gap-4 grid-cols-1 md:grid-cols-3">
         {/* Card 1: Capital */}
         <div className="rounded-xl border p-6 backdrop-blur-sm" style={cardStyle}>
           <h2 className="text-sm font-medium text-gray-400 mb-3">Capital</h2>
@@ -295,6 +299,12 @@ export default function Dashboard() {
           ) : (
             <p className="text-gray-400 py-2">Add API keys to see performance.</p>
           )}
+        </div>
+
+        {/* Card 3: Market Volatility */}
+        <div className="rounded-xl border p-6 flex flex-col items-center justify-center backdrop-blur-sm" style={cardStyle}>
+          <h2 className="text-gray-400 font-medium mb-4 w-full text-left">Market Volatility (Spread &gt; 0.5%)</h2>
+          <VolatilityMeter value={stats?.volatilityIndex ?? 0} />
         </div>
       </div>
 
