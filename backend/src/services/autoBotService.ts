@@ -1178,15 +1178,19 @@ async function monitorExits(): Promise<void> {
             const binanceApiKey = tryDecrypt(settings.binanceApiKey) || settings.binanceApiKey || '';
             const binanceApiSecret = tryDecrypt(settings.binanceApiSecret) || settings.binanceApiSecret || '';
             if (!binanceApiKey || !binanceApiSecret) continue;
-            let binancePosition: Awaited<ReturnType<typeof getBinancePositions>> = null;
+            let binancePosition: Awaited<ReturnType<typeof getBinancePositions>> | null = null;
             try {
               binancePosition = await getBinancePositions(binanceApiKey, binanceApiSecret, pos.symbol);
             } catch (e) {
-              console.error(`[autoBot] getBinancePositions failed ${pos.symbol}:`, e);
+              console.log(`[Orphan Check] Binance data unavailable for ${pos.symbol}. Waiting for next tick.`, e instanceof Error ? e.message : String(e));
+            }
+            // STRICT SAFETY LOCK: Do not run orphan exit if Binance fetch failed (null = API/timeout, not "0 position")
+            if (binancePosition === null) {
+              console.log(`[Orphan Check] Incomplete data for ${pos.symbol}. Skipping orphan evaluation to prevent false exits.`);
               continue;
             }
-            // Orphan: Bybit filled but Binance position is 0 — immediately IOC exit Bybit (no fallback SL)
-            if (!binancePosition || binancePosition.positionAmt === 0) {
+            // Orphan: Bybit has position but Binance position is 0 — immediately IOC exit Bybit (no fallback SL)
+            if (binancePosition.positionAmt === 0) {
               console.log('[autoBot] Orphan detected in Cross-Exchange. Instantly exiting the filled side via IOC.');
               try {
                 const orderIds = await exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty);
@@ -1515,7 +1519,7 @@ type ExecuteEntryPrepData = { prep: EntryPrep; candidate: EntryPrepCandidate };
 const ORPHAN_RETRY_COUNT = 5;
 const ORPHAN_RETRY_DELAY_MS = 1000;
 
-/** Orphan verification: poll both exchanges up to 5 times (1s apart). Only trigger IOC exit if the opposite exchange definitively has 0 position after all retries. */
+/** Orphan verification: poll both exchanges up to 5 times (1s apart). Only trigger exit if the opposite exchange definitively has 0 position. API failure = null = skip (no false orphan exit). */
 async function verifyCrossExchangeFill(userId: number, symbol: string): Promise<void> {
   await new Promise((r) => setTimeout(r, 2000));
   try {
@@ -1529,29 +1533,55 @@ async function verifyCrossExchangeFill(userId: number, symbol: string): Promise<
     const binanceApiSecret = tryDecrypt(settings.binanceApiSecret) || settings.binanceApiSecret || '';
     if (!binanceApiKey || !binanceApiSecret) return;
 
-    let bybitPos: Awaited<ReturnType<typeof getPositionList>>[number] | undefined;
-    let binancePosition: Awaited<ReturnType<typeof getBinancePositions>> = null;
+    type BybitList = Awaited<ReturnType<typeof getPositionList>>;
+    type BinancePos = Awaited<ReturnType<typeof getBinancePositions>>;
+    let lastBybitData: BybitList | null = null;
+    let lastBinanceData: BinancePos | null = null;
+
     for (let attempt = 1; attempt <= ORPHAN_RETRY_COUNT; attempt++) {
-      const [bybitPositions, binancePosResult] = await Promise.all([
-        getPositionList(bybitApiKey, bybitApiSecret, { category: 'linear', settleCoin: 'USDT' }),
-        getBinancePositions(binanceApiKey, binanceApiSecret, symbol),
-      ]);
-      bybitPos = bybitPositions.find((p) => p.symbol === symbol && parseFloat(p.size) > 0);
-      binancePosition = binancePosResult;
-      const bybitHas = !!bybitPos;
-      const binanceHas = !!binancePosition && binancePosition.positionAmt !== 0;
-      if (bybitHas && binanceHas) return;
-      if (attempt < ORPHAN_RETRY_COUNT) {
-        await new Promise((r) => setTimeout(r, ORPHAN_RETRY_DELAY_MS));
+      let bybitData: BybitList | null = null;
+      let binanceData: BinancePos | null = null;
+      try {
+        bybitData = await getPositionList(bybitApiKey, bybitApiSecret, { category: 'linear', settleCoin: 'USDT' });
+      } catch (e) {
+        console.log(`[Orphan Check] Bybit data unavailable for ${symbol}. Waiting for next tick.`, e instanceof Error ? e.message : String(e));
       }
+      try {
+        binanceData = await getBinancePositions(binanceApiKey, binanceApiSecret, symbol);
+      } catch (e) {
+        console.log(`[Orphan Check] Binance data unavailable for ${symbol}. Waiting for next tick.`, e instanceof Error ? e.message : String(e));
+      }
+
+      if (bybitData === null || binanceData === null) {
+        if (attempt < ORPHAN_RETRY_COUNT) await new Promise((r) => setTimeout(r, ORPHAN_RETRY_DELAY_MS));
+        continue;
+      }
+      lastBybitData = bybitData;
+      lastBinanceData = binanceData;
+
+      const bybitPos = bybitData.find((p) => p.symbol === symbol && parseFloat(p.size) > 0);
+      const bybitSize = bybitPos ? parseFloat(bybitPos.size) || 0 : 0;
+      const binanceSize = Math.abs(Number(binanceData.positionAmt ?? 0));
+      if (bybitSize > 0 && binanceSize > 0) return;
+      if (attempt < ORPHAN_RETRY_COUNT) await new Promise((r) => setTimeout(r, ORPHAN_RETRY_DELAY_MS));
     }
 
-    const bybitHasPosition = !!bybitPos;
-    const binanceHasPosition = !!binancePosition && binancePosition.positionAmt !== 0;
-    if (bybitHasPosition && !binanceHasPosition) {
+    // STRICT SAFETY LOCK: Do not exit if either exchange failed to respond
+    if (lastBybitData === null || lastBinanceData === null) {
+      console.log(`[Orphan Check] Incomplete data for ${symbol}. Skipping orphan evaluation to prevent false exits.`);
+      return;
+    }
+
+    const bybitPos = lastBybitData.find((p) => p.symbol === symbol && parseFloat(p.size) > 0);
+    const bybitSize = bybitPos ? parseFloat(bybitPos.size) || 0 : 0;
+    const binanceSize = Math.abs(Number(lastBinanceData.positionAmt ?? 0));
+
+    if (bybitSize > 0 && binanceSize > 0) return;
+
+    if (bybitSize > 0 && binanceSize === 0) {
       console.log('[autoBot] Orphan detected in Cross-Exchange. Instantly exiting the filled side via IOC.');
       const side = bybitPos!.side as 'Buy' | 'Sell';
-      const qty = parseFloat(bybitPos!.size) || 0;
+      const qty = bybitSize;
       const entry = parseFloat(bybitPos!.avgPrice) || 0;
       const orderIds = await exitPositionWithIocSweep(bybitApiKey, bybitApiSecret, symbol, side, qty);
       positionFundingTime.delete(positionKey(userId, symbol, side));
@@ -1560,9 +1590,9 @@ async function verifyCrossExchangeFill(userId: number, symbol: string): Promise<
         const exitPrice = ob ? (side === 'Buy' ? ob.bidPrice : ob.askPrice) : entry;
         await saveClosedTradeAfterExit(userId, bybitApiKey, bybitApiSecret, symbol, side, entry, qty, orderIds, 'Cross-Exchange Orphan Exit', 0, exitPrice, undefined, undefined, 'Bybit Main');
       }
-    } else if (binanceHasPosition && !bybitHasPosition) {
+    } else if (binanceSize > 0 && bybitSize === 0) {
       console.log('[autoBot] Orphan detected in Cross-Exchange. Instantly closing Binance via MARKET.');
-      await closeBinancePositionWithRetry(binanceApiKey, binanceApiSecret, symbol, binancePosition!.positionAmt, 'MARKET');
+      await closeBinancePositionWithRetry(binanceApiKey, binanceApiSecret, symbol, lastBinanceData.positionAmt, 'MARKET');
     }
   } catch (e) {
     console.error(`[autoBot] verifyCrossExchangeFill ${symbol} failed:`, e);
