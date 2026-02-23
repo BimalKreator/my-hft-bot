@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 
 const TOKEN_KEY = 'hft_token';
 
@@ -7,9 +7,27 @@ export default function ExchangeSetup() {
   const [apiSecret, setApiSecret] = useState('');
   const [subApiKey, setSubApiKey] = useState('');
   const [subApiSecret, setSubApiSecret] = useState('');
+  const [binanceApiKey, setBinanceApiKey] = useState('');
+  const [binanceApiSecret, setBinanceApiSecret] = useState('');
   const [loading, setLoading] = useState(false);
+  const [binanceLoading, setBinanceLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
+  const [binanceSuccess, setBinanceSuccess] = useState(false);
+  const [binanceError, setBinanceError] = useState('');
+
+  useEffect(() => {
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (!token) return;
+    fetch('/api/settings', { headers: { Authorization: `Bearer ${token}` } })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data && typeof data.binanceApiKey === 'string') {
+          setBinanceApiKey(data.binanceApiKey);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -49,6 +67,43 @@ export default function ExchangeSetup() {
       setError('Network error');
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleBinanceSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setBinanceError('');
+    setBinanceSuccess(false);
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (!token) {
+      setBinanceError('Please log in again.');
+      return;
+    }
+    setBinanceLoading(true);
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          binanceApiKey: binanceApiKey.trim() || undefined,
+          binanceApiSecret: binanceApiSecret ? binanceApiSecret.trim() : undefined,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setBinanceError(data.error ?? 'Failed to save Binance keys');
+        return;
+      }
+      setBinanceSuccess(true);
+      if (binanceApiSecret) setBinanceApiSecret('');
+      setTimeout(() => setBinanceSuccess(false), 3000);
+    } catch {
+      setBinanceError('Network error');
+    } finally {
+      setBinanceLoading(false);
     }
   }
 
@@ -190,6 +245,77 @@ export default function ExchangeSetup() {
           {loading ? 'Saving…' : 'Save keys'}
         </button>
       </form>
+
+      <div
+        className="rounded-xl border p-6 space-y-5 mt-8"
+        style={{
+          backgroundColor: 'rgba(255, 255, 255, 0.04)',
+          borderColor: 'rgba(245, 158, 11, 0.4)',
+        }}
+      >
+        <h2 className="text-lg font-semibold text-white">Binance Futures API</h2>
+        <p className="text-sm text-gray-400">
+          For cross-exchange mode (Bybit + Binance). API key and secret are stored encrypted.
+        </p>
+        {binanceSuccess && (
+          <div
+            className="rounded-lg border px-4 py-3 text-sm text-green-400"
+            style={{
+              backgroundColor: 'rgba(34, 197, 94, 0.1)',
+              borderColor: 'rgba(34, 197, 94, 0.3)',
+            }}
+          >
+            Binance keys saved successfully.
+          </div>
+        )}
+        {binanceError && (
+          <div
+            className="rounded-lg border px-4 py-3 text-sm text-red-400"
+            style={{
+              backgroundColor: 'rgba(239, 68, 68, 0.1)',
+              borderColor: 'rgba(239, 68, 68, 0.3)',
+            }}
+          >
+            {binanceError}
+          </div>
+        )}
+        <form onSubmit={handleBinanceSubmit} className="space-y-5">
+          <div>
+            <label htmlFor="binanceApiKey" className="block text-sm font-medium text-gray-300 mb-2">
+              Binance API Key
+            </label>
+            <input
+              id="binanceApiKey"
+              type="text"
+              value={binanceApiKey}
+              onChange={(e) => setBinanceApiKey(e.target.value)}
+              className="w-full rounded-lg border bg-black/40 px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-amber-500 border-amber-500/30"
+              placeholder="Binance Futures API key"
+            />
+          </div>
+          <div>
+            <label htmlFor="binanceApiSecret" className="block text-sm font-medium text-gray-300 mb-2">
+              Binance API Secret
+            </label>
+            <input
+              id="binanceApiSecret"
+              type="password"
+              value={binanceApiSecret}
+              onChange={(e) => setBinanceApiSecret(e.target.value)}
+              className="w-full rounded-lg border bg-black/40 px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-amber-500 border-amber-500/30"
+              placeholder="Leave blank to keep existing secret"
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={binanceLoading}
+            className="w-full rounded-lg py-3 font-medium text-white transition hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2 focus:ring-offset-black disabled:opacity-50 border border-amber-500/50"
+            style={{ backgroundColor: 'rgba(245, 158, 11, 0.2)' }}
+          >
+            {binanceLoading ? 'Saving…' : 'Save Binance keys'}
+          </button>
+        </form>
+      </div>
     </div>
   );
 }

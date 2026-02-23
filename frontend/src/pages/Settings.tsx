@@ -32,6 +32,10 @@ interface BotSettings {
   slippageBufferPct: number;
   autoEqualizeFunds: boolean;
   fallbackSlMultiplier: number;
+  crossExchangeMode: boolean;
+  binanceApiKey: string;
+  binanceApiSecret: string;
+  binanceEntryOffsetMs: number;
 }
 
 const defaultSettings: Omit<BotSettings, 'userId'> = {
@@ -52,6 +56,10 @@ const defaultSettings: Omit<BotSettings, 'userId'> = {
   slippageBufferPct: 2,
   autoEqualizeFunds: false,
   fallbackSlMultiplier: 1,
+  crossExchangeMode: false,
+  binanceApiKey: '',
+  binanceApiSecret: '',
+  binanceEntryOffsetMs: 0,
 };
 
 export default function Settings() {
@@ -114,6 +122,10 @@ export default function Settings() {
         slippageBufferPct: Number(data.slippageBufferPct ?? data.slippage_buffer_pct) ?? 2,
         autoEqualizeFunds: Boolean(data.autoEqualizeFunds ?? data.auto_equalize_funds ?? false),
         fallbackSlMultiplier: Math.max(0.1, Number(data.fallbackSlMultiplier ?? data.fallback_sl_multiplier) || 1),
+        crossExchangeMode: Boolean(data.crossExchangeMode ?? data.cross_exchange_mode ?? false),
+        binanceApiKey: typeof data.binanceApiKey === 'string' ? data.binanceApiKey : '',
+        binanceApiSecret: typeof data.binanceApiSecret === 'string' ? data.binanceApiSecret : '',
+        binanceEntryOffsetMs: Number(data.binanceEntryOffsetMs ?? data.binance_entry_offset_ms) || 0,
       });
     } catch {
       setError('Network error. Edit below and click Save to retry.');
@@ -167,6 +179,10 @@ export default function Settings() {
           slippageBufferPct: Number(data.slippageBufferPct ?? data.slippage_buffer_pct) ?? settings.slippageBufferPct,
           autoEqualizeFunds: Boolean(data.autoEqualizeFunds ?? data.auto_equalize_funds ?? settings.autoEqualizeFunds),
           fallbackSlMultiplier: Math.max(0.1, (Number(data.fallbackSlMultiplier || data.fallback_sl_multiplier) ?? settings.fallbackSlMultiplier) ?? 1),
+          crossExchangeMode: Boolean(data.crossExchangeMode ?? data.cross_exchange_mode ?? settings.crossExchangeMode),
+          binanceApiKey: typeof data.binanceApiKey === 'string' ? data.binanceApiKey : settings.binanceApiKey ?? '',
+          binanceApiSecret: typeof data.binanceApiSecret === 'string' ? data.binanceApiSecret : settings.binanceApiSecret ?? '',
+          binanceEntryOffsetMs: Number(data.binanceEntryOffsetMs ?? data.binance_entry_offset_ms) ?? settings.binanceEntryOffsetMs ?? 0,
         });
         setSuccessMessage('Success — bot updated.');
         setTimeout(() => setSuccessMessage(null), 3000);
@@ -199,6 +215,8 @@ export default function Settings() {
       slippageBufferPct: Math.max(0, Number(settings.slippageBufferPct) ?? 2),
       autoEqualizeFunds: Boolean(settings.hedgeMode && settings.autoEqualizeFunds),
       fallbackSlMultiplier: Math.max(0.1, Number(settings.fallbackSlMultiplier) ?? 1),
+      crossExchangeMode: Boolean(settings.crossExchangeMode),
+      binanceEntryOffsetMs: Math.round(Number(settings.binanceEntryOffsetMs) ?? 0),
     });
   }, [settings, saveSettings]);
 
@@ -227,8 +245,15 @@ export default function Settings() {
   const toggleHedgeMode = () => {
     if (!settings) return;
     const next = !settings.hedgeMode;
-    setSettings((s) => (s ? { ...s, hedgeMode: next, ...(next ? {} : { autoEqualizeFunds: false }) } : s));
-    saveSettings({ hedgeMode: next, ...(next ? {} : { autoEqualizeFunds: false }) });
+    setSettings((s) => (s ? { ...s, hedgeMode: next, crossExchangeMode: next ? false : s.crossExchangeMode, ...(next ? {} : { autoEqualizeFunds: false }) } : s));
+    saveSettings({ hedgeMode: next, crossExchangeMode: next ? false : settings.crossExchangeMode, ...(next ? {} : { autoEqualizeFunds: false }) });
+  };
+
+  const toggleCrossExchangeMode = () => {
+    if (!settings) return;
+    const next = !settings.crossExchangeMode;
+    setSettings((s) => (s ? { ...s, crossExchangeMode: next, hedgeMode: next ? false : s.hedgeMode, ...(next ? { autoEqualizeFunds: false } : {}) } : s));
+    saveSettings({ crossExchangeMode: next, hedgeMode: next ? false : settings.hedgeMode, ...(next ? { autoEqualizeFunds: false } : {}) });
   };
 
   const handleTransfer = useCallback(
@@ -633,6 +658,25 @@ export default function Settings() {
               <p className="text-xs text-gray-500 mt-1">Ms before funding (positive = before, negative = after). Default: 10</p>
             </div>
             <div>
+              <label className="block text-sm font-medium text-gray-300 mb-2">Binance Entry Offset (ms)</label>
+              <input
+                type="number"
+                step={1}
+                value={settings.binanceEntryOffsetMs}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value, 10);
+                  if (!Number.isNaN(v)) {
+                    setSettings((s) => (s ? { ...s, binanceEntryOffsetMs: v } : s));
+                    debouncedSave({ binanceEntryOffsetMs: v });
+                  }
+                }}
+                className="w-full rounded-lg border bg-black/50 px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-[#007BFF]"
+                style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
+                placeholder="0"
+              />
+              <p className="text-xs text-gray-500 mt-1">Ms before funding for Binance entry (cross-exchange mode). Default: 0</p>
+            </div>
+            <div>
               <label className="block text-sm font-medium text-gray-300 mb-2">Universal Stoploss (%)</label>
               <input
                 type="number"
@@ -679,6 +723,30 @@ export default function Settings() {
             </button>
           </div>
 
+          {/* Cross-Exchange Mode (Bybit + Binance) — mutually exclusive with Hedge Mode */}
+          <div className="flex items-center justify-between">
+            <label className="text-sm font-medium text-gray-300">Cross-Exchange Mode (Bybit + Binance)</label>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={settings.crossExchangeMode}
+              onClick={toggleCrossExchangeMode}
+              disabled={settings.hedgeMode}
+              className={`relative h-8 w-14 rounded-full transition-colors ${
+                settings.crossExchangeMode ? 'bg-amber-500' : 'bg-gray-600'
+              } ${settings.hedgeMode ? 'opacity-50 cursor-not-allowed' : ''}`}
+            >
+              <span
+                className={`absolute top-1 h-6 w-6 rounded-full bg-white transition-transform ${
+                  settings.crossExchangeMode ? 'left-7' : 'left-1'
+                }`}
+              />
+            </button>
+          </div>
+          <p className="text-xs text-gray-500 -mt-1">
+            {settings.hedgeMode ? 'Turn off Hedge Mode (Main + Sub) to enable Cross-Exchange.' : 'On: Bybit + Binance. Off: single exchange. Mutually exclusive with Hedge Mode.'}
+          </p>
+
           {/* Hedge Mode (Main + Sub) Toggle */}
           <div className="flex items-center justify-between">
             <label className="text-sm font-medium text-gray-300">Hedge Mode (Main + Sub)</label>
@@ -687,11 +755,12 @@ export default function Settings() {
               role="switch"
               aria-checked={settings.hedgeMode}
               onClick={toggleHedgeMode}
+              disabled={settings.crossExchangeMode}
               className={`relative h-8 w-14 rounded-full transition-colors ${
                 settings.hedgeMode ? 'bg-[#007BFF]' : 'bg-gray-600'
-              }`}
+              } ${settings.crossExchangeMode ? 'opacity-50 cursor-not-allowed' : ''}`}
               style={
-                settings.hedgeMode
+                settings.hedgeMode && !settings.crossExchangeMode
                   ? { boxShadow: '0 0 16px rgba(0, 123, 255, 0.5)' }
                   : undefined
               }
@@ -703,7 +772,9 @@ export default function Settings() {
               />
             </button>
           </div>
-          <p className="text-xs text-gray-500 -mt-1">On: Main + Sub accounts. Off: Naked (Main only).</p>
+          <p className="text-xs text-gray-500 -mt-1">
+            {settings.crossExchangeMode ? 'Turn off Cross-Exchange Mode to enable Hedge Mode.' : 'On: Main + Sub accounts. Off: Naked (Main only).'}
+          </p>
 
           {/* Capital Management */}
           <h3 className="text-base font-semibold text-white mt-6 mb-2">Capital Management</h3>

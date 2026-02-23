@@ -141,6 +141,18 @@ async function initDb() {
   await client.query(`
     ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS fallback_sl_multiplier NUMERIC NOT NULL DEFAULT 1.0;
   `).catch(() => {});
+  await client.query(`
+    ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS cross_exchange_mode BOOLEAN NOT NULL DEFAULT false;
+  `).catch(() => {});
+  await client.query(`
+    ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS binance_api_key TEXT;
+  `).catch(() => {});
+  await client.query(`
+    ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS binance_api_secret TEXT;
+  `).catch(() => {});
+  await client.query(`
+    ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS binance_entry_offset_ms INTEGER NOT NULL DEFAULT 0;
+  `).catch(() => {});
 
   await client.query(`
     CREATE TABLE IF NOT EXISTS daily_snapshots (

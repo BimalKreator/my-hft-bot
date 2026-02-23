@@ -20,6 +20,9 @@ export async function getSettingsHandler(
     if (settings.subApiSecret) {
       settings = { ...settings, subApiSecret: '********' };
     }
+    if (settings.binanceApiSecret) {
+      settings = { ...settings, binanceApiSecret: '********' };
+    }
     res.json(settings);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to load settings';
@@ -160,9 +163,31 @@ export async function updateSettingsHandler(
       const v = parseFloat(fallbackSlMultiplierRaw);
       if (!Number.isNaN(v) && v >= 0.1) input.fallbackSlMultiplier = v;
     }
+    const crossExchangeModeRaw = body.crossExchangeMode ?? body.cross_exchange_mode;
+    if (typeof crossExchangeModeRaw === 'boolean') {
+      input.crossExchangeMode = crossExchangeModeRaw;
+    } else if (crossExchangeModeRaw === 'true' || crossExchangeModeRaw === 1) {
+      input.crossExchangeMode = true;
+    } else if (crossExchangeModeRaw === 'false' || crossExchangeModeRaw === 0) {
+      input.crossExchangeMode = false;
+    }
+    if (typeof body.binanceApiKey === 'string') input.binanceApiKey = body.binanceApiKey;
+    if (typeof body.binanceApiSecret === 'string' && body.binanceApiSecret !== '********') {
+      input.binanceApiSecret = body.binanceApiSecret;
+    }
+    const binanceEntryOffsetRaw = body.binanceEntryOffsetMs ?? body.binance_entry_offset_ms;
+    if (typeof binanceEntryOffsetRaw === 'number' && !Number.isNaN(binanceEntryOffsetRaw)) {
+      input.binanceEntryOffsetMs = Math.round(binanceEntryOffsetRaw);
+    } else if (typeof binanceEntryOffsetRaw === 'string') {
+      const parsed = parseInt(binanceEntryOffsetRaw, 10);
+      if (!Number.isNaN(parsed)) input.binanceEntryOffsetMs = parsed;
+    }
     let settings = await updateSettings(userId, input);
     if (settings.subApiSecret) {
       settings = { ...settings, subApiSecret: '********' };
+    }
+    if (settings.binanceApiSecret) {
+      settings = { ...settings, binanceApiSecret: '********' };
     }
     res.json(settings);
   } catch (err) {
