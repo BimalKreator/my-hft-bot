@@ -564,10 +564,15 @@ export async function getTradeHistory(
       symbol: r.token,
       side: r.direction,
       qty: r.quantity,
+      quantity: r.quantity,
       closed_at: r.exit_time,
+      exit_time: r.exit_time,
       accountType: r.exchange === 'Bybit Sub' ? 'Sub' as const : (r.exchange === 'Binance' ? undefined : 'Main' as const),
       exchange: r.exchange ?? 'Bybit Main',
       exitReason: r.exit_reason,
+      exit_reason: r.exit_reason,
+      net_pnl: r.net_pnl,
+      gross_pnl: r.gross_pnl,
     }));
     res.status(200).json(mapped);
   } catch (err) {

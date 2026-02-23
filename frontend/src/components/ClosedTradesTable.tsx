@@ -130,7 +130,26 @@ export default function ClosedTradesTable() {
         setRows([]);
         return;
       }
-      setRows(Array.isArray(data) ? data : []);
+      const raw = Array.isArray(data) ? data : [];
+      const normalized: ClosedTradeRow[] = raw.map((r: Record<string, unknown>) => ({
+        id: r.id as number | string,
+        user_id: r.user_id as number | undefined,
+        symbol: (r.symbol ?? r.token ?? '') as string,
+        side: (r.side ?? r.direction ?? '') as string,
+        entry_price: (r.entry_price ?? '0') as string,
+        exit_price: (r.exit_price ?? '0') as string,
+        qty: (r.qty ?? r.quantity ?? '0') as string,
+        gross_pnl: (r.gross_pnl ?? '0') as string,
+        net_pnl: (r.net_pnl ?? r.gross_pnl ?? '0') as string,
+        fees: (r.fees ?? '0') as string,
+        closed_at: (r.closed_at ?? r.exit_time ?? '') as string,
+        exit_reason: (r.exit_reason ?? null) as string | null,
+        exitReason: (r.exitReason ?? r.exit_reason ?? null) as string | null,
+        funding_received: (r.funding_received ?? r.funding ?? '0') as string,
+        exchange: (r.exchange ?? (r.accountType === 'Sub' ? 'Bybit Sub' : 'Bybit Main')) as string | null,
+        accountType: r.accountType as 'Main' | 'Sub' | undefined,
+      }));
+      setRows(normalized);
       setCurrentPage(1);
     } catch {
       setError('Network error');
@@ -146,10 +165,10 @@ export default function ClosedTradesTable() {
     return () => clearInterval(interval);
   }, [fetchHistory]);
 
-  const sortedRows = useMemo(
-    () => [...rows].sort((a, b) => new Date(b.closed_at).getTime() - new Date(a.closed_at).getTime()),
-    [rows]
-  );
+  const sortedRows = useMemo(() => {
+    const key = (r: ClosedTradeRow) => new Date((r.closed_at || (r as { exit_time?: string }).exit_time) || 0).getTime();
+    return [...rows].sort((a, b) => key(b) - key(a));
+  }, [rows]);
 
   const groupedTrades = useMemo((): GroupedItem[] => {
     const groups: GroupedItem[] = [];
@@ -227,7 +246,10 @@ export default function ClosedTradesTable() {
       }}
     >
       <div className="px-4 py-3 border-b flex flex-wrap items-center justify-between gap-4" style={{ borderColor: 'rgba(0, 123, 255, 0.2)' }}>
-        <h2 className="text-lg font-semibold text-white">Closed Trades</h2>
+        <div>
+          <h2 className="text-lg font-semibold text-white">Closed Trades</h2>
+          <p className="text-xs text-gray-500 mt-0.5">Grouped by symbol & time (60s) · Direction · Exchange</p>
+        </div>
         <div className="flex flex-wrap items-center gap-3">
           <input
             type="text"
@@ -302,7 +324,7 @@ export default function ClosedTradesTable() {
         </div>
       ) : (
         <>
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto" data-closed-trades="grouped-v2">
           <table className="w-full text-sm text-left border-collapse">
             <thead>
               <tr className="border-b border-gray-800 text-gray-400 text-sm" style={{ backgroundColor: 'rgba(0, 0, 0, 0.2)' }}>
