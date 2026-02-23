@@ -6,7 +6,7 @@ import dotenv from 'dotenv';
 dns.setDefaultResultOrder('ipv4first');
 
 import './config/db.js';
-import { initSettingsTable, initTradeHistoryTable, initClosedTradesExchangeColumn } from './models/settingsModel.js';
+import { initSettingsTable, initTradeHistoryTable, initClosedTradesExchangeColumn, initDailySnapshotsBinanceColumn } from './models/settingsModel.js';
 import { startMonitoring } from './services/autoBotService.js';
 import { startDailySnapshotCron } from './services/cronService.js';
 import { fetchBinanceFundingInfo } from './services/binanceService.js';
@@ -50,6 +50,7 @@ startDailySnapshotCron();
 initSettingsTable()
   .then(() => initTradeHistoryTable())
   .then(() => initClosedTradesExchangeColumn())
+  .then(() => initDailySnapshotsBinanceColumn())
   .then(() => fetchBinanceFundingInfo())
   .then(() => startPositionStreamForOrphanExit())
   .then(() => {

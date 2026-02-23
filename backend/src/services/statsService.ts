@@ -136,8 +136,8 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
      WHERE user_id = $1 AND date = $2`,
     [userId, today]
   );
-  const yesterdaySnapshotResult = await query<{ closing_balance: string }>(
-    `SELECT closing_balance FROM daily_snapshots
+  const yesterdaySnapshotResult = await query<{ closing_balance: string; binance_snapshot: string | null }>(
+    `SELECT closing_balance, binance_snapshot FROM daily_snapshots
      WHERE user_id = $1 AND date = $2`,
     [userId, yesterday]
   );
@@ -145,13 +145,20 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
   const todayRow = todaySnapshotResult.rows[0];
   const yesterdayRow = yesterdaySnapshotResult.rows[0];
   const OPENING_BALANCE_DEFAULT = 3400;
+  /** Hardcoded closing for 2026-02-23 so next day's opening uses 3450. */
+  const yesterdayClosing = yesterdayRow
+    ? (yesterday === '2026-02-23' ? 3450 : parseFloat(yesterdayRow.closing_balance) || 0)
+    : null;
   /** Opening of today: today's snapshot opening, else yesterday's closing, else hardcoded $3400. */
   let opening = todayRow
     ? parseFloat(todayRow.opening_balance) || 0
-    : yesterdayRow
-      ? parseFloat(yesterdayRow.closing_balance) || 0
+    : yesterdayClosing != null
+      ? yesterdayClosing
       : OPENING_BALANCE_DEFAULT;
-  if (today === '2026-02-22') opening = 3491;
+  /** In cross-exchange mode, when opening came from yesterday's closing, if that snapshot didn't include Binance (legacy or null), add current Binance so opening reflects total capital. Skip when yesterday is 2026-02-23 (hardcoded closing 3450). */
+  if (crossExchangeMode && !todayRow && yesterdayRow && yesterday !== '2026-02-23' && (yesterdayRow.binance_snapshot == null || parseFloat(yesterdayRow.binance_snapshot ?? '0') === 0)) {
+    opening = opening + binanceBalance;
+  }
 
   const txResult = await query<{ type: string; sum: string }>(
     `SELECT type, COALESCE(SUM(amount), 0)::text AS sum

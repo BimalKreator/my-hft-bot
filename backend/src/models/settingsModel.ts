@@ -47,6 +47,21 @@ export async function initClosedTradesExchangeColumn(): Promise<void> {
   }
 }
 
+/**
+ * Ensures daily_snapshots has binance_snapshot (Binance balance at snapshot time for cross-exchange).
+ * Used to correct opening balance when reading legacy snapshots that didn't include Binance.
+ */
+export async function initDailySnapshotsBinanceColumn(): Promise<void> {
+  try {
+    await query(`
+      ALTER TABLE daily_snapshots ADD COLUMN IF NOT EXISTS binance_snapshot NUMERIC
+    `);
+    console.log('[Database] Ensured binance_snapshot column exists in daily_snapshots.');
+  } catch (err) {
+    console.error('[Database] Error altering daily_snapshots table:', err);
+  }
+}
+
 export interface BotSettings {
   userId: number;
   autoEntryEnabled: boolean;
