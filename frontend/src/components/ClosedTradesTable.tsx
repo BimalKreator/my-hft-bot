@@ -140,6 +140,10 @@ export default function ClosedTradesTable() {
     return () => clearInterval(interval);
   }, [fetchHistory]);
 
+  const indexOfLastItem = currentPage * ITEMS_PER_PAGE;
+  const indexOfFirstItem = indexOfLastItem - ITEMS_PER_PAGE;
+  const currentItems = rows.slice(indexOfFirstItem, indexOfLastItem);
+
   const handleDownloadExcel = () => {
     const headers = [
       'Token',
@@ -272,11 +276,7 @@ export default function ClosedTradesTable() {
               </tr>
             </thead>
             <tbody>
-              {(() => {
-                const indexOfLastItem = currentPage * ITEMS_PER_PAGE;
-                const indexOfFirstItem = indexOfLastItem - ITEMS_PER_PAGE;
-                const currentItems = rows.slice(indexOfFirstItem, indexOfLastItem);
-                return rows.length === 0 ? (
+              {rows.length === 0 ? (
                 <tr>
                   <td colSpan={10} className="px-4 py-8 text-center text-gray-400">
                     No closed trades match the filters.
@@ -363,8 +363,8 @@ export default function ClosedTradesTable() {
                       </td>
                     </tr>
                   );
-                });
-              })()}
+                })
+              )}
             </tbody>
           </table>
         </div>
