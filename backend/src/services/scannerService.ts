@@ -1,6 +1,6 @@
 import { RestClientV5 } from 'bybit-api';
 import { getInstrumentsCache, type CachedInstrumentRow } from './bybitService.js';
-import { getBinanceDataMap } from './binanceService.js';
+import { getBinanceDataMap, binanceIntervalCache } from './binanceService.js';
 
 export interface FundingDataFilters {
   minFundingRate?: number;
@@ -36,6 +36,9 @@ export interface FundingDataItem {
   /** Cross-exchange: "Short Binance / Long Bybit" or "Short Bybit / Long Binance". */
   hedgeDirection?: string;
 }
+
+/** In-memory cache: symbol -> funding interval in ms. Updated from REST (instrument) each getFundingData; if Bybit WS is added later, update dynamically like Binance. */
+export const bybitIntervalCache: Record<string, number> = {};
 
 export class FundingScanner {
   private bybit: RestClientV5;
@@ -96,6 +99,7 @@ export class FundingScanner {
       const turnover24h = parseFloat(t.turnover24h ?? '0');
       const fundingIntervalMinutes = inst.fundingInterval ?? 480;
       const fundingIntervalHours = fundingIntervalMinutes / 60;
+      bybitIntervalCache[t.symbol] = fundingIntervalMinutes * 60 * 1000;
       const maxLeverage = inst.leverageFilter?.maxLeverage ?? '';
       const maxOrderQty = inst.lotSizeFilter?.maxMktOrderQty ?? inst.lotSizeFilter?.maxOrderQty ?? '';
 
@@ -142,10 +146,9 @@ export class FundingScanner {
 
   /**
    * Cross-exchange scanner: single source of truth. Iterate Bybit tokens; keep only symbols in binanceDataMap.
-   * netSpread = Math.abs(Number(binance.fundingRate) - Number(bybit.fundingRate)).
-   * hedgeDirection: BinanceFR > BybitFR -> 'Short Binance / Long Bybit', else 'Short Bybit / Long Binance'.
-   * Trust Bybit's fundingInterval and nextFundingTime as primary time source.
-   * CRITICAL SORT: fundingInterval ASC (e.g. 1h before 4h), then netSpread DESC (highest first).
+   * STRICT MATCHING: only include token if bybitInterval === binanceInterval (ms) AND |bybitNextFundingTime - binanceNextFundingTime| < 60s.
+   * netSpread = Math.abs(binance.fundingRate - bybit.fundingRate). Pass verified interval so Scanner UI shows correct badge (e.g. 4H, 8H).
+   * CRITICAL SORT: fundingInterval ASC, then netSpread DESC.
    */
   async getCrossExchangeFundingData(filters?: FundingDataFilters): Promise<FundingDataItem[]> {
     const [bybitItems, binanceDataMap] = await Promise.all([
@@ -154,10 +157,20 @@ export class FundingScanner {
     ]);
 
     const merged: FundingDataItem[] = [];
+    const oneHourMs = 3600000;
+    const maxFundingTimeDriftMs = 60000;
 
     for (const bybitToken of bybitItems) {
       const binanceData = binanceDataMap.get(bybitToken.symbol);
       if (!binanceData) continue;
+
+      const bybitIntervalMs = (bybitToken.fundingIntervalHours ?? 0) * oneHourMs;
+      const binanceIntervalMs = binanceIntervalCache[bybitToken.symbol];
+      if (binanceIntervalMs == null || bybitIntervalMs !== binanceIntervalMs) continue;
+
+      const bybitNextMs = Number(bybitToken.nextFundingTime) || 0;
+      const binanceNextMs = binanceData.nextFundingTime ?? 0;
+      if (Math.abs(bybitNextMs - binanceNextMs) >= maxFundingTimeDriftMs) continue;
 
       const bybitFr = Number(bybitToken.fundingRate);
       const binanceFr = Number(binanceData.fundingRate);
@@ -165,14 +178,12 @@ export class FundingScanner {
       const hedgeDirection =
         binanceFr > bybitFr ? 'Short Binance / Long Bybit' : 'Short Bybit / Long Binance';
 
-      const bybitNextMs = Number(bybitToken.nextFundingTime) || 0;
-
       merged.push({
         ...bybitToken,
         binanceFundingRate: binanceFr,
         binanceIntervalHours: bybitToken.fundingIntervalHours,
         binanceMarkPrice: parseFloat(binanceData.markPrice) || undefined,
-        binanceNextFundingTime: bybitNextMs || undefined,
+        binanceNextFundingTime: binanceNextMs,
         netSpread: calculatedSpread,
         hedgeDirection,
       });

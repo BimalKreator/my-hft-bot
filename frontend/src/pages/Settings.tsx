@@ -806,22 +806,21 @@ export default function Settings() {
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-1">Target Profit Multiplier (Cross-Exchange)</label>
-              <select
+              <input
+                type="number"
+                step="0.01"
+                min="0"
                 value={String(settings.targetProfitMultiplier ?? 1)}
                 onChange={(e) => {
                   const v = parseFloat(e.target.value);
-                  if (!Number.isNaN(v) && v >= 0.1) {
+                  if (!Number.isNaN(v) && v >= 0) {
                     setSettings((s) => (s ? { ...s, targetProfitMultiplier: v } : s));
                     debouncedSave({ targetProfitMultiplier: v });
                   }
                 }}
                 className="w-full rounded-lg border bg-black/50 px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-[#007BFF]"
                 style={{ borderColor: 'rgba(0, 123, 255, 0.3)' }}
-              >
-                {[0.5, 0.8, 1.0, 1.2, 1.5, 2.0].map((n) => (
-                  <option key={n} value={String(n)}>{n}</option>
-                ))}
-              </select>
+              />
               <p className="text-xs text-gray-500 mt-1">Multiplier for target PnL exit: targetPnL = positionValue × |BinanceFR − BybitFR| × multiplier (default 1.0)</p>
             </div>
             {balanceStats != null && (

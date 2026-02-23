@@ -62,6 +62,13 @@ export async function formatBinanceOrderParams(
 
 const BINANCE_BASE = 'fapi.binance.com';
 const PREMIUM_INDEX_URL = `https://${BINANCE_BASE}/fapi/v1/premiumIndex`;
+const FUNDING_INFO_URL = `https://${BINANCE_BASE}/fapi/v1/fundingInfo`;
+
+/** In-memory cache: symbol -> funding interval in milliseconds (for strict cross-exchange matching). */
+export const binanceIntervalCache: Record<string, number> = {};
+
+/** Previous nextFundingTime per symbol for dynamic interval detection when a funding cycle completes. */
+const previousBinanceNextFundingTime: Record<string, number> = {};
 
 /** Keep-alive agent for low-latency signed REST (order/balance). */
 const keepAliveAgent = new https.Agent({
@@ -85,7 +92,7 @@ const cache = new Map<string, BinanceSymbolData>();
 let ws: WebSocket | null = null;
 let restPromise: Promise<void> | null = null;
 
-/** Binance USDT-M: support 1h, 2h, 4h, 8h, 24h. Deduce from nextFundingTime (UTC timestamp). */
+/** Binance USDT-M: support 1h, 2h, 4h, 8h, 24h. Deduce from nextFundingTime (UTC timestamp). Fallback when cache missing. */
 function deduceIntervalHours(nextFundingTimeMs: number, _serverTimeMs: number): number {
   const oneHourMs = 3600000;
   const twoHoursMs = 2 * oneHourMs;
@@ -105,18 +112,46 @@ function deduceIntervalHours(nextFundingTimeMs: number, _serverTimeMs: number): 
   return 8;
 }
 
+/** Fetch funding interval per symbol from Binance REST and populate binanceIntervalCache (ms). Call once at backend start. */
+export async function fetchBinanceFundingInfo(): Promise<void> {
+  try {
+    const res = await fetch(FUNDING_INFO_URL);
+    if (!res.ok) throw new Error(`fundingInfo ${res.status}`);
+    const raw = (await res.json()) as FundingInfoRow | FundingInfoRow[];
+    const rows = Array.isArray(raw) ? raw : [raw];
+    const oneHourMs = 3600000;
+    for (const row of rows) {
+      const symbol = String(row?.symbol ?? '');
+      if (!symbol) continue;
+      const hours = Number((row as { fundingIntervalHours?: number }).fundingIntervalHours ?? (row as { fundingInterval?: number }).fundingInterval ?? 8);
+      binanceIntervalCache[symbol] = hours * oneHourMs;
+    }
+    console.log('[binanceService] fetchBinanceFundingInfo: loaded', Object.keys(binanceIntervalCache).length, 'symbols');
+  } catch (e) {
+    console.warn('[binanceService] fetchBinanceFundingInfo failed:', e instanceof Error ? e.message : String(e));
+  }
+}
+
+interface FundingInfoRow {
+  symbol?: string;
+  fundingIntervalHours?: number;
+  fundingInterval?: number;
+}
+
 async function fetchPremiumIndex(): Promise<void> {
   const res = await fetch(PREMIUM_INDEX_URL);
   if (!res.ok) throw new Error(`Binance premiumIndex failed: ${res.status}`);
   const raw = (await res.json()) as PremiumIndexRow | PremiumIndexRow[];
   const rows = Array.isArray(raw) ? raw : [raw];
   const now = Date.now();
+  const oneHourMs = 3600000;
   for (const row of rows) {
     const symbol = String(row.symbol ?? '');
     if (!symbol) continue;
     const nextFundingTime = Number(row.nextFundingTime) || 0;
     const time = Number(row.time) ?? now;
-    const intervalHours = deduceIntervalHours(nextFundingTime, time);
+    const intervalMs = binanceIntervalCache[symbol];
+    const intervalHours = intervalMs != null ? intervalMs / oneHourMs : deduceIntervalHours(nextFundingTime, time);
     cache.set(symbol, {
       symbol,
       markPrice: String(row.markPrice ?? '0'),
@@ -140,17 +175,25 @@ export function startBinanceWebSocket(): void {
       const str = typeof raw === 'string' ? raw : raw.toString('utf8');
       const data = JSON.parse(str) as MarkPriceWsMessage | MarkPriceWsMessage[];
       const updates = Array.isArray(data) ? data : [data];
+      const oneHourMs = 3600000;
       for (const u of updates) {
         const symbol = u.s ?? '';
         if (!symbol) continue;
         const existing = cache.get(symbol);
-        const nextFundingTime = u.T ?? existing?.nextFundingTime ?? 0;
-        const intervalHours = existing?.fundingIntervalHours ?? 8;
+        const newNextFundingTime = u.T ?? existing?.nextFundingTime ?? 0;
+        const prev = previousBinanceNextFundingTime[symbol];
+        if (prev != null && newNextFundingTime > prev) {
+          const dynamicIntervalMs = newNextFundingTime - prev;
+          binanceIntervalCache[symbol] = dynamicIntervalMs;
+        }
+        previousBinanceNextFundingTime[symbol] = newNextFundingTime;
+        const intervalMs = binanceIntervalCache[symbol];
+        const intervalHours = intervalMs != null ? intervalMs / oneHourMs : (existing?.fundingIntervalHours ?? 8);
         cache.set(symbol, {
           symbol,
           markPrice: String(u.p ?? existing?.markPrice ?? '0'),
           fundingRate: parseFloat(String(u.r ?? existing?.fundingRate ?? 0)),
-          nextFundingTime,
+          nextFundingTime: newNextFundingTime,
           fundingIntervalHours: intervalHours,
         });
       }

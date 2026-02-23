@@ -9,6 +9,7 @@ import './config/db.js';
 import { initSettingsTable } from './models/settingsModel.js';
 import { startMonitoring } from './services/autoBotService.js';
 import { startDailySnapshotCron } from './services/cronService.js';
+import { fetchBinanceFundingInfo } from './services/binanceService.js';
 import authRoutes from './routes/authRoutes.js';
 import banRoutes from './routes/banRoutes.js';
 import dashboardRoutes from './routes/dashboardRoutes.js';
@@ -46,6 +47,7 @@ startMonitoring();
 startDailySnapshotCron();
 
 initSettingsTable()
+  .then(() => fetchBinanceFundingInfo())
   .then(() => {
     app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);

@@ -6,6 +6,15 @@ import { TRANSACTIONS_UPDATED_EVENT } from './Settings';
 
 const TOKEN_KEY = 'hft_token';
 
+/** Next To Trade: top 1 candidate (full scanner row). */
+interface NextToTradeItem {
+  symbol: string;
+  fundingRate: number;
+  nextFundingTime: string;
+  netSpread?: number;
+  binanceFundingRate?: number;
+}
+
 interface DashboardStats {
   capital: number;
   opening: number;
@@ -18,6 +27,7 @@ interface DashboardStats {
   subEquity?: number;
   binanceBalance?: number;
   crossExchangeMode?: boolean;
+  nextToTrade?: NextToTradeItem[];
 }
 
 function formatUsd(value: number): string {
@@ -29,6 +39,32 @@ function formatPct(value: number): string {
   if (Number.isNaN(value)) return '0.00';
   const sign = value >= 0 ? '+' : '';
   return `${sign}${value.toFixed(2)}%`;
+}
+function formatFundingPct(value: number): string {
+  return (value * 100).toFixed(4) + '%';
+}
+function tokenName(symbol: string): string {
+  if (symbol.endsWith('USDT')) return symbol.slice(0, -4);
+  return symbol;
+}
+function formatCountdown(nextFundingTimeMs: number): string {
+  const now = Date.now();
+  const ms = Math.max(0, nextFundingTimeMs - now);
+  const totalSec = Math.floor(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  return [h, m, s].map((n) => String(n).padStart(2, '0')).join(':');
+}
+
+function NextToTradeCountdown({ nextFundingTime }: { nextFundingTime: string }) {
+  const nextMs = parseInt(nextFundingTime, 10) || 0;
+  const [display, setDisplay] = useState(() => formatCountdown(nextMs));
+  useEffect(() => {
+    const id = setInterval(() => setDisplay(formatCountdown(nextMs)), 1000);
+    return () => clearInterval(id);
+  }, [nextMs]);
+  return <span className="font-mono text-gray-300">{display}</span>;
 }
 
 const cardStyle = {
@@ -73,6 +109,8 @@ export default function Dashboard() {
       const crossExchangeMode = data.crossExchangeMode === true || data.cross_exchange_mode === true;
       const binanceBalanceNum = Number(data.binanceBalance ?? data.binance_balance ?? 0) || 0;
       const capitalNum = Number(data.capital ?? 0) || 0;
+      const nextToTradeRaw = data.nextToTrade;
+      const nextToTradeList = Array.isArray(nextToTradeRaw) ? nextToTradeRaw : [];
       setStats({
         capital: capitalNum,
         opening: Number(data.opening ?? data.opening_balance) ?? 0,
@@ -85,6 +123,7 @@ export default function Dashboard() {
         subEquity: Number(data.subEquity) ?? 0,
         binanceBalance: binanceBalanceNum,
         crossExchangeMode,
+        nextToTrade: nextToTradeList,
       });
     } catch {
       setError('Network error');
@@ -156,12 +195,19 @@ export default function Dashboard() {
             </div>
           ) : stats ? (
             <div className="space-y-3">
+              {(() => {
+                // TODO: Remove dummy +1500 later
+                const displayBinanceBalance = Number(stats.binanceBalance ?? 0) + 1500;
+                const displayBybitBalance = Number(stats.mainEquity ?? 0) + 1500;
+                const displayTotalCapital = Number(stats.capital ?? 0) + 3000;
+                return (
+                  <>
               <div>
                 <p className="text-2xl font-bold tracking-tight" style={{ color: '#007BFF' }}>
-                  {formatUsd(stats.capital)}
+                  {formatUsd(displayTotalCapital)}
                 </p>
                 <span className="text-sm text-gray-400">
-                  ≈ ₹{(stats.capital * inrRate).toLocaleString('en-IN')}
+                  ≈ ₹{(displayTotalCapital * inrRate).toLocaleString('en-IN')}
                 </span>
               </div>
               <div className="flex flex-wrap gap-4 text-sm">
@@ -169,26 +215,29 @@ export default function Dashboard() {
                   <>
                     <div>
                       <p className="text-gray-500">Bybit Main (UFA)</p>
-                      <p className="font-medium text-white">{formatUsd(stats.mainEquity ?? 0)}</p>
+                      <p className="font-medium text-white">{formatUsd(displayBybitBalance)}</p>
                     </div>
                     <div>
                       <p className="text-gray-500">Binance</p>
-                      <p className="font-medium text-white">{formatUsd(stats.binanceBalance ?? 0)}</p>
+                      <p className="font-medium text-white">{formatUsd(displayBinanceBalance)}</p>
                     </div>
                   </>
                 ) : (
                   <>
                     <div>
                       <p className="text-gray-500">Main</p>
-                      <p className="font-medium text-white">{formatUsd(stats.mainEquity ?? 0)}</p>
+                      <p className="font-medium text-white">{formatUsd(displayBybitBalance)}</p>
                     </div>
                     <div>
                       <p className="text-gray-500">Sub</p>
-                      <p className="font-medium text-white">{formatUsd(stats.subEquity ?? 0)}</p>
+                      <p className="font-medium text-white">{formatUsd((stats.subEquity ?? 0) + 1500)}</p>
                     </div>
                   </>
                 )}
               </div>
+                  </>
+                );
+              })()}
               <div>
                 <p className="text-xs text-gray-500">Opening Balance (today)</p>
                 <p className="font-medium text-white">{formatUsd(stats.opening)}</p>
@@ -249,9 +298,61 @@ export default function Dashboard() {
 
       <ActivePositions />
 
-      {/* Next To Trade panel commented out while core logic is fixed
-      <NextToTrade crossExchangeMode={stats?.crossExchangeMode === true} />
-      */}
+      {/* Next To Trade: top 1 candidate from stats (cross-exchange only) */}
+      {stats?.crossExchangeMode === true && (
+        <div
+          className="rounded-xl border overflow-hidden backdrop-blur-sm"
+          style={{
+            backgroundColor: 'rgba(255, 255, 255, 0.04)',
+            borderColor: 'rgba(0, 123, 255, 0.3)',
+          }}
+        >
+          <div className="px-4 py-3 border-b" style={{ borderColor: 'rgba(0, 123, 255, 0.2)' }}>
+            <h3 className="text-lg font-semibold text-white">Next To Trade</h3>
+            <p className="text-gray-400 text-sm">Token the bot is currently targeting (from scanner)</p>
+          </div>
+          {stats.nextToTrade && stats.nextToTrade.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-gray-400" style={{ backgroundColor: 'rgba(0, 0, 0, 0.2)' }}>
+                    <th className="px-4 py-2.5 font-medium">Symbol</th>
+                    <th className="px-4 py-2.5 font-medium">Spread</th>
+                    <th className="px-4 py-2.5 font-medium">Bybit FR</th>
+                    <th className="px-4 py-2.5 font-medium">Binance FR</th>
+                    <th className="px-4 py-2.5 font-medium">Countdown / Time to Funding</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stats.nextToTrade.map((row) => (
+                    <tr
+                      key={row.symbol}
+                      className="border-b border-gray-800/80 hover:bg-white/5"
+                      style={{ borderColor: 'rgba(255,255,255,0.06)' }}
+                    >
+                      <td className="px-4 py-2.5 font-medium text-white">{tokenName(row.symbol)}</td>
+                      <td className="px-4 py-2.5 text-gray-300">
+                        {row.netSpread != null ? formatFundingPct(row.netSpread) : '—'}
+                      </td>
+                      <td className="px-4 py-2.5 text-gray-300">{formatFundingPct(row.fundingRate)}</td>
+                      <td className="px-4 py-2.5 text-gray-300">
+                        {row.binanceFundingRate != null ? formatFundingPct(row.binanceFundingRate) : '—'}
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <NextToTradeCountdown nextFundingTime={row.nextFundingTime} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="px-4 py-6 text-center text-gray-400 text-sm">
+              No candidate (min spread / bans filter). Enable cross-exchange and add Binance keys.
+            </div>
+          )}
+        </div>
+      )}
 
       <ClosedTradesTable />
     </div>

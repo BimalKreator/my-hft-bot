@@ -6,6 +6,7 @@ import { getWalletBalance } from './bybitService.js';
 import { getBinanceAvailableBalance } from './binanceService.js';
 import { getCrossExchangeFundingData } from './marketService.js';
 import { getBannedTokens } from '../models/bannedTokensModel.js';
+import type { FundingDataItem } from './scannerService.js';
 
 /** Decrypt if possible; if decrypt throws (e.g. value was saved as plain text), return raw string. */
 function tryDecrypt(value: string): string {
@@ -37,12 +38,6 @@ function yesterdayIST(): string {
   return d2.toLocaleDateString('en-CA');
 }
 
-export interface NextToTradeItem {
-  symbol: string;
-  netSpread: number;
-  fundingRate: number;
-}
-
 export interface DashboardStats {
   capital: number;
   opening: number;
@@ -57,8 +52,8 @@ export interface DashboardStats {
   binanceBalance?: number;
   /** When true, capital = mainEquity + binanceBalance (+ base). */
   crossExchangeMode?: boolean;
-  /** When cross-exchange: top tokens from getCrossExchangeFundingData (symbol, netSpread, fundingRate). */
-  nextToTrade?: NextToTradeItem[];
+  /** When cross-exchange: top 1 candidate from getCrossExchangeFundingData (full scanner row: symbol, spread, funding times, etc.). */
+  nextToTrade?: FundingDataItem[];
 }
 
 /**
@@ -205,11 +200,10 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
     ? percents.reduce((a, b) => a + b, 0) / percents.length
     : 0;
 
-  let nextToTrade: NextToTradeItem[] | undefined;
+  let nextToTrade: FundingDataItem[] | undefined;
   if (isCrossExchange) {
     try {
       const allCandidates = await getCrossExchangeFundingData();
-      const maxTrades = settings.maxTrades ?? 1;
       const minProfitDec = Number((settings as { min_funding_rate_profit?: number }).min_funding_rate_profit ?? settings.minFundingRate ?? 0) / 100;
       let bannedTokens: string[] = [];
       try {
@@ -223,12 +217,8 @@ export async function getDashboardStats(userId: number): Promise<DashboardStats 
         const spread = Number(c.netSpread ?? 0);
         return spread >= minProfitDec;
       });
-      const top = validCandidates.slice(0, maxTrades);
-      nextToTrade = top.map((t) => ({
-        symbol: t.symbol,
-        netSpread: t.netSpread ?? 0,
-        fundingRate: t.fundingRate,
-      }));
+      // Top 1 candidate only; return full token object (scanner columns: symbol, spread, funding times, etc.)
+      nextToTrade = validCandidates.slice(0, 1);
     } catch (e) {
       console.warn('[statsService] getCrossExchangeFundingData failed for nextToTrade:', e instanceof Error ? e.message : String(e));
     }

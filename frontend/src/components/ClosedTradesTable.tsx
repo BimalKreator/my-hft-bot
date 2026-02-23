@@ -85,6 +85,8 @@ function buildQuery(params: {
   return q ? `?${q}` : '';
 }
 
+const ITEMS_PER_PAGE = 10;
+
 export default function ClosedTradesTable() {
   const [rows, setRows] = useState<ClosedTradeRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -94,6 +96,7 @@ export default function ClosedTradesTable() {
   const [toDate, setToDate] = useState('');
   const [profitOnly, setProfitOnly] = useState(false);
   const [lossOnly, setLossOnly] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
 
   const fetchHistory = useCallback(async (silent = false) => {
     const auth = localStorage.getItem(TOKEN_KEY);
@@ -122,6 +125,7 @@ export default function ClosedTradesTable() {
         return;
       }
       setRows(Array.isArray(data) ? data : []);
+      setCurrentPage(1);
     } catch {
       setError('Network error');
       setRows([]);
@@ -250,6 +254,7 @@ export default function ClosedTradesTable() {
           />
         </div>
       ) : (
+        <>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
@@ -267,14 +272,18 @@ export default function ClosedTradesTable() {
               </tr>
             </thead>
             <tbody>
-              {rows.length === 0 ? (
+              {(() => {
+                const indexOfLastItem = currentPage * ITEMS_PER_PAGE;
+                const indexOfFirstItem = indexOfLastItem - ITEMS_PER_PAGE;
+                const currentItems = rows.slice(indexOfFirstItem, indexOfLastItem);
+                return rows.length === 0 ? (
                 <tr>
                   <td colSpan={10} className="px-4 py-8 text-center text-gray-400">
                     No closed trades match the filters.
                   </td>
                 </tr>
               ) : (
-                rows.map((r) => {
+                currentItems.map((r) => {
                   const netPnl = parseFloat(r.net_pnl) || 0;
                   const isProfit = netPnl >= 0;
                   const direction = r.side === 'Buy' ? 'LONG' : 'SHORT';
@@ -354,11 +363,39 @@ export default function ClosedTradesTable() {
                       </td>
                     </tr>
                   );
-                })
-              )}
+                });
+              })()}
             </tbody>
           </table>
         </div>
+        {rows.length > 0 && (
+          <div className="px-4 py-3 border-t flex items-center justify-between gap-4" style={{ borderColor: 'rgba(0, 123, 255, 0.2)' }}>
+            <span className="text-sm text-gray-400">
+              Page {currentPage} of {Math.max(1, Math.ceil(rows.length / ITEMS_PER_PAGE))} ({rows.length} trades)
+            </span>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                disabled={currentPage <= 1}
+                className="rounded-lg px-3 py-1.5 text-sm font-medium text-white border transition disabled:opacity-50 disabled:cursor-not-allowed"
+                style={{ backgroundColor: '#007BFF', borderColor: 'rgba(0, 123, 255, 0.5)' }}
+              >
+                Previous
+              </button>
+              <button
+                type="button"
+                onClick={() => setCurrentPage((p) => p + 1)}
+                disabled={currentPage >= Math.ceil(rows.length / ITEMS_PER_PAGE)}
+                className="rounded-lg px-3 py-1.5 text-sm font-medium text-white border transition disabled:opacity-50 disabled:cursor-not-allowed"
+                style={{ backgroundColor: '#007BFF', borderColor: 'rgba(0, 123, 255, 0.5)' }}
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        )}
+        </>
       )}
     </div>
   );
