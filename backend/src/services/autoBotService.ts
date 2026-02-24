@@ -49,6 +49,7 @@ import {
   deleteHedgeGroup,
 } from '../models/hedgeGroupModel.js';
 import { insertTradeHistoryEntry, updateTradeHistoryBinanceEntry } from '../models/tradeHistoryModel.js';
+import { insertLog } from '../models/logModel.js';
 
 /** Decrypt if possible; if decrypt throws (e.g. malformed UTF-8 or value saved as plain text), return raw string. Used for Binance keys so execution does not crash. */
 function tryDecrypt(val: string | undefined | null): string {
@@ -762,7 +763,10 @@ async function runTick(): Promise<number> {
     // Bot and Scanner share the same source (getCrossExchangeFundingData) and sort (interval asc, netSpread desc). Top token here = Scanner top.
     const topCandidates = marketData;
     if (topCandidates.length > 0) {
-      console.log(`[DEBUG] Bot Targeting Top Candidate: ${topCandidates[0]!.symbol} | Spread: ${(topCandidates[0] as MarketTicker & { netSpread?: number }).netSpread ?? 'N/A'}`);
+      const first = topCandidates[0]!;
+      const spreadVal = (first as MarketTicker & { netSpread?: number }).netSpread ?? 'N/A';
+      console.log(`[DEBUG] Bot Targeting Top Candidate: ${first.symbol} | Spread: ${spreadVal}`);
+      insertLog('SELECTION', first.symbol, `Targeting candidate. Spread: ${spreadVal}`).catch(() => {});
     } else {
       console.log('[DEBUG] topCandidates list is EMPTY!');
     }
@@ -1085,9 +1089,11 @@ async function monitorExits(): Promise<void> {
                 else if (exitReason === 'Post-Funding Profit') console.log('[EXIT] Post-Funding Profit |', pos.symbol);
                 else if (exitReason === '15m Pre-Next Funding') console.log('[EXIT] Time limit hit (15 mins before next funding) for', pos.symbol + '.');
                 else console.log('[EXIT] PnL Positive Exit |', pos.symbol);
+                insertLog('EXIT', pos.symbol, `Reason: ${exitReason}.`).catch(() => {});
                 return true;
               } catch (e) {
                 console.error(`[autoBot] Sub-hedge exit failed ${pos.symbol}:`, e);
+                insertLog('ERROR', pos.symbol, e instanceof Error ? e.message : String(e)).catch(() => {});
                 return false;
               }
             };
@@ -1194,6 +1200,7 @@ async function monitorExits(): Promise<void> {
             // Orphan: Bybit has position but Binance position is 0 — immediately IOC exit Bybit (no fallback SL)
             if (binancePosition.positionAmt === 0) {
               console.log('[autoBot] Orphan detected in Cross-Exchange. Instantly exiting the filled side via IOC.');
+              insertLog('EXIT', pos.symbol, 'Reason: Orphan Exit (Binance side closed).').catch(() => {});
               try {
                 const orderIds = await exitPositionWithIocSweep(apiKey, apiSecret, pos.symbol, pos.side, qty);
                 positionFundingTime.delete(key);
@@ -1204,6 +1211,7 @@ async function monitorExits(): Promise<void> {
                 }
               } catch (e) {
                 console.error(`[autoBot] Cross-exchange orphan exit failed ${pos.symbol}:`, e);
+                insertLog('ERROR', pos.symbol, e instanceof Error ? e.message : String(e)).catch(() => {});
               }
               continue;
             }
@@ -1236,9 +1244,11 @@ async function monitorExits(): Promise<void> {
                   console.error(`[autoBot] saveClosedTrade (Binance cross-exchange) failed ${pos.symbol}:`, e)
                 );
                 console.log('[EXIT] Cross-Exchange Exit (SL/Breakeven) |', pos.symbol);
+                insertLog('EXIT', pos.symbol, 'Reason: Cross-Exchange Exit (SL/Breakeven).').catch(() => {});
                 return true;
               } catch (e) {
                 console.error(`[autoBot] Cross-exchange exit failed ${pos.symbol}:`, e);
+                insertLog('ERROR', pos.symbol, e instanceof Error ? e.message : String(e)).catch(() => {});
                 return false;
               }
             };
@@ -2148,12 +2158,14 @@ async function processUserCritical(
     executionImminentUntilMs = Math.max(executionImminentUntilMs, fundingTimeMs + 2000);
     const prepData: ExecuteEntryPrepData = { prep, candidate: c };
     const t = setTimeout(() => {
-      executeEntry(userId, c.symbol, c.nextFundingTime, undefined, prepData).catch((e) =>
-        console.error('[autoBot] executeEntry failed', e)
-      );
+      executeEntry(userId, c.symbol, c.nextFundingTime, undefined, prepData).catch((e) => {
+        console.error('[autoBot] executeEntry failed', e);
+        insertLog('ERROR', c.symbol, e instanceof Error ? e.message : String(e)).catch(() => {});
+      });
     }, Math.max(0, delayMs));
     entryTimeoutByCycle.set(cycleKey, t);
     console.log(`[autoBot] Entry scheduled exactly at ${exactEntryTimeMs} (in ${delayMs}ms).`);
+    insertLog('INFO', c.symbol, `Countdown: ${delayMs}ms. Entry scheduled.`).catch(() => {});
   }
 }
 
@@ -2668,6 +2680,7 @@ async function processUser(
             );
           }, delaySub);
           console.log(`[autoBot] Sub-hedge entry scheduled: main in ${delayMs}ms, sub in ${delaySub}ms.`);
+          insertLog('INFO', topToken.symbol, `Sub-hedge entry scheduled: main in ${delayMs}ms, sub in ${delaySub}ms.`).catch(() => {});
           entryTimeoutByCycle.set(cycleKey, { main: tMain, sub: tSub });
         } else if (settings.crossExchangeMode && passedData?.candidate?.fixedQty != null) {
           const tBoth = setTimeout(() => {
@@ -2678,6 +2691,7 @@ async function processUser(
             ]).catch((err) => console.error('[autoBot] Cross-Exchange Execution Error:', err));
           }, delayMs);
           console.log(`[autoBot] Cross-exchange entry scheduled: both legs in ${delayMs}ms (simultaneous).`);
+          insertLog('INFO', topToken.symbol, `Cross-exchange entry scheduled: both legs in ${delayMs}ms.`).catch(() => {});
           entryTimeoutByCycle.set(cycleKey, { main: tBoth, binance: tBoth });
         } else {
           const tMain = setTimeout(() => {
@@ -2686,6 +2700,7 @@ async function processUser(
             );
           }, delayMs);
           console.log(`[autoBot] Entry scheduled for Main (hedge_mode: false) in ${delayMs}ms.`);
+          insertLog('INFO', topToken.symbol, `Entry scheduled for Main in ${delayMs}ms.`).catch(() => {});
           entryTimeoutByCycle.set(cycleKey, tMain);
         }
         return;
@@ -3069,6 +3084,7 @@ async function processUser(
               console.log('[DEBUG PAYLOAD]', { symbol: topToken.symbol, side, orderType: 'Limit', timeInForce: 'IOC', qty: qtyStr, price: priceStr });
               const response = await placeLimitOrder(apiKey, apiSecret, topToken.symbol, side, qtyStr, priceStr, 'IOC');
               console.log('[DEBUG SUCCESS] Order Placed:', response);
+              insertLog('ENTRY', topToken.symbol, 'Order successfully placed on exchange.').catch(() => {});
               await new Promise((r) => setTimeout(r, IOC_RETRY_DELAY_MS));
               const executions = await getExecutionList(apiKey, apiSecret, 'linear', response.orderId);
               const filledQty = executions.reduce((s, e) => s + (parseFloat(e.execQty) || 0), 0);

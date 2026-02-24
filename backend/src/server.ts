@@ -7,6 +7,7 @@ dns.setDefaultResultOrder('ipv4first');
 
 import './config/db.js';
 import { initSettingsTable, initTradeHistoryTable, initClosedTradesExchangeColumn, initDailySnapshotsBinanceColumn } from './models/settingsModel.js';
+import { initBotLogsTable, deleteOldLogs } from './models/logModel.js';
 import { startMonitoring } from './services/autoBotService.js';
 import { startDailySnapshotCron } from './services/cronService.js';
 import { fetchBinanceFundingInfo } from './services/binanceService.js';
@@ -21,6 +22,7 @@ import statsRoutes from './routes/statsRoutes.js';
 import positionRoutes from './routes/positionRoutes.js';
 import tradeRoutes from './routes/tradeRoutes.js';
 import transactionRoutes from './routes/transactionRoutes.js';
+import logRoutes from './routes/logRoutes.js';
 
 dotenv.config();
 
@@ -43,6 +45,7 @@ app.use('/api/stats', statsRoutes);
 app.use('/api/positions', positionRoutes);
 app.use('/api/trade', tradeRoutes);
 app.use('/api/transactions', transactionRoutes);
+app.use('/api/logs', logRoutes);
 
 startMonitoring();
 startDailySnapshotCron();
@@ -51,11 +54,17 @@ initSettingsTable()
   .then(() => initTradeHistoryTable())
   .then(() => initClosedTradesExchangeColumn())
   .then(() => initDailySnapshotsBinanceColumn())
+  .then(() => initBotLogsTable())
   .then(() => fetchBinanceFundingInfo())
   .then(() => startPositionStreamForOrphanExit())
   .then(() => {
     app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);
+      setInterval(() => {
+        deleteOldLogs()
+          .then((n) => n > 0 && console.log(`[logs] Deleted ${n} old bot_logs entries.`))
+          .catch((e) => console.warn('[logs] deleteOldLogs failed:', e instanceof Error ? e.message : e));
+      }, 60 * 60 * 1000);
     });
   })
   .catch((e) => {

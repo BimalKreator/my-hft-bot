@@ -7,6 +7,7 @@ import ExchangeSetup from './pages/ExchangeSetup';
 import BotStatus from './pages/BotStatus';
 import Scanner from './pages/Scanner';
 import Settings from './pages/Settings';
+import Logs from './pages/Logs';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { token } = useAuth();
@@ -45,6 +46,7 @@ export default function App() {
         <Route path="bot" element={<BotStatus />} />
         <Route path="scanner" element={<Scanner />} />
         <Route path="settings" element={<Settings />} />
+        <Route path="logs" element={<Logs />} />
       </Route>
       {/* Any other path → redirect to login (default page) */}
       <Route path="*" element={<Navigate to="/login" replace />} />
