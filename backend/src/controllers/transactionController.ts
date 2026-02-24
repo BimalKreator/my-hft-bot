@@ -4,6 +4,26 @@ import { AuthRequest } from '../middleware/authMiddleware.js';
 
 const IST = 'Asia/Kolkata';
 
+/**
+ * Ensure deposits_withdrawals table exists at startup (in case db:init was not run).
+ */
+export async function initDepositsWithdrawalsTable(): Promise<void> {
+  try {
+    await query(`
+      CREATE TABLE IF NOT EXISTS deposits_withdrawals (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        date DATE NOT NULL,
+        type TEXT NOT NULL CHECK (type IN ('DEPOSIT', 'WITHDRAWAL')),
+        amount NUMERIC NOT NULL DEFAULT 0,
+        note TEXT
+      )
+    `);
+  } catch (err) {
+    console.error('[Database] Error ensuring deposits_withdrawals table:', err);
+  }
+}
+
 function todayIST(): string {
   return new Date().toLocaleDateString('en-CA', { timeZone: IST });
 }

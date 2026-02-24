@@ -7,6 +7,7 @@ dns.setDefaultResultOrder('ipv4first');
 
 import './config/db.js';
 import { initSettingsTable, initTradeHistoryTable, initClosedTradesExchangeColumn, initDailySnapshotsBinanceColumn } from './models/settingsModel.js';
+import { initDepositsWithdrawalsTable } from './controllers/transactionController.js';
 import { initBotLogsTable, deleteOldLogs } from './models/logModel.js';
 import { startMonitoring } from './services/autoBotService.js';
 import { startDailySnapshotCron } from './services/cronService.js';
@@ -54,6 +55,7 @@ initSettingsTable()
   .then(() => initTradeHistoryTable())
   .then(() => initClosedTradesExchangeColumn())
   .then(() => initDailySnapshotsBinanceColumn())
+  .then(() => initDepositsWithdrawalsTable())
   .then(() => initBotLogsTable())
   .then(() => fetchBinanceFundingInfo())
   .then(() => startPositionStreamForOrphanExit())
